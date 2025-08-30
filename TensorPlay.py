@@ -1047,9 +1047,9 @@ class Module(Layer):
         named_param = []
         prefix = prefix + ('.' if prefix else '')
         for name, l in self.layers.items():
-            named_param.append((prefix + name, l))
+            named_param.append((prefix + name, l, sum([len(i) for i in l.param()])))
         for name, p in self.parameters.items():
-            named_param.append((prefix + name, p))
+            named_param.append((prefix + name, p, sum([len(i) for i in l.param()])))
         for name, m in self.modules.items():
             named_param.extend(m.named_params(prefix + name))
         return named_param
@@ -1110,6 +1110,104 @@ class Module(Layer):
             if text[i]["type"] != str(layer[i][1]):
                 raise ValueError(f"Layers type mismatched: expect {layer[i][1]}, got {text[i]['type']}!")
             layer[i][1].load(text[i]["params"])
+
+    @staticmethod
+    def _get_layer_info(layer):
+        layer_type = str(layer).split(".")[-1]
+        if layer_type == "Dense":
+            return None, len(layer.w)
+        elif layer_type == "Conv2D":
+            return "Conv2D"
+        elif layer_type == "AveragePooling2D":
+            return "AveragePooling2D"
+        elif layer_type == "Flatten":
+            return "Flatten"
+        else:
+            return (None,)
+
+    def summary(self):
+        """打印模型摘要，包括各层类型、输出形状和参数"""
+        # 收集层信息的列表
+        layer = self.named_params()
+        layers_info = []
+        total_params = 0
+        trainable_params = 0
+        for p in layer:
+            total_params += p[2]
+            if p[1].training:
+                trainable_params += p[2]
+            out_shape = Module._get_layer_info(p[1])
+            layers_info.append({
+                "name": p[0],
+                "type": str(p[1]).split(".")[-1],
+                "output_shape": out_shape,
+                "params": p[2]
+            })
+
+        max_name_len = max(len(f"{info['name']} ({info['type']})") for info in layers_info) + 4  # 增加4以留出边距
+        max_shape_len = max(len(str(info["output_shape"])) for info in layers_info) + 4
+        max_param_len = max(len(str(info["params"])) for info in layers_info) + 4
+
+        # tf表头的奇怪配比（21、12、8）
+        header_name_len = len("Layer (type)") + 21
+        header_shape_len = len("Output Shape") + 12
+        header_param_len = len("Param #") + 8
+
+        max_name_len = max(max_name_len, header_name_len)
+        max_shape_len = max(max_shape_len, header_shape_len)
+        max_param_len = max(max_param_len, header_param_len)
+
+        # 打印表头
+        print(f"Model: \"{self.__class__.__name__}\"")
+        print(f"┌{'─' * max_name_len}┬{'─' * max_shape_len}┬{'─' * max_param_len}┐")
+
+        header = (f"│ {'Layer (type)':<{max_name_len - 2}} "
+                  f"│ {'Output Shape':<{max_shape_len - 2}} "
+                  f"│ {'Param #':>{max_param_len - 2}} │")
+        print(header)
+
+        # 打印分隔线
+        print(f"├{'─' * max_name_len}┼{'─' * max_shape_len}┼{'─' * max_param_len}┤")
+
+        # 打印各层信息
+        for i, info in enumerate(layers_info):
+            layer = f"{info['name']} ({info['type']})"
+            shape = str(info['output_shape'])
+            param = f"{info['params']:,}"  # 层参数添加千位分隔符
+
+            row = (f"│ {layer:<{max_name_len - 2}} "
+                   f"│ {shape:<{max_shape_len - 2}} "
+                   f"│ {param:>{max_param_len - 2}} │")  # 参数右对齐更易读
+            print(row)
+            if i < len(layers_info) - 1:
+                print(f"├{'─' * max_name_len}┼{'─' * max_shape_len}┼{'─' * max_param_len}┤")
+
+        # 打印底部边框
+        line = f"└{'─' * max_name_len}┴{'─' * max_shape_len}┴{'─' * max_param_len}┘"
+        print(line)
+
+        # 计算参数占用空间（float32）
+        total_kb = total_params * 4 / 1024
+        trainable_kb = trainable_params * 4 / 1024
+        non_trainable = total_params - trainable_params
+        non_trainable_kb = non_trainable * 4 / 1024
+
+        def format_size(params):
+            """ 将参数数量转换为最合适的存储单位"""
+            # 计算总字节数（假设每个参数为float32，4字节）
+            bytes_size = params * 4
+            units = ['B', 'KB', 'MB', 'GB']
+            unit_index = 0
+            size = bytes_size
+            while size >= 1024 and unit_index < len(units) - 1:
+                size /= 1024
+                unit_index += 1
+            return f"{size:.2f} {units[unit_index]}"
+
+        # 打印总计信息，保持和表格对齐的缩进
+        print(f" Total params: {total_params:,} ({format_size(total_params)})")
+        print(f" Trainable params: {trainable_params:,} ({format_size(trainable_params)})")
+        print(f" Non-trainable params: {non_trainable:,} ({format_size(non_trainable)})")
 
 
 # 一些复杂结构的简单实现，用于实验，未更新到Module管理
