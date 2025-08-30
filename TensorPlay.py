@@ -1,6 +1,7 @@
 import ast
-import random
 import math
+import json
+import random
 
 
 class Vector(list):
@@ -190,6 +191,11 @@ class Tensor:
         return op.compute(self, start, end)
 
     @classmethod
+    def mean(cls, x: list['Tensor']):
+        op = Mean()
+        return op.compute(x)
+
+    @classmethod
     def connect(cls, x: list['Tensor']):
         op = Connect()
         return op.compute(x)
@@ -310,9 +316,16 @@ class Operator:
         """
         raise NotImplementedError
 
-    def propagate_grad(self):
-        """梯度反向传播，输入张量积累梯度"""
+    def _compute_grad(self):
+        """梯度具体计算，输入张量积累梯度"""
         raise NotImplementedError
+
+    def propagate_grad(self):
+        """梯度反向传播 + 反向钩子调用"""
+        self._compute_grad()
+        if hasattr(self.out, '_source_module'):
+            module = self.out._source_module
+            module._call_backward_hooks(self.out, self.inp)
 
     @classmethod
     def set_grad_enabled(cls, mode):
@@ -372,7 +385,7 @@ class Add(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 加法梯度反向传播：输入梯度+=输出梯度
         self.inp[0].grad += self.out.grad
         self.inp[1].grad += self.out.grad
@@ -390,7 +403,7 @@ class Sub(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 减法梯度反向传播：输入梯度+=输出梯度的正负数
         self.inp[0].grad += self.out.grad
         self.inp[1].grad -= self.out.grad
@@ -408,7 +421,7 @@ class Mul(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 乘法梯度反向传播：输入梯度+=输出*输入的函数
         self.inp[0].grad += self.inp[1].data * self.out.grad
         self.inp[1].grad += self.inp[0].data * self.out.grad
@@ -426,7 +439,7 @@ class Div(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 除法梯度反向传播：输入梯度+=输出*输入的函数
         self.inp[0].grad += (self.inp[1].data ** -1) * self.out.grad
         self.inp[1].grad += (-self.inp[0].data * self.inp[1].data ** -2) * self.out.grad
@@ -446,7 +459,7 @@ class Pow(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 输入梯度 += n * x ^ (n - 1) * 输出梯度
         self.inp.grad += self.power * self.inp.data ** (self.power - 1) * self.out.grad
 
@@ -463,7 +476,7 @@ class Exp(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 输入梯度 += e ^ x * 输出梯度 = 输出值 * 输出梯度
         self.inp.grad += self.out.data * self.out.grad
 
@@ -481,13 +494,13 @@ class Log(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 输入梯度 += (1 / x) * 输出梯度 = 输出梯度 * (输入值的倒数)
         self.inp.grad += self.out.grad * self.inp.data ** -1
 
 
 class Sum(Operator):
-    """求和运算符"""
+    """元素级求和运算符"""
 
     def __init__(self):
         super().__init__()
@@ -499,9 +512,34 @@ class Sum(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 输入张量的每个分量梯度 += 输出张量的梯度（单元素）
         self.inp.grad += self.out.grad[0]
+
+
+class Mean(Operator):
+    """张量平均值算符"""
+
+    def __init__(self):
+        super().__init__()
+
+    def compute(self, x: list[Tensor]):
+        if len(x) == 0:
+            raise ValueError("Input tensor list is empty!")
+        self.inp = x
+        n = len(x[0].data)
+        mean_data = Vector.zeros(n)
+        for tensor in x:
+            if len(tensor.data) != n:
+                raise ValueError("All input tensors must have the same shape!")
+            mean_data += tensor.data
+        self.out = Tensor(mean_data / n, op=self)
+        return self.out
+
+    def _compute_grad(self):
+        # 平均值梯度反向传播：每个输入张量的梯度 += 输出梯度 / 输入张量数量
+        for tensor in self.inp:
+            tensor.grad += self.out.grad / len(self.inp)
 
 
 class Relu(Operator):
@@ -516,7 +554,7 @@ class Relu(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 输入梯度+=输出梯度*输入函数（大于等于0）
         for i in range(len(self.inp)):
             if self.inp.data[i] >= 0:
@@ -535,7 +573,7 @@ class Sigmoid(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 输入梯度 += σ(x) * (1 - σ(x)) * 输出梯度
         self.inp.grad += self.out.data * (1 - self.out.data) * self.out.grad
 
@@ -554,7 +592,7 @@ class Tanh(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 输入梯度 += (1 - tanh²(x)) * 输出梯度
         self.inp.grad += (1 - self.out.data ** 2) * self.out.grad
 
@@ -574,7 +612,7 @@ class Connect(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 将输出梯度按原拼接顺序分配给每个输入张量
         seg = self.out.grad
         for tensor in self.inp:
@@ -598,7 +636,7 @@ class Cut(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         # 将输出张量的梯度分配到输入张量的对应索引位置
         for i in range(len(self.out)):
             self.inp.grad[self.start + i] += self.out.grad[i]
@@ -622,7 +660,7 @@ class DenseOp(Operator):
         self.out = out
         return out
 
-    def propagate_grad(self):
+    def _compute_grad(self):
         """
         线性层梯度反向传播：
         假设前向计算：out[i] = sum(w[i][j] * x[j]) + b[i]（j为输入维度）
@@ -638,82 +676,49 @@ class DenseOp(Operator):
 
 
 class Layer:
-    """参数层，所有要保存参数的类都需要继承此类"""
-    layer_list = []  # 所有要保存参数的层的列表
-    optimizer = None  # 保存的优化器实例
-    is_load = False  # 是否处于读取状态
-    is_save = True  # 是否处于保存状态
-    pointer = 0  # 读取参数用的指针
-    layer_num = 0  # 读取的参数中子类的数量
+    """基础参数层，有钩子接口，所有参数层都需要继承此类"""
+    layer_list = []  # 基础参数层全局记录
 
     def __init__(self, *args):
-        """
-        当处于读取状态(is_load==True)时，继承了Layer的实例会按顺序读取layer_list中的内容。
-        当处于存储状态(is_save==True)时，继承了Layer的实例会在创建时被加入layer_list，它在save_all调用时会被保存为文件。
-        一般情况下，继承了Layer的类初始化需最后调用super().__init__()，防止读取的数据被覆盖。
-        或在if not Layer.is_load:中进行初始化。
-        """
-        if not Layer.is_save:
+        # 训练模式记录
+        super().__setattr__('training', True)
+        super().__setattr__('_forward_pre_hooks', {})
+        super().__setattr__('_forward_hooks', {})
+        super().__setattr__('_backward_hooks', {})
+        # 基础参数层只记录Layer类
+        if isinstance(self, Module):
             return
-        if Layer.is_load:
-            self.load(Layer.layer_list[Layer.pointer])
-            Layer.layer_list[Layer.pointer] = self
-            Layer.pointer += 1
-            if Layer.layer_num == Layer.pointer:
-                Layer.is_load = False
-        else:
-            Layer.layer_list.append(self)
+        Layer.layer_list.append(self)
 
-    def save(self):
+    def __repr__(self):
+        prefix = '' if self.__class__.__name__ == 'Layer' else 'Layer.'
+        return f"{prefix}{self.__class__.__name__}"
+
+    def save(self, *args):
         """
-        将自身转为字符串的形式，所有继承了Layer的类需重写此方法
+        保存接口，所有继承了Layer的类需重写此方法
         :return: 字符串内容中不能包含换行符
         """
         raise NotImplementedError
 
     def load(self, *args):
         """
-        从字符串中读取数据,所有继承了Layer的类需重写此方法
+        读取接口，所有继承了Layer的类需重写此方法
         :param args: str 字符串内容
         """
         raise NotImplementedError
 
     def param(self):
         """
-        返回自身需要优化的参数，所有继承了Layer的类需重写此方法
+        参数接口，所有继承了Layer的类需重写此方法
         :return: list[Tensor]
         """
         raise NotImplementedError
 
     @classmethod
-    def save_all(cls, name):
-        """
-        存储所有layer_list中的实例
-        :param name: str 保存的文件名
-        """
-        with open(name, "w") as f:
-            for i in Layer.layer_list:
-                content = i.save()
-                if content is None:
-                    continue
-                f.write(content + "\n")
-
-    @classmethod
-    def load_all(cls, name):
-        """
-        从文件中读取保存的内容，保存到layer_list
-        :param name: str 保存的文件名
-        """
-        Layer.is_load = True
-        with open(name, "r") as f:
-            Layer.layer_list = f.readlines()
-            Layer.pointer = 0
-            Layer.layer_num = len(Layer.layer_list)
-
-    @classmethod
     def get_params(cls):
         """
-        返回所有需要优化的参数
+        返回所有基础参数层所有参数，兼容优化器的默认设置
         :return: list[Tensor]
         """
         params = []
@@ -723,9 +728,77 @@ class Layer:
                 params += i.param()
         return params
 
+    def register_forward_pre_hook(self, hook):
+        """注册前向传播前的钩子"""
+        handle = id(hook)
+        self._forward_pre_hooks[handle] = hook
+        return handle
+
+    def register_forward_hook(self, hook):
+        """注册前向传播后的钩子"""
+        handle = id(hook)
+        self._forward_hooks[handle] = hook
+        return handle
+
+    def register_backward_hook(self, hook):
+        """注册反向传播的钩子"""
+        handle = id(hook)
+        self._backward_hooks[handle] = hook
+        return handle
+
+    def remove_hook(self, handle):
+        """移除指定钩子"""
+        for hooks in [self._forward_pre_hooks, self._forward_hooks, self._backward_hooks]:
+            if handle in hooks:
+                del hooks[handle]
+                return
+
+    def _call_forward_pre_hooks(self, *args, **kwargs):
+        """调用前向传播前的钩子"""
+        for hook in self._forward_pre_hooks.values():
+            hook(self, args, kwargs)
+
+    def _call_forward_hooks(self, *args, **kwargs):
+        """调用前向传播后的钩子"""
+        for hook in self._forward_hooks.values():
+            hook(self, args, kwargs, self._forward_result)
+
+    def _call_backward_hooks(self, grad_outputs: Vector, inputs):
+        """调用反向传播的钩子"""
+        for hook in self._backward_hooks.values():
+            if isinstance(inputs, Tensor):
+                hook(self, grad_outputs, inputs)
+            elif isinstance(inputs, list):
+                for item in inputs:
+                    if isinstance(item, Tensor):
+                        hook(self, grad_outputs, [item for item in inputs])
+            else:
+                raise TypeError(f"input must be a Tensor or list of Tensors, got {type(inputs).__name__}")
+
+    def __call__(self, *args, **kwargs):
+        """调用方法，集成钩子和张量-模块关联"""
+        self._call_forward_pre_hooks(*args, **kwargs)
+        super().__setattr__('_forward_result', self.forward(*args, **kwargs))
+        # 记录输出张量的来源模块（用于反向传播时触发钩子）
+        if self._backward_hooks:
+            if isinstance(self._forward_result, Tensor):
+                self._forward_result._source_module = self
+            elif isinstance(self._forward_result, list):
+                for item in self._forward_result:
+                    if isinstance(item, Tensor):
+                        item._source_module = self
+            else:
+                raise TypeError(f"forward_result must be a Tensor or list, got {type(self._forward_result).__name__}")
+        self._call_forward_hooks(*args, **kwargs)
+        return self._forward_result
+
+    def forward(self, *args, **kwargs):
+        """前向传播方法，需要子类实现"""
+        raise NotImplementedError(f"Module {self.__class__.__name__} has no forward method implemented")
+
 
 class ConstantTensor(Tensor, Layer):
-    """用于保存的张量"""
+    """单张量参数层"""
 
     def __init__(self, data):
         Tensor.__init__(self, data)
@@ -742,24 +815,55 @@ class ConstantTensor(Tensor, Layer):
         return [self]
 
 
+class Norm(Layer):
+    """标准化处理层，带可学习参数"""
+
+    def __init__(self):
+        self.w = Tensor([random.gauss(0, 0.04)])
+        self.b = Tensor([random.gauss(0, 0.04)])
+        super().__init__()
+
+    def forward(self, x: Tensor, eps=0.0001):
+        n = Tensor([len(x)])
+        mean = (x.sum() / n).repeat(len(x))
+        sigma = (((x - mean) ** 2).sum() / n) ** 0.5
+        std = (x - mean) / (Tensor([eps]) + sigma).repeat(len(x))
+        out = self.w.repeat(len(x)) * std + self.b.repeat(len(x))
+        return out
+
+    def grad_descent_zero(self, lr):
+        self.w.data -= lr * self.w.grad
+        self.b.data -= lr * self.b.grad
+        self.w.zero_grad()
+        self.b.zero_grad()
+
+    def save(self):
+        return f"{self.w.data}/{self.b.data}"
+
+    def load(self, text: str):
+        parts = text.split('/')
+        self.w = Tensor(ast.literal_eval(parts[0]))
+        self.b = Tensor(ast.literal_eval(parts[1]))
+
+    def param(self):
+        return [self.w, self.b]
+
+
 class Dense(Layer):
-    """全连接层，保存格式：用 ‘/’ 隔开 w、b"""
+    """全连接层"""
 
     def __init__(self, inp_size: int, out_size: int, bias=True):
         """
-        参数初始化
         :param bias: bool 是否加上偏置
-        :param w: list[Tensor] 权重矩阵
-        :param bias: list[Tensor] 偏置向量
         """
-        if not Layer.is_load:
-            self.w = [my_init(inp_size) for _ in range(out_size)]
-            self.bias = bias
-            if bias:
-                self.b = [Tensor.zeros(1) for _ in range(out_size)]
+        # w: list[Tensor] 权重矩阵, bias: list[Tensor] 偏置向量
+        self.w = [my_init(inp_size) for _ in range(out_size)]
+        self.bias = bias
+        if bias:
+            self.b = [Tensor.zeros(1) for _ in range(out_size)]
         super().__init__()
 
-    def __call__(self, a: Tensor, with_op=True):
+    def forward(self, a: Tensor, with_op=True):
         """
         前向传播运算
         :param with_op: bool 是否使用单独的dense运算符
@@ -779,7 +883,7 @@ class Dense(Layer):
 
     def grad_descent_zero(self, lr: float):
         """
-        进行梯度下降，并清空梯度
+        单个层的梯度下降，并清空梯度
         :param lr: float 学习率
         """
         for i in range(len(self.w)):
@@ -787,25 +891,6 @@ class Dense(Layer):
             self.b[i].data -= lr * self.b[i].grad
             self.w[i].zero_grad()
             self.b[i].zero_grad()
-
-    def copy(self, save=True):
-        """
-        深拷贝参数层
-        :param save: bool 是否保存拷贝出的对象
-        注：如果不希望拷贝出的对象被保存，请在调用前把Layer.is_save设定为False
-        """
-        if not save:
-            original = Layer.is_save
-            Layer.is_save = False
-
-        new = Dense(len(self.w[0]), len(self.w))
-        for i in range(len(self.w)):
-            new.w[i] = Tensor(self.w[i].data)
-            new.b[i] = Tensor(self.b[i].data)
-
-        if not save:
-            Layer.is_save = original
-        return new
 
     def save(self):
         x = [str(i.data) for i in self.w]
@@ -842,16 +927,15 @@ class Conv2D(Layer):
         :param pad: bool 是否进行填充（使运算的输入和输出的大小一样）
         :param bias: bool 是否加上偏置
         """
-        if not Layer.is_load:
-            self.width = width
-            self.height = height
-            self.stride_h = stride_h
-            self.stride_w = stride_w
-            self.pad = pad
-            self.kernel = my_init(width * height)
-            self.bias = bias
-            if bias:
-                self.b = my_init(1)
+        self.width = width
+        self.height = height
+        self.stride_h = stride_h
+        self.stride_w = stride_w
+        self.pad = pad
+        self.kernel = my_init(width * height)
+        self.bias = bias
+        if bias:
+            self.b = my_init(1)
         super().__init__()
 
     def padding(self, x):
@@ -871,7 +955,7 @@ class Conv2D(Layer):
             x2.append(Tensor.zeros(len(x[0]) + pad_x * 2))
         return x2
 
-    def __call__(self, x):
+    def forward(self, x):
         """
         进行运算
         :param x: list[Tensor(),Tensor()...]  2d的Ten，或者说list包着的一列Ten
@@ -919,6 +1003,116 @@ class Conv2D(Layer):
         return [self.kernel, self.b]
 
 
+class Module(Layer):
+    """模块基类，支持子模块管理和钩子功能"""
+
+    def __init__(self):
+        super().__setattr__('modules', {})  # 子模块字典
+        super().__setattr__('parameters', {})  # 模块参数字典
+        super().__setattr__('layers', {})  # 参数层字典
+        super().__init__()
+
+    def __setattr__(self, name: str, value):
+        """属性设置，自动注册子模块和参数层"""
+        # 基类最后注册，避免覆盖子类
+        if isinstance(value, ConstantTensor):
+            self.parameters[name] = value
+            super().__setattr__(name, value)
+        elif isinstance(value, Module):
+            self.modules[name] = value
+            super().__setattr__(name, value)
+        elif isinstance(value, Layer):
+            self.layers[name] = value
+            super().__setattr__(name, value)
+        else:
+            raise TypeError(f"module must be a Module or Layer, got {type(value).__name__}")
+
+    def __repr__(self):
+        prefix = '' if self.__class__.__name__ == 'Module' else 'Module.'
+        return f"{prefix}{self.__class__.__name__}"
+
+    def params(self):
+        """递归返回所有可训练参数"""
+        param = []
+        for p in self.parameters.values():
+            param.extend(p.param())
+        for l in self.layers.values():
+            param.extend(l.param())
+        for m in self.modules.values():
+            param.extend(m.params())
+        return param
+
+    def named_params(self, prefix: str = ''):
+        """递归返回带名称的参数"""
+        named_param = []
+        prefix = prefix + ('.' if prefix else '')
+        for name, l in self.layers.items():
+            named_param.append((prefix + name, l))
+        for name, p in self.parameters.items():
+            named_param.append((prefix + name, p))
+        for name, m in self.modules.items():
+            named_param.extend(m.named_params(prefix + name))
+        return named_param
+
+    def named_modules(self, prefix: str = ''):
+        """返回带名称的子模块（包括自身）"""
+        if prefix == '':
+            prefix = self.__class__.__name__
+        yield prefix, self
+        for name, module in self.modules.items():
+            submodule_prefix = prefix + ('.' if prefix else '') + name
+            yield from module.named_modules(submodule_prefix)
+
+    def train(self, mode: bool = True):
+        """设置训练模式"""
+        self.training = mode
+        for p in self.parameters.values():
+            p.training = mode
+        for l in self.layers.values():
+            l.training = mode
+        for module in self.modules.values():
+            module.train(mode, )
+        # 返回值方便链式调用
+        return self
+
+    def eval(self):
+        """设置评估模式，复用train(False)"""
+        return self.train(False)
+
+    def save(self, path: str):
+        """将模块数据保存为JSON格式文件"""
+        params = []
+        layer = self.named_params()
+        for param in layer:
+            data = {"type": str(param[1]), "params": param[1].save()}
+            params.append(data)
+        datas = {"model": self.__class__.__name__, "layers_num": len(params), "parameters": params}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(datas, f, ensure_ascii=False, indent=2)
+
+    def load(self, path):
+        """从JSON格式文件加载模块数据"""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.loads(f.read())
+        except FileNotFoundError:
+            raise FileNotFoundError(f"File not found in: {path}!")
+        if data.get("model") != self.__class__.__name__:
+            raise ValueError(f"Model mismatched: expect {self.__class__.__name__}, got {data.get('type')}!")
+        text = data.get("parameters")
+        if text is None:
+            raise ValueError(f"Got no parameters for {self.__class__.__name__}!")
+        layer = self.named_params()
+        l = len(layer)
+        if data.get("layers_num") != l or len(text) != l:
+            raise ValueError(f"Layers sizes mismatched: expect {l}, got {data.get('layers_num')}!")
+        for i in range(l):
+            if text[i]["type"] != str(layer[i][1]):
+                raise ValueError(f"Layers type mismatched: expect {layer[i][1]}, got {text[i]['type']}!")
+            layer[i][1].load(text[i]["params"])
+
+
+# 一些复杂结构的简单实现，用于实验，未更新到Module管理
 class MiniDense:
     """低秩全连接层"""
 
@@ -1088,31 +1282,6 @@ class RNN:
         self.f1.grad_descent_zero(lr)
 
 
-class Norm:
-    """标准化处理层，带可学习参数"""
-
-    def __init__(self):
-        self.w = ConstantTensor([random.gauss(0, 0.04)])
-        self.b = ConstantTensor([random.gauss(0, 0.04)])
-
-    def __call__(self, x: Tensor, eps=0.0001):
-        n = Tensor([len(x)])
-        mean = (x.sum() / n).repeat(len(x))
-        sigma = (((x - mean) ** 2).sum() / n) ** 0.5
-        std = (x - mean) / (Tensor([eps]) + sigma).repeat(len(x))
-        out = self.w.repeat(len(x)) * std + self.b.repeat(len(x))
-        return out
-
-    def grad_descent_zero(self, lr):
-        self.w.data -= lr * self.w.grad
-        self.b.data -= lr * self.b.grad
-        self.w.zero_grad()
-        self.b.zero_grad()
-
-    def param(self):
-        return [self.w, self.b]
-
-
 class MultiAtt:
     def __init__(self, head_num, emb_size, qk_size=None, v_size=None):
         """
@@ -1270,9 +1439,9 @@ class Adam(Optimizer):
     def __init__(self, params=None, lr=0.001, b1=0.9, b2=0.999, eps=1e-8):
         super().__init__(params)
         if not Optimizer.is_load:
-            self.m = [Vector.zeros(len(ten)) for ten in self.params]
-            self.s = [Vector.zeros(len(ten)) for ten in self.params]
-            self.times = 1
+            self.m = [Vector.zeros(len(ten)) for ten in self.params]  # 一阶动量
+            self.s = [Vector.zeros(len(ten)) for ten in self.params]  # 二阶动量
+            self.times = 1  # 时间步
         self.lr = lr
         self.b1 = b1
         self.b2 = b2
@@ -1280,8 +1449,11 @@ class Adam(Optimizer):
 
     def step(self):
         for i, tensor in enumerate(self.params):
+            # 更新一阶动量
             self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * tensor.grad
+            # 更新二阶动量
             self.s[i] = self.b2 * self.s[i] + (1 - self.b2) * tensor.grad ** 2
+            # 偏差修正
             cm = self.m[i] / (1 - self.b1 ** self.times)
             cs = self.s[i] / (1 - self.b2 ** self.times)
             tensor.data -= (self.lr * cm) / (cs ** 0.5 + self.eps)
@@ -1319,9 +1491,9 @@ class AdamW(Optimizer):
             self.s[i] = self.b2 * self.s[i] + (1 - self.b2) * tensor.grad ** 2
             cm = self.m[i] / (1 - self.b1 ** self.times)
             cs = self.s[i] / (1 - self.b2 ** self.times)
+            # 引入权重衰减
             tensor.data -= self.lr * (cm / (cs ** 0.5 + self.eps) + self.weight_decay * tensor.data)
             tensor.zero_grad()
-
         self.times += 1
 
     def save(self):
@@ -1333,6 +1505,43 @@ class AdamW(Optimizer):
         self.s = Vector(ast.literal_eval(text[1]))
         self.times = float(text[2])
         self.weight_decay = float(text[3])
+
+
+class Nadam(Optimizer):
+    """Nadam优化器，结合Nesterov动量和Adam"""
+
+    def __init__(self, params=None, lr=0.001, b1=0.9, b2=0.999, eps=1e-8):
+        super().__init__(params)
+        if not Optimizer.is_load:
+            self.m = [Vector.zeros(len(ten)) for ten in self.params]
+            self.s = [Vector.zeros(len(ten)) for ten in self.params]
+            self.times = 1
+        self.lr = lr
+        self.b1 = b1
+        self.b2 = b2
+        self.eps = eps
+
+    def step(self):
+        for i, tensor in enumerate(self.params):
+            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * tensor.grad
+            self.s[i] = self.b2 * self.s[i] + (1 - self.b2) * (tensor.grad ** 2)
+            cm = self.m[i] / (1 - self.b1 ** self.times)
+            cs = self.s[i] / (1 - self.b2 ** self.times)
+            # Nadam更新：融入Nesterov动量
+            tensor.data -= (self.lr * (self.b1 * cm + (1 - self.b1) * tensor.grad / (1 - self.b1 ** self.times)) /
+                            (cs ** 0.5 + self.eps))
+            tensor.zero_grad()
+
+        self.times += 1
+
+    def save(self):
+        return f"{str(self.m)}/{str(self.s)}/{str(self.times)}"
+
+    def load(self, text):
+        text = text.split('/')
+        self.m = Vector(ast.literal_eval(text[0]))
+        self.s = Vector(ast.literal_eval(text[1]))
+        self.times = float(text[2])
 
 
 class Lookahead(Optimizer):
@@ -1357,7 +1566,7 @@ class Lookahead(Optimizer):
         # 每k步执行慢更新
         if self.step_counter % self.k == 0:
             for i in range(len(self.params)):
-                # 慢权重更新：slow = slow + alpha*(fast - slow)
+                # 慢权重更新：slow = slow + alpha * (fast - slow)
                 self.slow_weights[i] += self.alpha * (self.params[i].data - self.slow_weights[i])
                 # 将慢权重复制回参数
                 self.params[i].data = Vector(self.slow_weights[i])
@@ -1392,12 +1601,8 @@ class RMSprop(Optimizer):
         for i, tensor in enumerate(self.params):
             # 更新二阶动量：s = alpha*s + (1-alpha)*grad^2
             self.s[i] = self.alpha * self.s[i] + (1 - self.alpha) * (tensor.grad ** 2)
-
             # 参数更新：theta = theta - lr * grad / (sqrt(s) + eps)
-            update = self.lr * tensor.grad / (self.s[i] ** 0.5 + self.eps)
-            tensor.step(update)
-
-            # 清空梯度
+            tensor.data -= self.lr * tensor.grad / (self.s[i] ** 0.5 + self.eps)
             tensor.zero_grad()
 
     def save(self):
@@ -1411,49 +1616,294 @@ class RMSprop(Optimizer):
         self.eps = float(text[3])
 
 
-class Nadam(Optimizer):
-    """Nadam优化器，结合Nesterov动量和Adam"""
+class LearningRateScheduler:
+    """学习率调度器基类"""
 
-    def __init__(self, params=None, lr=0.001, b1=0.9, b2=0.999, eps=1e-8):
-        super().__init__(params)
-        if not Optimizer.is_load:
-            self.m = [Vector.zeros(len(ten)) for ten in self.params]  # 一阶动量
-            self.s = [Vector.zeros(len(ten)) for ten in self.params]  # 二阶动量
-            self.times = 1  # 时间步
-        self.lr = lr
-        self.b1 = b1
-        self.b2 = b2
-        self.eps = eps
+    def __init__(self, optimizer, last_epoch=-1):
+        self.optimizer = optimizer
+        self.last_epoch = last_epoch
+        self.base_lrs = [optimizer.lr]  # 保存初始学习率
+        self.step()
 
     def step(self):
-        for i, tensor in enumerate(self.params):
-            # 更新一阶动量
-            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * tensor.grad
-            # 更新二阶动量
-            self.s[i] = self.b2 * self.s[i] + (1 - self.b2) * (tensor.grad ** 2)
+        """更新学习率"""
+        self.last_epoch += 1
+        self.optimizer.lr = self.get_lr()
 
-            # 偏差修正
-            cm = self.m[i] / (1 - self.b1 ** self.times)
-            cs = self.s[i] / (1 - self.b2 ** self.times)
+    def get_lr(self):
+        """计算当前学习率，子类必须重写此方法"""
+        raise NotImplementedError
 
-            # Nadam更新：融入Nesterov动量
-            update = self.lr * (self.b1 * cm + (1 - self.b1) * tensor.grad / (1 - self.b1 ** self.times)) / (
-                    cs ** 0.5 + self.eps)
-            tensor.step(update)
 
-            # 清空梯度
-            tensor.zero_grad()
+class StepLR(LearningRateScheduler):
+    """固定步长学习率调度器"""
 
-        self.times += 1
+    def __init__(self, optimizer, step_size=30, gamma=0.1, last_epoch=-1):
+        self.step_size = step_size
+        self.gamma = gamma
+        super().__init__(optimizer, last_epoch)
 
-    def save(self):
-        return f"{str(self.m)}/{str(self.s)}/{str(self.times)}"
+    def get_lr(self):
+        # 每过step_size个epoch，学习率乘以gamma
+        return self.base_lrs[0] * (self.gamma ** (self.last_epoch // self.step_size))
 
-    def load(self, text):
-        text = text.split('/')
-        self.m = Vector(ast.literal_eval(text[0]))
-        self.s = Vector(ast.literal_eval(text[1]))
-        self.times = float(text[2])
+
+class MultiStepLR(LearningRateScheduler):
+    """多步学习率调度器"""
+
+    def __init__(self, optimizer, milestones=None, gamma=0.1, last_epoch=-1):
+        if milestones is None:
+            milestones = [30, 60, 90]
+        self.milestones = set(milestones)
+        self.gamma = gamma
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        # 在指定milestones中的epoch，学习率乘以gamma
+        if self.last_epoch in self.milestones:
+            return self.optimizer.lr * self.gamma
+        return self.optimizer.lr
+
+
+class ExponentialLR(LearningRateScheduler):
+    """指数衰减学习率调度器"""
+
+    def __init__(self, optimizer, gamma=0.99, last_epoch=-1):
+        self.gamma = gamma
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        # 学习率按指数规律衰减: lr = lr * gamma^epoch
+        return self.base_lrs[0] * (self.gamma ** self.last_epoch)
+
+
+class CosineAnnealingLR(LearningRateScheduler):
+    """余弦退火学习率调度器"""
+
+    def __init__(self, optimizer, t_max=10, eta_min=0, last_epoch=-1):
+        self.T_max = t_max  # 周期长度
+        self.eta_min = eta_min  # 最小学习率
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        # 学习率按余弦曲线周期性变化
+        return self.eta_min + 0.5 * (self.base_lrs[0] - self.eta_min) * \
+            (1 + math.cos(math.pi * self.last_epoch / self.T_max))
+
+
+class ReduceLROnPlateau:
+    """自适应调度器，当指标停止改善时降低学习率"""
+
+    def __init__(self, optimizer, mode='min', factor=0.1, patience=10,
+                 threshold=1e-4, threshold_mode='rel', min_lr=0):
+        self.optimizer = optimizer
+        self.mode = mode  # min表示指标越小越好，max表示指标越大越好
+        self.factor = factor  # 学习率衰减因子
+        self.patience = patience  # 容忍多少个epoch没有改善
+        self.threshold = threshold  # 改善的阈值
+        self.threshold_mode = threshold_mode  # rel表示相对变化，abs表示绝对变化
+        self.min_lr = min_lr  # 最小学习率
+        self.best = None
+        self.num_bad_epochs = 0  # 记录连续没有改善的epoch数
+
+    def step(self, metric):
+        """
+        根据监测指标更新学习率
+        metric: 需要监测的指标值
+        """
+        if self.best is None:
+            self.best = metric
+            return
+
+        if self.threshold_mode == 'rel':
+            if self.mode == 'min':
+                # 对于最小值指标，新值需要小于 best * (1 - threshold)才算改善
+                improvement_threshold = self.best * (1 - self.threshold)
+            else:
+                # 对于最大值指标，新值需要大于 best * (1 + threshold)才算改善
+                improvement_threshold = self.best * (1 + self.threshold)
+        else:
+            if self.mode == 'min':
+                # 对于最小值指标，新值需要小于 best - threshold才算改善
+                improvement_threshold = self.best - self.threshold
+            else:
+                # 对于最大值指标，新值需要大于 best + threshold才算改善
+                improvement_threshold = self.best + self.threshold
+
+        if (self.mode == 'min' and metric < improvement_threshold) or \
+                (self.mode == 'max' and metric > improvement_threshold):
+            self.best = metric
+            self.num_bad_epochs = 0
+        else:
+            self.num_bad_epochs += 1
+            # 如果超过容忍次数，则降低学习率
+            if self.num_bad_epochs >= self.patience:
+                new_lr = max(self.optimizer.lr * self.factor, self.min_lr)
+                self.optimizer.lr = new_lr
+                self.num_bad_epochs = 0
+
+
+class EarlyStopping:
+    """早停机制，用于监测验证集指标，连续多轮无改善则触发早停"""
+
+    def __init__(self, patience=10, delta=1e-4, mode='min', verbose=False, save=True,
+                 path='best_model.tp'):
+        self.patience = patience  # 容忍连续无改善的轮次
+        self.delta = delta  # 指标改善的最小阈值（避免微小波动被判定为改善）
+        self.mode = mode  # min：指标越小越好（如损失）；max：指标越大越好（如准确率）
+        self.verbose = verbose  # 是否打印早停相关日志
+
+        self.save = save  # 是否保存性能最优的模型
+        self.path = path  # 最优模型保存路径
+
+        self.best_score = None  # 记录历史最优指标值
+        self.num_bad_epochs = 0  # 连续无改善的轮次计数
+        self.early_stop = False  # 是否触发早停的标志
+
+    def __call__(self, val_metric, model=None):
+        """
+        每轮验证后调用，判断是否触发早停
+        val_metric: 当前轮次的验证集指标（如val_loss、val_acc）
+        model: 当前训练的模型实例（需支持state_dict()方法，仅当save_best_model=True时需传入）
+        """
+        # 1. 计算当前指标对应的得分（统一转为最小化逻辑，方便比较）
+        current_score = -val_metric if self.mode == 'min' else val_metric
+
+        # 2. 初始化历史最优得分（第一轮调用时）
+        if self.best_score is None:
+            self.best_score = current_score
+            return
+
+        # 3. 判断当前指标是否有效改善：当前得分 > 历史最优得分 + delta（delta避免微小波动）
+        if current_score > self.best_score + self.delta:
+            self.best_score = current_score  # 更新历史最优得分
+            self._save_best_model(val_metric, model)  # 保存新的最优模型
+            self.num_bad_epochs = 0  # 重置连续无改善计数
+        else:
+            self.num_bad_epochs += 1  # 累加连续无改善计数
+            if self.verbose:
+                print(
+                    f"EarlyStopping: consecutive {self.num_bad_epochs} epoches has no improvement(current: {val_metric:.6f})")
+
+            if self.num_bad_epochs >= self.patience:
+                self.early_stop = True
+                if self.verbose:
+                    print(f"\nEarlyStopping: consecutive {self.patience} epoches has no improvement, early stop!")
+                    score = (-self.best_score) if self.mode == 'min' else self.best_score
+                    print(f"EarlyStopping: best model's metric on validation set: {score:.6f}")
+
+    def _save_best_model(self, val_metric, model):
+        """保存最优模型参数（仅当开启保存功能且传入模型时）"""
+        if self.save and model is not None:
+            model.save(self.path)
+            if self.verbose:
+                print(f"EarlyStopping: find a better model(metric: {val_metric:.6f}), save to {self.path}")
+
+
+class DataLoader:
+    """数据加载器，支持批处理、打乱和自定义转换"""
+
+    def __init__(self, data, batch_size: int = 64, shuffle: bool = True, transform=None):
+        """
+        :param data: 数据集，格式为[(输入特征, 标签), ...]
+        :param batch_size: 批次大小
+        :param shuffle: 是否打乱数据集
+        :param transform: 数据转换函数，格式为func(input, label) -> (transformed_input, transformed_label)
+        """
+        self.data = data
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.transform = transform
+        self.indices = list(range(len(data)))
+        self.cursor = 0  # 当前批次指针
+        if shuffle:
+            random.shuffle(self.indices)
+
+    def __iter__(self):
+        """迭代器初始化"""
+        self.cursor = 0
+        if self.shuffle:
+            random.shuffle(self.indices)
+        return self
+
+    def __next__(self):
+        """获取下一个批次"""
+        if self.cursor >= len(self.data):
+            raise StopIteration
+        # 计算当前批次索引范围
+        end = min(self.cursor + self.batch_size, len(self.data))
+        batch_indices = self.indices[self.cursor:end]
+        self.cursor = end
+
+        batch_inputs = []
+        batch_labels = []
+        for idx in batch_indices:
+            x, y = self.data[idx]
+            if self.transform:
+                x, y = self.transform(x, y)
+            batch_inputs.append(Tensor(x))
+            batch_labels.append(Tensor(y))
+        return batch_inputs, batch_labels
+
+    def __len__(self):
+        """返回批次数量"""
+        return (len(self.data) + self.batch_size - 1) // self.batch_size
+
+
+# 训练函数
+def train_on_batch(model, batch, optimizer, loss_fn=Tensor.mse):
+    """
+    训练一个批次并返回损失和准确率
+    :param model: 模型实例
+    :param batch: 批次数据 (inputs, labels)
+    :param optimizer: 优化器
+    :param loss_fn: 损失函数 (output, label)
+    :return: (loss, accuracy)
+    """
+    inputs, labels = batch
+    outputs = [model(i) for i in inputs]
+
+    sample_losses = [loss_fn(out, label) for out, label in zip(outputs, labels)]
+    loss = Tensor.mean(sample_losses)
+
+    correct = 0
+    total = len(outputs)
+    for out, label in zip(outputs, labels):
+        # 二分类阈值判断
+        pred = 1 if out.data[0] > 0.5 else 0
+        if pred == label.data[0]:
+            correct += 1
+    accuracy = correct / total
+
+    loss.backward()
+    optimizer.step()
+
+    return loss.data[0], accuracy
+
+
+def valid_on_batch(model, batch, loss_fn=Tensor.mse):
+    """
+    验证一个批次并返回损失和准确率
+    :param model: 模型实例
+    :param batch: 批次数据 (inputs, labels)
+    :param loss_fn: 损失函数 (output, label)
+    :return: (loss, accuracy)
+    """
+    inputs, labels = batch
+    outputs = [model(i) for i in inputs]
+    sample_losses = [loss_fn(out, label) for out, label in zip(outputs, labels)]
+    loss = Tensor.mean(sample_losses)
+
+    correct = 0
+    total = len(outputs)
+    for out, label in zip(outputs, labels):
+        # 二分类阈值判断
+        pred = 1 if out.data[0] > 0.5 else 0
+        if pred == label.data[0]:
+            correct += 1
+    accuracy = correct / total
+
+    return loss.data[0], accuracy
 
 
 # 各种初始化方法
@@ -1480,6 +1930,7 @@ def uniform_init(size, a=-0.05, b=0.05):
     return Tensor([random.uniform(a, b) for _ in range(size)])
 
 
+# 各种工具函数
 def sum_chan2d(x):
     """
     对多通道的二维张量求和，变成单通道二维张量
@@ -1507,43 +1958,15 @@ def resize2d(x, cols, rows):
     return x2d
 
 
-# ----------------测试部分---------------
 def func2d(x, func):
     """对二维张量进行张量级函数操作"""
     return [func(i) for i in x]
 
 
-def grad_test(func, x: Tensor):
-    """对函数进行梯度测试（关联计算图）"""
+def deriv(func, x: Tensor):
+    """函数的数值微分计算"""
     x = func(x)
     x2 = Tensor(x.data)
     x2.data[0] += 0.001
     x2 = func(x2)
     return (x2.data[0] - x.data[0]) / 0.001
-
-
-def test():
-    x = Tensor([1])
-    y = Tensor([1])
-    z = Tensor([1])
-
-    for i in range(1000):
-        s1 = ((x * y + z) - Tensor([40])) ** 2
-        s2 = ((x * z + y) - Tensor([51])) ** 2
-        s3 = ((x + y + z) - Tensor([19])) ** 2
-        if s1.data[0] < 0.01 and s2.data[0] < 0.01 and s3.data[0] < 0.01:
-            break
-        s1.backward(clean=False)
-        s2.backward(clean=False)
-        s3.backward()
-        # s1.grad=Vector([1])
-        # s2.grad = Vector([1])
-        # s3.grad = Vector([1])
-        # Operator.back()
-        x.data -= x.grad * Vector([0.002])
-        y.data -= y.grad * Vector([0.002])
-        z.data -= z.grad * Vector([0.002])
-        print(f"x{x},y{y},z{z}")
-        x.zero_grad()
-        y.zero_grad()
-        z.zero_grad()
