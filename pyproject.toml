@@ -5,17 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "TensorPlay"
 description = "一个用于深度学习验证的工具包"
-version = "0.0.1"
-authors = [
-  {
-    name = "Welog",
-    email = "2095774200@shu.edu.cn"
-  }
-]
+version = "0.1.1"
+authors = [{name = "Welog", email = "2095774200@shu.edu.cn" }]
 readme = "README.md"
-license = {
-  file = "LICENSE"
-}
+license = { file = "LICENSE" }
 homepage = "https://github.com/bluemoon-o2/TensorPlay"
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -32,43 +25,10 @@ classifiers = [
 ]
 requires-python = ">=3.8"
 dependencies = [
-  "numpy"
+  "typing",
+  "numpy",
+  "scikit-learn"
 ]
-
-[project.optional-dependencies]
-dev = [
-  "pytest>=7.0",
-  "black>=22.0",
-  "isort>=5.0",
-  "flake8>=5.0",
-  "mypy>=0.900",
-  "matplotlib>=3.0"
-]
-
-[tool.isort]
-profile = "black"
-line_length = 88
-
-[tool.black]
-line-length = 88
-include = "\.pyi?$"
-exclude = '''
-/(\.
-  |venv
-  |__pycache__
-  |build
-  |dist
-  |TensorPlay\.egg-info
-)/
-'''
-
-[tool.mypy]
-python_version = "3.8"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
-check_untyped_defs = false
-ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
