@@ -1,5 +1,5 @@
 import numpy as np
-from TensorPlay import Tensor, square, relu
+from TensorPlay import Tensor, sphere
 
 
 def test_tensor_creation():
@@ -36,9 +36,9 @@ def test_tensor_arithmetic():
 def test_tensor_functions():
     # 测试内置函数
     x = Tensor(np.array([-1.0, 0.0, 1.0]))
-    
-    # 测试square函数
-    y = square(x)
+
+    # 测试sphere函数
+    y = sphere(x)
     assert np.array_equal(y.data, np.array([1.0, 0.0, 1.0]))
     
     # 测试relu方法
@@ -50,7 +50,7 @@ def test_tensor_functions():
 def test_simple_backward():
     # 测试简单的反向传播
     x = Tensor(np.array([2.0]))
-    y = square(x)
+    y = sphere(x)
     
     # 手动设置梯度并反向传播
     y.backward(np.array([1.0]))
