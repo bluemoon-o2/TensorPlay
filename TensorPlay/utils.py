@@ -1,11 +1,12 @@
 import os
 import subprocess
 from .core import Tensor, Operator
+from .func import mse
 
 # =============================================================================
 # Training Utils
 # =============================================================================
-def train_on_batch(model, batch, optimizer, loss_fn=Tensor.mse):
+def train_on_batch(model, batch, optimizer, loss_fn=mse):
     """
     训练一个批次并返回损失和准确率
     :param model: 模型实例
@@ -35,7 +36,7 @@ def train_on_batch(model, batch, optimizer, loss_fn=Tensor.mse):
     return loss.data.data[0], accuracy
 
 
-def valid_on_batch(model, batch, loss_fn=Tensor.mse):
+def valid_on_batch(model, batch, loss_fn=mse):
     """
     验证一个批次并返回损失和准确率
     :param model: 模型实例

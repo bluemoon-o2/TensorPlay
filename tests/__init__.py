@@ -1,1 +1,1 @@
-from TensorPlay.TensorPlay import Tensor, sphere
+from TensorPlay import Tensor, sphere

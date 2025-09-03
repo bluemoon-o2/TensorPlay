@@ -1,6 +1,34 @@
-import TensorPlay as tp
+from .core import Tensor
+from .operator import MeanSquaredError
+
+# =============================================================================
+# 损失函数
+# =============================================================================
+def mse(out: Tensor, target: Tensor) -> Tensor:
+    """均方误差（Mean Squared Error）：MSE = (1/n) * sum((a - b)²)"""
+    if out.shape != target.shape:
+        raise ValueError("MSE can only be calculated between tensors of the same shape")
+    return MeanSquaredError()(out, target)
 
 
+def sse(out: Tensor, target: Tensor) -> Tensor:
+    """平方误差（Sum of Squared Error）：SSE = sum((a - b)²)"""
+    if out.shape != target.shape:
+        raise ValueError("SSE can only be calculated between tensors of the same shape")
+    return ((out - target) ** 2).sum()
+
+
+def nll(out: Tensor, target: Tensor) -> Tensor:
+    """交叉熵误差（Negative Log Likelihood）：NLL = -sum(target * log(output))"""
+    if out.shape != target.shape:
+        raise ValueError("NLL can only be calculated between tensors of the same shape")
+    return -(target * out.log()).sum()
+
+
+
+# =============================================================================
+# 优化函数
+# =============================================================================
 def sphere(x, y):
     return x ** 2 + y ** 2
 
@@ -38,11 +66,13 @@ def higher_optimizer(x, epoch, func, verbose=False):
         x.data -= gx.data / gx2.data
     return x, y
 
-
-def deriv(func, x: tp.Tensor, eps=1e-4):
+# =============================================================================
+# 测试函数
+# =============================================================================
+def deriv(func, x: Tensor, eps=1e-4):
     """函数的数值微分计算，测试用"""
-    x1 = tp.Tensor(x.data.data + eps)
-    x2 = tp.Tensor(x.data.data - eps)
+    x1 = Tensor(x.data.data + eps)
+    x2 = Tensor(x.data.data - eps)
     y1 = func(x1)
     y2 = func(x2)
     return (y1.data.data - y2.data.data) / (2 * eps)

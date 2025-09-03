@@ -2,6 +2,7 @@ import warnings
 import contextlib
 import weakref
 import numpy as np
+import TensorPlay as tp
 from typing import List, Union, Tuple, Optional, Any, Callable, Generator
 warnings.filterwarnings("default", category=UserWarning)
 
@@ -60,12 +61,15 @@ class Tensor:
     sum: Callable[..., 'Tensor']
     exp: Callable[..., 'Tensor']
     log: Callable[..., 'Tensor']
+    mean: Callable[..., 'Tensor']
     relu: Callable[..., 'Tensor']
     gelu: Callable[..., 'Tensor']
     tanh: Callable[..., 'Tensor']
     softmax: Callable[..., 'Tensor']
     sigmoid: Callable[..., 'Tensor']
     reshape: Callable[..., 'Tensor']
+    expand: Callable[..., 'Tensor']
+    flatten: Callable[..., 'Tensor']
     transpose: Callable[..., 'Tensor']
     broadcast: Callable[..., 'Tensor']
     rebroadcast: Callable[..., 'Tensor']
@@ -99,31 +103,6 @@ class Tensor:
     def dtype(self) -> np.dtype:
         return self.data.dtype
 
-    def reslice(self, slices: Union[slice, Tuple[slice, ...]], shape: Tuple[int, ...]) -> 'Tensor':
-        op = Reslice(slices, shape)
-        return op(self)
-
-    def mean(self, axis: Optional[int] = None, dims: bool = False) -> 'Tensor':
-        """计算张量的均值"""
-        op = Mean(axis=axis, dims=dims)
-        return op(self)
-
-    def repeat(self, repeats: Union[int, Tuple[int, ...]], axis: int = None) -> 'Tensor':
-        """扩展张量维度"""
-        op = Repeat(repeats, axis=axis)
-        return op(self)
-
-    def compress(self, indices: List[slice], repeats: Union[int, Tuple[int, ...]], axis: int = None) -> 'Tensor':
-        """压缩张量维度"""
-        op = Compress(indices, repeats, axis=axis)
-        return op(self)
-
-    @classmethod
-    def concatenate(cls, tensors: List['Tensor'], axis: int = 0) -> 'Tensor':
-        """按维度连接多个张量"""
-        op = Concatenate(axis=axis)
-        return op(tensors)
-
     def clone(self) -> 'Tensor':
         """返回当前张量的副本，确保梯度独立"""
         cloned_tensor = Tensor(self.data, op=self.op)
@@ -135,37 +114,6 @@ class Tensor:
         """返回一个不追踪梯度的张量副本"""
         detached = Tensor(self.data)
         return detached
-
-    def softmax(self, axis: int = -1) -> 'Tensor':
-        """softmax激活函数：softmax(x) = e^x / sum(e^x_j)"""
-        exp_tensor = self.exp()
-        sum_exp = exp_tensor.sum(axis=axis, dims=True).repeat(self.shape[axis], axis=axis)
-        # 数值稳定，防止除零
-        return exp_tensor / (sum_exp + Tensor(np.ones(self.shape) * 1e-10))
-
-    def gelu(self) -> 'Tensor':
-        """GELU激活函数：GELU(x) ≈ x * Sigmoid(1.702x)"""
-        return self * (self * Tensor(1.702 * np.ones(self.shape))).sigmoid()
-
-    @classmethod
-    def mse(cls, a: 'Tensor', b: 'Tensor') -> 'Tensor':
-        """均方误差（Mean Squared Error）：MSE = (1/n) * sum((a - b)²)"""
-        if a.shape != b.shape:
-            raise ValueError("MSE can only be calculated between tensors of the same shape")
-        op = MeanSquaredError()
-        return op(a, b)
-
-    @classmethod
-    def sse(cls, a: 'Tensor', b: 'Tensor') -> 'Tensor':
-        """平方误差（Sum of Squared Error）：SSE = sum((a - b)²)"""
-        if a.shape != b.shape:
-            raise ValueError("SSE can only be calculated between tensors of the same shape")
-        return ((a - b) ** 2).sum()
-
-    @classmethod
-    def nll(cls, out: 'Tensor', target: 'Tensor') -> 'Tensor':
-        """交叉熵误差（Negative Log Likelihood）：NLL = -sum(target * log(output))"""
-        return -(target * out.log()).sum()
 
     def zero_grad(self) -> None:
         """清空梯度"""

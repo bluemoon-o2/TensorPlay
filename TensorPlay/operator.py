@@ -1,5 +1,5 @@
-from typing import List, Optional, Union, Tuple
-from .core import  Operator, Tensor
+from typing import List, Union, Tuple
+from .core import Operator, Tensor
 import numpy as np
 
 # =============================================================================
@@ -117,7 +117,9 @@ class Pow(Operator):
 def ten_pow(a: Tensor, b: float) -> Tensor:
     return Pow(b)(a)
 
-
+# =============================================================================
+# 超越算子
+# =============================================================================
 class Exp(Operator):
     """自然指数算子"""
 
@@ -150,6 +152,66 @@ def log(x: Tensor) -> Tensor:
     return Log()(x)
 
 
+class Relu(Operator):
+    """ReLU修正线性单元"""
+
+    def _forward(self, a: np.ndarray) -> Tensor:
+        return Tensor(np.maximum(a, 0))
+
+    def _backward(self) -> List[Tensor]:
+        mask = Tensor(self.inp[0].data >= 0)
+        return [self.out().grad * mask]
+
+
+def relu(a: Tensor) -> Tensor:
+    return Relu()(a)
+
+
+def softmax(x: Tensor, axis: int = -1) -> 'Tensor':
+    """softmax激活函数：softmax(x) = e^x / sum(e^x_j)"""
+    exp_tensor = x.exp()
+    sum_exp = exp_tensor.sum(axis=axis, dims=True)
+    # 数值稳定，防止除零
+    return exp_tensor / (sum_exp + Tensor(1e-10))
+
+
+def gelu(x: Tensor) -> 'Tensor':
+    """GELU激活函数：GELU(x) ≈ x * Sigmoid(1.702x)"""
+    return x * (x * Tensor(1.702)).sigmoid()
+
+
+class Sigmoid(Operator):
+    """Sigmoid激活函数"""
+
+    def _forward(self, a: np.ndarray) -> Tensor:
+        return Tensor(1 / (1 + np.exp(-a)))
+
+    def _backward(self) -> List[Tensor]:
+        # 输入梯度 += σ(x) * (1 - σ(x)) * 输出梯度
+        return [self.out() * (1 - self.out()) * self.out().grad]
+
+
+def sigmoid(x: Tensor) -> Tensor:
+    return Sigmoid()(x)
+
+
+class Tanh(Operator):
+    """Tanh激活函数"""
+
+    def _forward(self, a: np.ndarray) -> Tensor:
+        return Tensor(np.tanh(a))
+
+    def _backward(self) -> List[Tensor]:
+        # 输入梯度 += (1 - tanh²(x)) * 输出梯度
+        return [(1 - self.out() ** 2) * self.out().grad]
+
+
+def tanh(x: Tensor) -> Tensor:
+    return Tanh()(x)
+
+# =============================================================================
+# 操作算子
+# =============================================================================
 class Broadcast(Operator):
     """广播算子"""
 
@@ -198,39 +260,66 @@ def rebroadcast(x: Tensor, *shape: int) -> Tensor:
 
 
 class Sum(Operator):
-    """元素级求和运算符"""
+    """求和算子"""
 
-    def __init__(self, axis: Optional[int] = None, dims: bool = False):
+    def __init__(self, axis: Union[int, Tuple[int, ...]] = None, dims: bool = False):
         super().__init__()
         self.axis = axis
         self.dims = dims
 
-    def _forward(self, a: Tensor) -> Tensor:
-        return Tensor(a.data.data.sum(axis=self.axis, keepdims=self.dims), op=self)
+    def _forward(self, a: np.ndarray) -> Tensor:
+        return Tensor(a.sum(axis=self.axis, keepdims=self.dims))
 
     def _backward(self) -> List[Tensor]:
         # 扩展梯度以匹配原始形状
         g = self.out().grad
         if self.axis is not None and not self.dims:
-            old = list(self.inp.shape)
-            old[self.axis] = 1
+            self.axis = self.axis if isinstance(self.axis, Tuple) else (self.axis,)
+            old = list(self.inp[0].shape)
+            for a in self.axis:
+                old[a] = 1
             g = self.out().grad.reshape(*tuple(old))
-        return [g.repeat(self.inp.shape[self.axis], axis=self.axis)]
+        return [broadcast(g, *self.inp[0].shape)]
+
+
+def ten_sum(x: Tensor, axis: Union[int, Tuple[int, ...]] = None, dims: bool = False) -> Tensor:
+    return Sum(axis, dims)(x)
+
+
+def mean(x: Tensor, axis: Union[int, Tuple[int, ...]] = None, dims: bool = False) -> Tensor:
+    y = ten_sum(x, axis, dims)
+    return y * (y.data.size / x.data.size)
 
 
 class Reshape(Operator):
-    """重塑形状运算符"""
+    """变形算子"""
 
-    def __init__(self, shape: Tuple[int, ...]):
+    def __init__(self, *shape: int):
         super().__init__()
         self.re = shape
 
-    def _forward(self, a: Tensor) -> Tensor:
-        out = Tensor(a.data.data.reshape(*self.re), op=self)
+    def _forward(self, a: np.ndarray) -> Tensor:
+        out = Tensor(a.reshape(*self.re))
         return out
 
     def _backward(self) -> List[Tensor]:
-        return [self.out().grad.reshape(self.inp.shape)]
+        return [self.out().grad.reshape(*self.inp[0].shape)]
+
+
+def reshape(x: Tensor, *shape: int) -> Tensor:
+    return Reshape(*shape)(x)
+
+
+def expand(x: Tensor, axis: int) -> Tensor:
+    """扩展张量的维度"""
+    shape = list(x.shape)
+    shape.insert(axis, 1)
+    return reshape(x, *shape)
+
+
+def flatten(x: Tensor) -> Tensor:
+    """展平算子（保留批次维度）"""
+    return reshape(x, *(x.shape[0], -1))
 
 
 class Transpose(Operator):
@@ -296,48 +385,17 @@ def reslice(x: Tensor, slices, shape) -> Tensor:
     return Reslice(slices, shape)(x)
 
 
-class Mean(Operator):
-    """平均值运算符"""
-
-    def __init__(self, axis: Optional[int] = None, dims: bool = False):
-        super().__init__()
-        self.axis = axis
-        self.dims = dims
-
-    def _forward(self, a: np.ndarray) -> Tensor:
-        return Tensor(a.mean(axis=self.axis, keepdims=self.dims))
-
-    def _backward(self) -> Tensor:
-        if self.axis is None:
-            normalizer = self.inp[0].size
-        else:
-            normalizer = self.inp[0].shape[self.axis]
-        g = self.out().grad
-        if self.axis is not None and not self.dims:
-            old = list(self.inp.data.data.shape)
-            old[self.axis] = 1
-            g = self.out().grad.reshape(*tuple(old))
-        return g.repeat(self.inp.shape[self.axis], axis=self.axis) / normalizer
-
-
 class Concatenate(Operator):
-    """拼接运算符"""
+    """拼接算子"""
 
     def __init__(self, axis: int = 0):
         super().__init__()
         self.axis = axis
 
-    def _forward(self, tensors: List[Tensor]) -> Tensor:
+    def _forward(self, *tensors: np.ndarray) -> Tensor:
         if not tensors:
             raise ValueError("Input tensor list is empty!")
-        # 检查拼接维度外的其他维度是否匹配
-        shapes = [t.data.data.shape for t in tensors]
-        for i in range(len(shapes[0])):
-            if i != self.axis:
-                dims = {s[i] for s in shapes}
-                if len(dims) > 1:
-                    raise ValueError(f"All input tensors must have the same size in dimension {i}")
-        out = Tensor(np.concatenate([t.data.data for t in tensors], axis=self.axis), op=self)
+        out = Tensor(np.concatenate([t for t in tensors], axis=self.axis))
         return out
 
     def _backward(self) -> List[Tensor]:
@@ -348,127 +406,32 @@ class Concatenate(Operator):
             size = tensor.shape[self.axis]
             slices = [slice(None)] * self.out().ndim
             slices[self.axis] = slice(current, current + size)
-            g.append(self.out().grad.slice(tuple(slices)))
+            g.append(self.out().grad[tuple(slices)])
             current += size
         return g
 
 
-class Repeat(Operator):
-    """重复运算符"""
+def concatenate(*tensors: Tensor, axis: int = 0) -> Tensor:
+    return Concatenate(axis=axis)(*tensors)
 
-    def __init__(self, repeats: Union[int, Tuple[int, ...]], axis: Optional[int] = None):
-        super().__init__()
-        self.repeats = repeats
-        self.axis = axis
-
-    def _forward(self, a: Tensor) -> Tensor:
-        out = Tensor(np.repeat(a.data.data, repeats=self.repeats, axis=self.axis), op=self)
-        return out
-
-    def _backward(self) -> Tensor:
-        if self.axis is None:
-            n = self.inp.data.data.size
-            if isinstance(self.repeats, tuple):
-                repeats = self.repeats
-            else:
-                repeats = (self.repeats,) * n
-            indices = []
-            current = 0
-            for rep in repeats:
-                indices.append((current, current + rep))
-                current += rep
-        else:
-            if isinstance(self.repeats, tuple):
-                repeats = self.repeats
-            else:
-                repeats = (self.repeats,) * self.inp.data.data.shape[self.axis]
-            indices = []
-            current = 0
-            for rep in repeats:
-                indices.append((current, current + rep))
-                current += rep
-        return self.out().grad.compress(indices=indices, repeats=self.repeats, axis=self.axis)
-
-
-class Compress(Operator):
-    """压缩运算符"""
-
-    def __init__(self, indices: List[slice], repeats: Union[int, Tuple[int, ...]], axis: Optional[int] = None):
-        super().__init__()
-        self.indices = indices
-        self.repeats = repeats
-        self.axis = axis
-
-    def _forward(self, a: Tensor) -> Tensor:
-        out = np.zeros(len(self.indices))
-        if self.axis is None:
-            for i, (start, end) in enumerate(self.indices):
-                out.flat[i] += a.data.data.flat[slice(start, end)]
-        else:
-            for i, (start, end) in enumerate(self.indices):
-                slices = [slice(None)] * out.ndim
-                slices[self.axis] = slice(start, end)
-                target_slices = [slice(None)] * out.ndim
-                target_slices[self.axis] = slice(i, i + 1)
-                out[tuple(target_slices)] += np.sum(a.data.data[tuple(slices)], axis=self.axis)
-        out = Tensor(out, op=self)
-        return out
-
-    def _backward(self) -> Tensor:
-        return self.out().grad.repeat(repeats=self.repeats, axis=self.axis)
-
-
-class Relu(Operator):
-    """ReLU修正线性单元"""
-
-    def _forward(self, a: np.ndarray) -> Tensor:
-        return Tensor(np.maximum(a, 0))
-
-    def _backward(self) -> Tensor:
-        mask = Tensor(self.inp[0].data >= 0)
-        return self.out().grad * mask
-
-
-def relu(a: Tensor) -> Tensor:
-    return Relu()(a)
-
-
-class Sigmoid(Operator):
-    """Sigmoid激活函数"""
-
-    def _forward(self, a: Tensor) -> Tensor:
-        out = Tensor(1 / (1 + np.exp(-a.data.data)), op=self)
-        return out
-
-    def _backward(self) -> Tensor:
-        # 输入梯度 += σ(x) * (1 - σ(x)) * 输出梯度
-        return self.out() * (1 - self.out()) * self.out().grad
-
-
-class Tanh(Operator):
-    """Tanh激活函数"""
-
-    def _forward(self, a: Tensor) -> Tensor:
-        out = Tensor(np.tanh(a.data.data), op=self)
-        return out
-
-    def _backward(self):
-        # 输入梯度 += (1 - tanh²(x)) * 输出梯度
-        return (1 - self.out() ** 2) * self.out().grad
-
-
+# =============================================================================
+# 损失算子
+# =============================================================================
 class MeanSquaredError(Operator):
-    """均方误差运算符"""
+    """均方误差算子"""
 
-    def _forward(self, a: Tensor, b: Tensor) -> Tensor:
-        out = Tensor(np.square((a.data.data - b.data.data).sum(axis=-1, keepdims=True) / a.data.data.shape[-1]), op=self)
+    def _forward(self, a: np.ndarray, b: np.ndarray) -> Tensor:
+        out = Tensor(np.square(a - b).sum(axis=-1, keepdims=True) / a.shape[-1])
         return out
 
     def _backward(self) -> List[Tensor]:
-        g = self.out().grad.repeat(self.inp[0].shape[-1], axis=-1) * 2 * (self.inp[0] - self.inp[1]) / self.inp[0].shape[-1]
+        g = self.out().grad * 2 * (self.inp[0] - self.inp[1]) / self.inp[0].shape[-1]
         return [g, -g]
 
 
+# =============================================================================
+# 线性算子
+# =============================================================================
 class MatMul(Operator):
     """矩阵乘法运算符"""
 
@@ -476,8 +439,8 @@ class MatMul(Operator):
         return Tensor(a @ b)
 
     def _backward(self) -> List[Tensor]:
-        return [self.out().grad @ self.inp[1].transpose(-2, -1),
-               self.inp[0].transpose(-2, -1) @ self.out().grad]
+        return [self.out().grad @ self.inp[1].transpose(-1, -2),
+               self.inp[0].transpose(-1, -2) @ self.out().grad]
 
 
 def matmul(a: Tensor, b: Tensor) -> Tensor:
@@ -493,30 +456,28 @@ class DenseOp(Operator):
         self.b = matrix.b
         self.bias = matrix.bias
 
-    def _forward(self, x: Tensor) -> Tensor:
-        a = x.data.data
-        if a.ndim == 1:
-            a = a.reshape(1, -1)  # 单个样本转为 (1 × in_features)
+    def _forward(self, x: np.ndarray) -> Tensor:
+        if x.ndim == 1:
+            x = x.reshape(1, -1)  # 单个样本转为 (1 × in_features)
 
         # 矩阵乘法：W @ x.T = (out_features × batch_size)
-        out = self.w.data.data @ a.T
+        out = self.w.data @ x.transpose(-1, -2)
         if self.bias is not None:
-            out += self.b.data.data.repeat(a.shape[0], axis=1)
+            out += self.b.data
 
         # 转置回 (batch_size × out_features)
         if x.ndim == 1:
             out = out.reshape(-1)
-        out = Tensor(out.T, op=self)
-        return out
+        return Tensor(out.transpose(-1, -2))
 
     def _backward(self):
         # 1. 处理输出梯度形状 (batch_size × out_features → out_features × batch_size)
         grad = self.out().grad
-        a = self.inp
-        if self.inp.ndim == 1:
+        a = self.inp[0]
+        if self.inp[0].ndim == 1:
             grad = grad.reshape(1, -1)
             a = a.reshape(1, -1)
-        grad = grad.transpose(1, 0)
+        grad = grad.transpose(-1, -2)
         # 2. 计算偏置梯度（对所有样本梯度求和）
         if self.bias is not None:
             if self.b.grad is None:
@@ -528,7 +489,7 @@ class DenseOp(Operator):
             self.w.grad = grad @ a
         else:
             self.w.grad = self.w.grad + grad @ a
-        b = (self.w.transpose(1, 0) @ grad).transpose(1, 0)
-        if self.inp.ndim == 1:
-            b = b.reshape(*self.inp.shape)
-        return b
+        b = (self.w.transpose(-1, -2) @ grad).transpose(-1, -2)
+        if self.inp[0].ndim == 1:
+            b = b.reshape(*self.inp[0].shape)
+        return [b]
