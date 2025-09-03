@@ -1,12 +1,18 @@
+import TensorPlay as tp
+
+
 def sphere(x, y):
     return x ** 2 + y ** 2
+
 
 def matyas(x, y):
     return 0.26 * (x ** 2 + y ** 2) - 0.48 * x * y
 
+
 def goldstein(x, y):
     return (1 + (x + y + 1) ** 2 * (19 - 14 * x + 3 * x ** 2 - 14 * y + 6 * x * y + 3 * y ** 2)) * (
             30 + (2 * x - 3 * y) ** 2 * (18 - 32 * x + 12 * x ** 2 + 48 * y - 36 * x * y + 27 * y ** 2))
+
 
 def higher_optimizer(x, epoch, func, verbose=False):
     """
@@ -21,7 +27,7 @@ def higher_optimizer(x, epoch, func, verbose=False):
         y = func(x)
         y.name = 'y'
         if verbose:
-            print(f"第{i + 1}次迭代: x={x.vector}, y={y.vector}")
+            print(f"第{i + 1}次迭代: x={x.data}, y={y.data}")
         y.backward(higher_grad=True)
         gx = x.grad
         gx.name = 'gx'
@@ -29,6 +35,14 @@ def higher_optimizer(x, epoch, func, verbose=False):
         gx.backward()
         gx2 = x.grad
         x.zero_grad()
-        x.vector -= gx.vector / gx2.vector
-
+        x.data -= gx.data / gx2.data
     return x, y
+
+
+def deriv(func, x: tp.Tensor, eps=1e-4):
+    """函数的数值微分计算，测试用"""
+    x1 = tp.Tensor(x.data.data + eps)
+    x2 = tp.Tensor(x.data.data - eps)
+    y1 = func(x1)
+    y2 = func(x2)
+    return (y1.data.data - y2.data.data) / (2 * eps)

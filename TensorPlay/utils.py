@@ -2,6 +2,66 @@ import os
 import subprocess
 from .core import Tensor, Operator
 
+# =============================================================================
+# Training Utils
+# =============================================================================
+def train_on_batch(model, batch, optimizer, loss_fn=Tensor.mse):
+    """
+    训练一个批次并返回损失和准确率
+    :param model: 模型实例
+    :param batch: 批次数据 (inputs, labels)
+    :param optimizer: 优化器
+    :param loss_fn: 损失函数 (output, label)
+    :return: (loss, accuracy)
+    """
+    inputs, labels = batch
+    outputs = [model(i) for i in inputs]
+
+    sample_losses = [loss_fn(out, label) for out, label in zip(outputs, labels)]
+    loss = Tensor.mean(sample_losses)
+
+    correct = 0
+    total = len(outputs)
+    for out, label in zip(outputs, labels):
+        # 二分类阈值判断
+        pred = 1 if out.data.data[0] > 0.5 else 0
+        if pred == label.data.data[0]:
+            correct += 1
+    accuracy = correct / total
+
+    loss.backward()
+    optimizer.step()
+
+    return loss.data.data[0], accuracy
+
+
+def valid_on_batch(model, batch, loss_fn=Tensor.mse):
+    """
+    验证一个批次并返回损失和准确率
+    :param model: 模型实例
+    :param batch: 批次数据 (inputs, labels)
+    :param loss_fn: 损失函数 (output, label)
+    :return: (loss, accuracy)
+    """
+    inputs, labels = batch
+    outputs = [model(i) for i in inputs]
+    sample_losses = [loss_fn(out, label) for out, label in zip(outputs, labels)]
+    loss = Tensor.mean(sample_losses)
+
+    correct = 0
+    total = len(outputs)
+    for out, label in zip(outputs, labels):
+        # 二分类阈值判断
+        pred = 1 if out.data.data[0] > 0.5 else 0
+        if pred == label.data.data[0]:
+            correct += 1
+    accuracy = correct / total
+
+    return loss.data.data[0], accuracy
+
+# =============================================================================
+# Graph Utils
+# =============================================================================
 def _dot_ten(v: Tensor, verbose=False):
     """绘制张量节点"""
     name = '' if v.name is None else v.name
@@ -16,6 +76,7 @@ def _dot_ten(v: Tensor, verbose=False):
         text += f'{id(v.op)} -> {id(v)}\n'
     return text
 
+
 def _dot_op(op: Operator):
     """绘制算符节点"""
     text = f'{id(op)} [label="{op.__class__.__name__}", color=lightblue, style=filled, shape=box]\n'
@@ -24,6 +85,7 @@ def _dot_op(op: Operator):
     for x in inp:
         text += dot_edge.format(id(x), id(op))
     return text
+
 
 def _trace_dot_graph(out: Tensor, verbose=False):
     """获取计算图"""
@@ -50,6 +112,7 @@ def _trace_dot_graph(out: Tensor, verbose=False):
 
     return 'digraph g {\n' + text + '}'
 
+
 def _instill_dot_graph(book: list, verbose=False):
     """提取计算图"""
     text = ''
@@ -59,6 +122,7 @@ def _instill_dot_graph(book: list, verbose=False):
         for inp_tensor in current:
             text += _dot_ten(inp_tensor, verbose)
     return 'digraph g {\n' + text + '}'
+
 
 def plot_dot_graph(source, verbose=False, path='graph.png'):
     """绘制计算图"""
