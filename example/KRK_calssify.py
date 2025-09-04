@@ -1,6 +1,6 @@
 import random
 from TensorPlay import Tensor, Dense, Module, Adam, EarlyStopping
-from TensorPlay import DataLoader, train_on_batch, valid_on_batch
+from TensorPlay import DataLoader, cross_entropy, accuracy, mse
 
 # 数据加载
 def load_data(path='D:/demo/Shen-main/krkopt.data'):
@@ -35,12 +35,12 @@ class KRKClassifier(Module):
         super().__init__()
         self.fc1 = Dense(input_size, 32, bias=True)
         self.fc2 = Dense(32, 16, bias=True)
-        self.fc3 = Dense(16, 1, bias=True)
+        self.fc3 = Dense(16, 2, bias=True)
 
     def forward(self, x):
         x = self.fc1(x).relu()
         x = self.fc2(x).relu()
-        x = self.fc3(x).sigmoid()
+        x = self.fc3(x).softmax(axis=1)
         return x
 
 # 主训练函数
@@ -52,31 +52,33 @@ def train(model, loader, val_data, epochs=50, lr=0.01):
         total_loss = 0
         correct = 0
         total_samples = 0
-        for batch in loader:
-            batch_size = len(batch[0])
+        for x, y in loader:
+            batch_size = x.shape[0]
             total_samples += batch_size
-
-            loss, acc = train_on_batch(model, batch, optimizer)
-            total_loss += loss * batch_size  # 累计总损失
-            correct += acc * batch_size   # 累计正确率
+            pred = model(x)
+            loss = mse(y, pred)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.data.mean() * batch_size
+            correct += accuracy(pred, y) * batch_size
 
         avg_loss = total_loss / total_samples
-        accuracy = correct / total_samples
+        acc = correct / total_samples
         total_loss = 0
         correct = 0
         total_samples = 0
-        for batch in val_data:
-            batch_size = len(batch[0])
-            val_loss, val_acc = valid_on_batch(model, batch)
+        for x, y in val_data:
+            batch_size = x.shape[0]
             total_samples += batch_size
-            correct += val_acc * batch_size
-            total_loss += val_loss * batch_size
+            pred = model(x)
+            loss = mse(y, pred)
+            total_loss += loss.data.mean() * batch_size
+            correct += accuracy(pred, y) * batch_size
 
         val_avg_loss = total_loss / total_samples
-        val_accuracy = correct / total_samples
-
+        val_acc = correct / total_samples
         print(f"Epoch {epoch + 1}/{epochs}")
-        print(f"Loss: {avg_loss:.4f} | Accuracy: {accuracy:.4f}  Val Loss: {val_avg_loss:.4f} | Val Accuracy: {val_accuracy:.4f}")
+        print(f"Loss: {avg_loss:.4f} | Accuracy: {acc:.4f}  Val Loss: {val_avg_loss:.4f} | Val Accuracy: {val_acc:.4f}")
         stoper(val_avg_loss, model)
         if stoper.early_stop:
             break
@@ -115,4 +117,4 @@ if __name__ == "__main__":
     train(classifier, train_loader, val_loader, epochs=30, lr=0.005)
 
     # 测试模型
-    test(classifier, test_loader)
+    # test(classifier, test_loader)
