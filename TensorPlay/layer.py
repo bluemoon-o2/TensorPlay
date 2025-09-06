@@ -2,7 +2,7 @@ from typing import List, Union, Tuple
 import json
 import numpy as np
 from .core import Tensor, Layer, to_data
-from .operator import DenseOp
+from .operator import DenseOp, BatchNormOp
 from .initializer import he_init, my_init
 
 
@@ -32,23 +32,14 @@ class LayerNorm(Layer):
         self.eps = eps
         super().__init__()
 
-    def forward(self, x: Tensor, eps=0.0001) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         """前向传播：计算标准化并应用可学习参数"""
-        batch_size = x.shape[0]
-
-        # 计算均值 (沿批次维度)
-        mean = x.sum(axis=0, dims=True) / Tensor([batch_size])
-        mean_repeated = mean.repeat(batch_size, axis=0)
-
         # 计算方差
-        x_minus_mean = x - mean_repeated
-        var = (x_minus_mean ** 2).sum(axis=0, dims=True) / Tensor([batch_size])
-        var_repeated = var.repeat(batch_size, axis=0)
+        y = x - x.mean(axis=0, dims=True)
+        var = (y ** 2).mean(axis=0, dims=True)
         # 计算标准化结果
-        std = (var_repeated + Tensor([eps])) ** 0.5
-        x_normalized = x_minus_mean / std
-
-        return self.w.repeat(batch_size, axis=0) * x_normalized + self.b.repeat(batch_size, axis=0)
+        x_normalized = y / ((var + self.eps) ** 0.5)
+        return self.w * x_normalized + self.b
 
     def save(self) -> str:
         text = {'w': self.w.data.data.tolist(), 'b': self.b.data.data.tolist()}
@@ -74,14 +65,12 @@ class Dense(Layer):
         super().__init__()
 
     def forward(self, a: Tensor) -> Tensor:
-        op = DenseOp(self)
-        out = op(a)
-        return out
+        return DenseOp(self)(a)
 
     def save(self) -> str:
-        text = {'w': self.w.data.data.tolist()}
+        text = {'w': self.w.data.tolist()}
         if self.bias:
-            text['b'] = self.b.data.data.tolist()
+            text['b'] = self.b.data.tolist()
         return json.dumps(text)
 
     def load(self, text: str) -> None:
@@ -94,6 +83,36 @@ class Dense(Layer):
         if self.bias:
             return [self.w, self.b]
         return [self.w]
+
+
+class BatchNorm(Layer):
+    """批量归一化层"""
+    def __init__(self, channels: int, eps: float = 1e-4, decay: float = 0.9):
+        self.eps = eps
+        self.decay = decay
+        self.gamma = Tensor(np.ones(channels))
+        self.beta = Tensor(np.zeros(channels))
+        self.running_mean = np.zeros(channels)
+        self.running_var = np.ones(channels)
+        super().__init__()
+
+    def forward(self, a: Tensor) -> Tensor:
+        return BatchNormOp(self)(a)
+
+    def save(self) -> str:
+        text = {'gamma': self.gamma.data.tolist(), 'beta': self.beta.data.tolist(),
+                'running_mean': self.running_mean.tolist(), 'running_var': self.running_var.tolist()}
+        return json.dumps(text)
+
+    def load(self, text: str) -> None:
+        parts = json.loads(text)
+        self.gamma = Tensor(parts['w'])
+        self.beta = Tensor(parts['b'])
+        self.running_mean = np.array(parts['running_mean'])
+        self.running_var = np.array(parts['running_var'])
+
+    def param(self) -> List[Tensor]:
+        return [self.gamma, self.beta]
 
 
 class Conv2D(Layer):

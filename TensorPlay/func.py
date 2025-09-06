@@ -1,14 +1,17 @@
 from .core import Tensor
-from .operator import MeanSquaredError
+from .operator import MeanSquaredError, CrossEntropy
 
 # =============================================================================
 # 损失函数
 # =============================================================================
 def mse(out: Tensor, target: Tensor) -> Tensor:
     """均方误差（Mean Squared Error）：MSE = (1/n) * sum((a - b)²)"""
-    if out.shape != target.shape:
-        raise ValueError("MSE can only be calculated between tensors of the same shape")
     return MeanSquaredError()(out, target)
+
+
+def cross_entropy(out: Tensor, target: Tensor, axis: int = 1, activation: str = 'softmax') -> Tensor:
+    """交叉熵损失函数"""
+    return CrossEntropy(axis=axis, activation=activation)(out, target)
 
 
 def sse(out: Tensor, target: Tensor) -> Tensor:

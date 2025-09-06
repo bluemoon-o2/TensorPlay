@@ -66,20 +66,11 @@ class Module(Layer):
 
     def train(self, mode: bool = True):
         """设置训练模式"""
-        Config.set_grad_enabled(mode)
-        self.training = mode
-        for p in self.parameters.values():
-            p.training = mode
-        for l in self.layers.values():
-            l.training = mode
-        for module in self.modules.values():
-            module.train(mode, )
-        # 返回值方便链式调用
+        Config.training = mode
         return self
 
     def eval(self):
         """设置评估模式，复用train(False)"""
-        Config.set_grad_enabled(False)
         return self.train(False)
 
     def save(self, path: str):

@@ -12,6 +12,7 @@ warnings.filterwarnings("default", category=UserWarning)
 class Config:
     precision = np.float32
     enable_grad = True
+    training = True
 
 
 @contextlib.contextmanager
@@ -59,15 +60,21 @@ class Tensor:
     __getitem__: Callable[..., 'Tensor']
     reslice: Callable[..., 'Tensor']
     sum: Callable[..., 'Tensor']
+    max: Callable[..., 'Tensor']
+    min: Callable[..., 'Tensor']
     exp: Callable[..., 'Tensor']
     log: Callable[..., 'Tensor']
     mean: Callable[..., 'Tensor']
     relu: Callable[..., 'Tensor']
+    leaky_relu: Callable[..., 'Tensor']
     gelu: Callable[..., 'Tensor']
     tanh: Callable[..., 'Tensor']
     softmax: Callable[..., 'Tensor']
+    log_softmax: Callable[..., 'Tensor']
     sigmoid: Callable[..., 'Tensor']
     reshape: Callable[..., 'Tensor']
+    clip: Callable[..., 'Tensor']
+    dropout: Callable[..., 'Tensor']
     expand: Callable[..., 'Tensor']
     flatten: Callable[..., 'Tensor']
     transpose: Callable[..., 'Tensor']
@@ -258,8 +265,6 @@ class Layer:
     layer_list: List['Layer'] = []  # 基础参数层全局记录，兼容最底层实现
 
     def __init__(self, *args):
-        # 训练模式记录
-        self.training = True
         self._forward_pre_hooks = {}
         self._forward_hooks = {}
         self._backward_hooks = {}

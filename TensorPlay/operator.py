@@ -1,6 +1,47 @@
 from typing import List, Union, Tuple
-from .core import Operator, Tensor
+from .core import Operator, Tensor, Config
 import numpy as np
+
+# =============================================================================
+# 加载算子
+# =============================================================================
+def load_operator():
+    """加载算子"""
+    Tensor.__add__ = add
+    Tensor.__radd__ = add
+    Tensor.__neg__ = neg
+    Tensor.__sub__ = sub
+    Tensor.__rsub__ = rsub
+    Tensor.__mul__ = mul
+    Tensor.__rmul__ = rmul
+    Tensor.__matmul__ = matmul
+    Tensor.__truediv__ = div
+    Tensor.__rtruediv__ = rdiv
+    Tensor.__pow__ = ten_pow
+    Tensor.__getitem__ = ten_slice
+    Tensor.reslice = reslice
+    Tensor.sum = ten_sum
+    Tensor.max = ten_max
+    Tensor.min = ten_min
+    Tensor.exp = exp
+    Tensor.log = log
+    Tensor.mean = mean
+    Tensor.relu = relu
+    Tensor.leaky_relu = leaky_relu
+    Tensor.gelu = gelu
+    Tensor.tanh = tanh
+    Tensor.clip = clip
+    Tensor.dropout = dropout
+    Tensor.expand = expand
+    Tensor.reshape = reshape
+    Tensor.flatten = flatten
+    Tensor.sigmoid = sigmoid
+    Tensor.softmax = softmax
+    Tensor.log_softmax = log_softmax
+    Tensor.broadcast = broadcast
+    Tensor.rebroadcast = rebroadcast
+    Tensor.transpose = transpose
+    Tensor.T = T
 
 # =============================================================================
 # 四则运算算子
@@ -167,24 +208,30 @@ def relu(a: Tensor) -> Tensor:
     return Relu()(a)
 
 
-def softmax(x: Tensor, axis: int = -1) -> 'Tensor':
-    """softmax激活函数：softmax(x) = e^x / sum(e^x_j)"""
-    exp_tensor = x.exp()
-    sum_exp = exp_tensor.sum(axis=axis, dims=True)
-    # 数值稳定，防止除零
-    return exp_tensor / (sum_exp + Tensor(1e-10))
+class LeakyReLU(Operator):
+    """LeakyReLU修正线性单元"""
+
+    def __init__(self, slope: float = 0.2):
+        super().__init__()
+        self.slope = slope
+
+    def _forward(self, x: np.ndarray) -> Tensor:
+        return Tensor(np.where(x < 0, x * self.slope, x))
+
+    def _backward(self) -> List[Tensor]:
+        mask = np.where(self.inp[0].data < 0, self.slope, 1.0)
+        return [self.out().grad * Tensor(mask)]
 
 
-def gelu(x: Tensor) -> 'Tensor':
-    """GELU激活函数：GELU(x) ≈ x * Sigmoid(1.702x)"""
-    return x * (x * Tensor(1.702)).sigmoid()
+def leaky_relu(x: Tensor, slope: float = 0.2) -> Tensor:
+    return LeakyReLU(slope)(x)
 
 
 class Sigmoid(Operator):
     """Sigmoid激活函数"""
 
     def _forward(self, a: np.ndarray) -> Tensor:
-        return Tensor(1 / (1 + np.exp(-a)))
+        return Tensor(np.where(a > 20, 1.0, np.where(a < -20, np.exp(a) / (1 + np.exp(a)), 1 / (1 + np.exp(-a)))))
 
     def _backward(self) -> List[Tensor]:
         # 输入梯度 += σ(x) * (1 - σ(x)) * 输出梯度
@@ -193,6 +240,61 @@ class Sigmoid(Operator):
 
 def sigmoid(x: Tensor) -> Tensor:
     return Sigmoid()(x)
+
+
+class Gelu(Operator):
+    """GeLU高斯线性单元"""
+
+    def _forward(self, a: np.ndarray) -> Tensor:
+        return Tensor(a * np.where(a > 20, 1.0,
+                    np.where(a < -20, np.exp(a * 1.702) / (1 + np.exp(a * 1.702)), 1 / (1 + np.exp(-a * 1.702)))))
+
+    def _backward(self) -> List[Tensor]:
+        z = (self.inp[0] * 1.702).sigmoid()
+        return [(z + self.inp[0] * 1.702 * z * (1 - z)) * self.out().grad]
+
+
+def gelu(x: Tensor) -> Tensor:
+    return Gelu()(x)
+
+
+class Softmax(Operator):
+    """softmax激活函数"""
+
+    def __init__(self, axis: int = 1):
+        super().__init__()
+        self.axis = axis
+
+    def _forward(self, a: np.ndarray) -> Tensor:
+        # 数值稳定，防止除零
+        exp_tensor = np.exp(a - a.max(axis=self.axis, keepdims=True))
+        sum_exp = exp_tensor.sum(axis=self.axis, keepdims=True)
+        return Tensor(exp_tensor / (sum_exp + 1e-10))
+
+    def _backward(self) -> List[Tensor]:
+        gx = self.out() * self.out().grad
+        return [gx- self.out() * gx.sum(axis=self.axis, dims=True)]
+
+
+def softmax(x: Tensor, axis: int = 1) -> Tensor:
+    return Softmax(axis)(x)
+
+
+class LogSoftmax(Operator):
+    def __init__(self, axis: int = 1):
+        super().__init__()
+        self.axis = axis
+
+    def _forward(self, a: np.ndarray) -> Tensor:
+        delta = a - a.max(axis=self.axis, keepdims=True)
+        return Tensor(delta - np.log(1e-10 + np.sum(np.exp(delta), axis=self.axis, keepdims=True)))
+
+    def _backward(self) -> List[Tensor]:
+        return [self.out().grad - self.out().exp() * self.out().grad.sum(axis=self.axis, dims=True)]
+
+
+def log_softmax(x: Tensor, axis: int = 1) -> Tensor:
+    return LogSoftmax(axis)(x)
 
 
 class Tanh(Operator):
@@ -414,14 +516,101 @@ class Concatenate(Operator):
 def concatenate(*tensors: Tensor, axis: int = 0) -> Tensor:
     return Concatenate(axis=axis)(*tensors)
 
+
+class Max(Operator):
+    """最大值算子"""
+
+    def __init__(self, axis: Union[int, Tuple[int, ...]] = None, dims: bool = False):
+        super().__init__()
+        self.axis = axis
+        self.dims = dims
+
+    def _forward(self, a: np.ndarray) -> Tensor:
+        return Tensor(a.max(axis=self.axis, keepdims=self.dims))
+
+    def _backward(self) -> List[Tensor]:
+        # 扩展梯度以匹配原始形状
+        mask = (self.inp[0].data == self.out().data)
+        g = self.out().grad
+        if self.axis is not None and not self.dims:
+            self.axis = self.axis if isinstance(self.axis, Tuple) else (self.axis,)
+            old = list(self.inp[0].shape)
+            for a in self.axis:
+                old[a] = 1
+            g = self.out().grad.reshape(*tuple(old))
+        return [g * mask.astype(g.dtype)]
+
+
+def ten_max(x: Tensor, axis: Union[int, Tuple[int, ...]] = None, dims: bool = False) -> Tensor:
+    return Max(axis, dims)(x)
+
+
+class Min(Operator):
+    """最小值算子"""
+
+    def __init__(self, axis: Union[int, Tuple[int, ...]] = None, dims: bool = False):
+        super().__init__()
+        self.axis = axis
+        self.dims = dims
+
+    def _forward(self, a: np.ndarray) -> Tensor:
+        return Tensor(a.min(axis=self.axis, keepdims=self.dims))
+
+    def _backward(self) -> List[Tensor]:
+        mask = (self.inp[0].data == self.out().data)
+        g = self.out().grad
+        if self.axis is not None and not self.dims:
+            self.axis = self.axis if isinstance(self.axis, Tuple) else (self.axis,)
+            old = list(self.inp[0].shape)
+            for a in self.axis:
+                old[a] = 1
+            g = self.out().grad.reshape(*tuple(old))
+        return [g * mask.astype(g.dtype)]
+
+
+def ten_min(x: Tensor, axis: Union[int, Tuple[int, ...]] = None, dims: bool = False) -> Tensor:
+    return Min(axis, dims)(x)
+
+
+class Clip(Operator):
+    """裁剪算子"""
+
+    def __init__(self, x_min: float, x_max: float):
+        super().__init__()
+        self.x_min = x_min
+        self.x_max = x_max
+
+    def _forward(self, x: np.ndarray) -> Tensor:
+        return Tensor(x.clip(self.x_min, self.x_max))
+
+    def _backward(self) -> List[Tensor]:
+        mask = (self.inp[0].data >= self.x_min) * (self.inp[0].data <= self.x_max)
+        return [self.out().grad * mask.astype(self.out().dtype)]
+
+
+def clip(x: Tensor, x_min: float, x_max: float) -> Tensor:
+    return Clip(x_min, x_max)(x)
+
+
+def dropout(x: Tensor, ratio=0.5):
+    if Config.training:
+        mask = (np.random.rand(*x.shape) > ratio).astype(x.dtype)
+        y = x * mask / ratio
+        return y
+    else:
+        return x
+
 # =============================================================================
 # 损失算子
 # =============================================================================
 class MeanSquaredError(Operator):
     """均方误差算子"""
+    def __init__(self, axis: int = 1):
+        super().__init__()
+        self.axis = axis
 
     def _forward(self, a: np.ndarray, b: np.ndarray) -> Tensor:
-        out = Tensor(np.square(a - b).sum(axis=-1, keepdims=True) / a.shape[-1])
+        out = Tensor(np.square(a - b).sum(axis=self.axis, keepdims=True) / a.shape[-1])
         return out
 
     def _backward(self) -> List[Tensor]:
@@ -429,8 +618,51 @@ class MeanSquaredError(Operator):
         return [g, -g]
 
 
+class CrossEntropy(Operator):
+    """交叉熵算子（必须从批次维度开始）"""
+    def __init__(self, axis: int = 1, activation: str = 'softmax'):
+        super().__init__()
+        self.activation = activation
+        self.axis = axis
+
+    def _forward(self, a: np.ndarray, b: np.ndarray) -> Tensor:
+        if self.activation == 'softmax':
+            if b.ndim == 1:
+                # 转换为one-hot编码，提高后续计算效率
+                batch_size, num_classes = a.shape
+                one_hot = np.zeros((batch_size, num_classes), dtype=a.dtype)
+                one_hot[np.arange(batch_size), b.astype(np.int32)] = 1.0
+                b = one_hot
+            delta = a - a.max(axis=self.axis, keepdims=True)
+            y = delta - np.log(1e-10 + np.sum(np.exp(delta), axis=self.axis, keepdims=True))
+            # 计算交叉熵损失：-sum(target * log_softmax) / batch_size
+            loss = -np.sum(b * y, axis=self.axis, keepdims=True)
+            loss = np.mean(loss, axis=0)
+        elif self.activation == 'sigmoid':
+            # 二分类：标签保持原格式（无需one-hot，通常为0或1）
+            log_sigmoid = np.where(a >= 0, -np.log(1 + np.exp(-a)), a - np.log(1 + np.exp(a)))
+            log_one_minus_sigmoid = np.where(a >= 0, -a - np.log(1 + np.exp(-a)), -np.log(1 + np.exp(a)))
+            # 二元交叉熵公式：-mean(b*log(sigmoid) + (1-b)*log(1-sigmoid))
+            loss = -np.mean(b * log_sigmoid + (1 - b) * log_one_minus_sigmoid, axis=self.axis, keepdims=True)
+            loss = np.mean(loss, axis=0)
+        else:
+            raise ValueError(f"Unknown activation function: {self.activation}")
+        return Tensor(loss)
+
+    def _backward(self) -> List[Tensor]:
+        batch_size = self.inp[0].shape[0]
+        if self.activation == 'softmax':
+            # 交叉熵梯度：(softmax - target) / batch_size
+            g = (self.inp[0].softmax(axis=self.axis) - self.inp[1]) / batch_size
+        elif self.activation == 'sigmoid':
+            # 二分类梯度：(sigmoid - target) / batch_size
+            g = (self.inp[0].sigmoid() - self.inp[1]) / batch_size
+        else:
+            raise ValueError(f"Unknown activation function: {self.activation}")
+        return [g, None]
+
 # =============================================================================
-# 线性算子
+# 层算子
 # =============================================================================
 class MatMul(Operator):
     """矩阵乘法运算符"""
@@ -493,3 +725,64 @@ class DenseOp(Operator):
         if self.inp[0].ndim == 1:
             b = b.reshape(*self.inp[0].shape)
         return [b]
+
+
+class BatchNormOp(Operator):
+    """批量标准化处理层（Batch Normalization）"""
+
+    def __init__(self, params: 'BatchNorm'):
+        super().__init__()
+        self.eps = params.eps
+        self.decay = params.decay
+        self.gamma = params.gamma
+        self.beta = params.beta
+        self.running_mean = params.running_mean
+        self.running_var = params.running_var
+
+    def _forward(self, x: np.ndarray) -> Tensor:
+        x_ndim = x.ndim
+        assert x_ndim in (2, 4), f"Only for 2D or 4D input, but got: {x_ndim}"
+        if x_ndim == 4:
+            batch_size, height, width, channels = x.shape
+            # (N,H,W,C) -> (N*H*W, C)
+            x = x.reshape(-1, channels)
+        if Config.training:
+            m = x.mean(axis=0)  # 按特征/通道计算均值
+            var = x.var(axis=0)  # 按特征/通道计算方差
+            inv_std = 1 / np.sqrt(var + self.eps)
+            xc = (x - m) * inv_std
+            n = x.size // self.gamma.size  # 单个特征的样本数量
+            s = n - 1 if n - 1 > 1 else 1
+            adjust = n / s
+            self.running_mean = self.decay * self.running_mean + (1 - self.decay) * m
+            self.running_var = self.decay * self.running_var + (1 - self.decay) * var * adjust
+            self.inv_std = inv_std
+        else:
+            inv_std = 1 / np.sqrt(self.running_var + self.eps)
+            xc = (x - self.running_mean) * inv_std
+        y = xc * self.gamma.data + self.beta.data
+        if x_ndim == 4:
+            y = y.reshape(batch_size, height, width, channels)
+        return Tensor(y)
+
+    def _backward(self) -> List[Tensor]:
+        if self.inp[0].ndim == 4:
+            B, H, W, C = self.inp[0].shape
+            gy = self.out().grad.reshape(-1, C)
+            x = self.inp[0].reshape(-1, C)
+        else:
+            gy = self.out().grad
+            x = self.inp[0]
+        xc = (x - x.mean(axis=0, dims=True)) * self.inv_std
+        if self.gamma.grad is None:
+            self.gamma.grad = (xc * gy).sum(axis=0)
+        else:
+            self.gamma.grad = self.gamma.grad + (xc * gy).sum(axis=0)
+        if self.beta.grad is None:
+            self.beta.grad = gy.sum(axis=0)
+        else:
+            self.beta.grad = self.beta.grad + gy.sum(axis=0)
+        gx = (gy - self.beta.grad / self.inp[0].shape[0] - xc * self.gamma.grad / self.inp[0].shape[0]) * self.gamma * self.inv_std
+        if self.inp[0].ndim == 4:
+            gx = gx.reshape(B, H, W, C)
+        return [gx]

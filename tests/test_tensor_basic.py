@@ -10,7 +10,7 @@ def test_tensor_creation():
     # 检查数据是否正确存储
     assert np.array_equal(t.data, data)
     assert t.grad is None
-    assert t.creator is None
+    assert t.op is None
     
 
 
@@ -36,10 +36,11 @@ def test_tensor_arithmetic():
 def test_tensor_functions():
     # 测试内置函数
     x = Tensor(np.array([-1.0, 0.0, 1.0]))
+    y = Tensor(np.array([1.0, 0.0, -1.0]))
 
     # 测试sphere函数
-    y = sphere(x)
-    assert np.array_equal(y.data, np.array([1.0, 0.0, 1.0]))
+    z = sphere(x, y)
+    assert np.array_equal(z.data, np.array([2.0, 0.0, 2.0]))
     
     # 测试relu方法
     z = x.relu()
@@ -50,13 +51,13 @@ def test_tensor_functions():
 def test_simple_backward():
     # 测试简单的反向传播
     x = Tensor(np.array([2.0]))
-    y = sphere(x)
+    y = sphere(x, x)
     
     # 手动设置梯度并反向传播
-    y.backward(np.array([1.0]))
+    y.backward()
     
     # 导数应为4.0 (d/dx x² = 2x, 在x=2时为4)
-    assert np.array_equal(x.grad, np.array([4.0]))
+    assert np.array_equal(x.grad.data, np.array([8.0]))
     
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 from .core import Tensor
+from .operator import concatenate
 import numpy as np
 
 # =============================================================================
@@ -62,9 +63,9 @@ class DataLoader:
             x, y = self.data[idx]
             if self.transform:
                 x, y = self.transform(x, y)
-            batch_inputs.append(Tensor(x))
-            batch_labels.append(Tensor(y))
-        return batch_inputs, batch_labels
+            batch_inputs.append(Tensor([x]))
+            batch_labels.append(Tensor([y]))
+        return concatenate(*batch_inputs, axis=0), concatenate(*batch_labels, axis=0)
 
     def __len__(self):
         """返回批次数量"""

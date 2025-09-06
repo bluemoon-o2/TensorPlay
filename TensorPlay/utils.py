@@ -1,64 +1,18 @@
 import os
 import subprocess
+import numpy as np
 from .core import Tensor, Operator
-from .func import mse
 
 # =============================================================================
 # Training Utils
 # =============================================================================
-def train_on_batch(model, batch, optimizer, loss_fn=mse):
-    """
-    训练一个批次并返回损失和准确率
-    :param model: 模型实例
-    :param batch: 批次数据 (inputs, labels)
-    :param optimizer: 优化器
-    :param loss_fn: 损失函数 (output, label)
-    :return: (loss, accuracy)
-    """
-    inputs, labels = batch
-    outputs = [model(i) for i in inputs]
-
-    sample_losses = [loss_fn(out, label) for out, label in zip(outputs, labels)]
-    loss = Tensor.mean(sample_losses)
-
-    correct = 0
-    total = len(outputs)
-    for out, label in zip(outputs, labels):
-        # 二分类阈值判断
-        pred = 1 if out.data.data[0] > 0.5 else 0
-        if pred == label.data.data[0]:
-            correct += 1
-    accuracy = correct / total
-
-    loss.backward()
-    optimizer.step()
-
-    return loss.data.data[0], accuracy
-
-
-def valid_on_batch(model, batch, loss_fn=mse):
-    """
-    验证一个批次并返回损失和准确率
-    :param model: 模型实例
-    :param batch: 批次数据 (inputs, labels)
-    :param loss_fn: 损失函数 (output, label)
-    :return: (loss, accuracy)
-    """
-    inputs, labels = batch
-    outputs = [model(i) for i in inputs]
-    sample_losses = [loss_fn(out, label) for out, label in zip(outputs, labels)]
-    loss = Tensor.mean(sample_losses)
-
-    correct = 0
-    total = len(outputs)
-    for out, label in zip(outputs, labels):
-        # 二分类阈值判断
-        pred = 1 if out.data.data[0] > 0.5 else 0
-        if pred == label.data.data[0]:
-            correct += 1
-    accuracy = correct / total
-
-    return loss.data.data[0], accuracy
+def accuracy(output: Tensor, target: Tensor) -> float:
+    if output.shape[1] == 2:
+        result = np.argmax(output.data, axis=1, keepdims=True)
+    elif output.shape[1] == 1:
+        result = np.where(output.data > 0.5, 1, 0)
+    result = (result == target.data).astype(output.dtype).mean()
+    return result
 
 # =============================================================================
 # Graph Utils

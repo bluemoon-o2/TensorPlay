@@ -25,45 +25,14 @@ __license__ = "MIT"
 # 全局接口
 # =============================================================================
 from .core import (config, no_grad, to_data, Tensor, Layer, Operator, Optimizer)
-from .layer import (Dense)
+from .layer import (Dense, BatchNorm)
 from .module import (Module, Sequential)
 from .optimizer import (SGD, Adam, Momentum, AdamW, Nadam, Lookahead, RMSprop)
-from .operator import (concatenate)
-from .func import (mse, sse, nll)
+from .operator import (concatenate, load_operator)
+from .func import (mse, sse, nll, cross_entropy, sphere)
 from .initializer import (he_init, xavier_init, uniform_init, my_init)
-from .utils import (plot_dot_graph, train_on_batch, valid_on_batch)
+from .utils import (plot_dot_graph, accuracy)
+from .data import (DataLoader)
+from .scheduler import (StepLR, MultiStepLR, ExponentialLR, EarlyStopping)
 
-
-# =============================================================================
-# 加载算子
-# =============================================================================
-import TensorPlay.operator as ops
-Tensor.__add__ = ops.add
-Tensor.__radd__ = ops.add
-Tensor.__neg__ = ops.neg
-Tensor.__sub__ = ops.sub
-Tensor.__rsub__ = ops.rsub
-Tensor.__mul__ = ops.mul
-Tensor.__rmul__ = ops.rmul
-Tensor.__matmul__ = ops.matmul
-Tensor.__truediv__ = ops.div
-Tensor.__rtruediv__ = ops.rdiv
-Tensor.__pow__ = ops.ten_pow
-Tensor.__getitem__ = ops.ten_slice
-Tensor.reslice = ops.reslice
-Tensor.sum = ops.ten_sum
-Tensor.exp = ops.exp
-Tensor.log = ops.log
-Tensor.mean = ops.mean
-Tensor.relu = ops.relu
-Tensor.gelu = ops.gelu
-Tensor.tanh = ops.tanh
-Tensor.expand = ops.expand
-Tensor.reshape = ops.reshape
-Tensor.flatten = ops.flatten
-Tensor.sigmoid = ops.sigmoid
-Tensor.softmax = ops.softmax
-Tensor.broadcast = ops.broadcast
-Tensor.rebroadcast = ops.rebroadcast
-Tensor.transpose = ops.transpose
-Tensor.T = ops.T
+load_operator()

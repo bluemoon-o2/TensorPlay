@@ -11,7 +11,7 @@ class SGD(Optimizer):
 
     def _step(self):
         for ten in self.params:
-            ten.data.data -= self.lr * ten.grad.data.data
+            ten.data -= self.lr * ten.grad.data
             ten.zero_grad()
 
 
@@ -26,8 +26,8 @@ class Momentum(Optimizer):
 
     def _step(self):
         for i, tensor in enumerate(self.params):
-            self.momentum[i] = self.gamma * self.momentum[i] + (1 - self.gamma) * tensor.grad.data.data
-            tensor.data.data -= self.momentum[i] * self.lr
+            self.momentum[i] = self.gamma * self.momentum[i] + (1 - self.gamma) * tensor.grad.data
+            tensor.data -= self.momentum[i] * self.lr
             tensor.zero_grad()
 
 
@@ -47,13 +47,13 @@ class Adam(Optimizer):
     def _step(self):
         for i, tensor in enumerate(self.params):
             # 更新一阶动量
-            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * tensor.grad.data.data
+            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * tensor.grad.data
             # 更新二阶动量
-            self.s[i] = self.b2 * self.s[i] + (1 - self.b2) * tensor.grad.data.data ** 2
+            self.s[i] = self.b2 * self.s[i] + (1 - self.b2) * tensor.grad.data ** 2
             # 偏差修正
             cm = self.m[i] / (1 - self.b1 ** self.times)
             cs = self.s[i] / (1 - self.b2 ** self.times)
-            tensor.data.data -= (self.lr * cm) / (cs ** 0.5 + self.eps)
+            tensor.data -= (self.lr * cm) / (cs ** 0.5 + self.eps)
             tensor.zero_grad()
         self.times += 1
 
@@ -74,12 +74,12 @@ class AdamW(Optimizer):
 
     def _step(self):
         for i, tensor in enumerate(self.params):
-            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * tensor.grad.data.data
-            self.s[i] = self.b2 * self.s[i] + (1 - self.b2) * tensor.grad.data.data ** 2
+            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * tensor.grad.data
+            self.s[i] = self.b2 * self.s[i] + (1 - self.b2) * tensor.grad.data ** 2
             cm = self.m[i] / (1 - self.b1 ** self.times)
             cs = self.s[i] / (1 - self.b2 ** self.times)
             # 引入权重衰减
-            tensor.data.data -= self.lr * (cm / (cs ** 0.5 + self.eps) + self.weight_decay * tensor.data.data)
+            tensor.data -= self.lr * (cm / (cs ** 0.5 + self.eps) + self.weight_decay * tensor.data)
             tensor.zero_grad()
         self.times += 1
 
@@ -99,13 +99,12 @@ class Nadam(Optimizer):
 
     def _step(self):
         for i, tensor in enumerate(self.params):
-            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * tensor.grad.data.data
-            self.s[i] = self.b2 * self.s[i] + (1 - self.b2) * (tensor.grad.data.data ** 2)
+            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * tensor.grad.data
+            self.s[i] = self.b2 * self.s[i] + (1 - self.b2) * (tensor.grad.data ** 2)
             cm = self.m[i] / (1 - self.b1 ** self.times)
             cs = self.s[i] / (1 - self.b2 ** self.times)
             # Nadam更新：融入Nesterov动量
-            tensor.data.data -= (
-                    self.lr * (self.b1 * cm + (1 - self.b1) * tensor.grad.data.data / (1 - self.b1 ** self.times)) /
+            tensor.data -= (self.lr * (self.b1 * cm + (1 - self.b1) * tensor.grad.data / (1 - self.b1 ** self.times)) /
                     (cs ** 0.5 + self.eps))
             tensor.zero_grad()
 
@@ -120,7 +119,7 @@ class Lookahead(Optimizer):
         # 初始化基础优化器（Adam）
         self.base_optimizer = base_optimizer(params, **kwargs)
         # 慢权重（初始化为参数的副本）
-        self.slow_weights = [ten.data.data.copy() for ten in self.params]
+        self.slow_weights = [ten.data.copy() for ten in self.params]
         self.k = k  # 慢更新间隔
         self.alpha = alpha  # 插值系数
         self.step_counter = 0  # 步数计数器
@@ -134,9 +133,9 @@ class Lookahead(Optimizer):
         if self.step_counter % self.k == 0:
             for i in range(len(self.params)):
                 # 慢权重更新：slow = slow + alpha * (fast - slow)
-                self.slow_weights[i] += self.alpha * (self.params[i].data.data - self.slow_weights[i])
+                self.slow_weights[i] += self.alpha * (self.params[i].data - self.slow_weights[i])
                 # 将慢权重复制回参数
-                self.params[i].data.data = self.slow_weights[i]
+                self.params[i].data = self.slow_weights[i]
 
 
 class RMSprop(Optimizer):
@@ -152,7 +151,7 @@ class RMSprop(Optimizer):
     def _step(self):
         for i, tensor in enumerate(self.params):
             # 更新二阶动量：s = alpha*s + (1-alpha)*grad^2
-            self.s[i] = self.alpha * self.s[i] + (1 - self.alpha) * (tensor.grad.data.data ** 2)
+            self.s[i] = self.alpha * self.s[i] + (1 - self.alpha) * (tensor.grad.data ** 2)
             # 参数更新：theta = theta - lr * grad / (sqrt(s) + eps)
-            tensor.data.data -= self.lr * tensor.grad.data.data / (self.s[i] ** 0.5 + self.eps)
+            tensor.data -= self.lr * tensor.grad.data / (self.s[i] ** 0.5 + self.eps)
             tensor.zero_grad()
