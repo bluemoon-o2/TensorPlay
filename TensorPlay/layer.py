@@ -1,8 +1,6 @@
-from typing import List, Union, Tuple
 import json
-import numpy as np
-from .core import Tensor, Layer, to_data
-from .operator import DenseOp, BatchNormOp
+from .core import Layer, to_data
+from .operator import *
 from .initializer import he_init, my_init
 
 
@@ -21,37 +19,6 @@ class ConstantTensor(Tensor, Layer):
 
     def param(self):
         return [self]
-
-
-class LayerNorm(Layer):
-    """标准化处理层，带可学习参数（Layer Normalization）"""
-
-    def __init__(self, shape: Union[int, Tuple[int, ...]], eps: float = 1e-4):
-        self.w = Tensor(np.random.normal(0, 0.04, shape))
-        self.b = Tensor(np.random.normal(0, 0.04, shape))
-        self.eps = eps
-        super().__init__()
-
-    def forward(self, x: Tensor) -> Tensor:
-        """前向传播：计算标准化并应用可学习参数"""
-        # 计算方差
-        y = x - x.mean(axis=0, dims=True)
-        var = (y ** 2).mean(axis=0, dims=True)
-        # 计算标准化结果
-        x_normalized = y / ((var + self.eps) ** 0.5)
-        return self.w * x_normalized + self.b
-
-    def save(self) -> str:
-        text = {'w': self.w.data.data.tolist(), 'b': self.b.data.data.tolist()}
-        return json.dumps(text)
-
-    def load(self, text: str):
-        parts = json.loads(text)
-        self.w = Tensor(parts['w'])
-        self.b = Tensor(parts['b'])
-
-    def param(self) -> List[Tensor]:
-        return [self.w, self.b]
 
 
 class Dense(Layer):
@@ -115,17 +82,35 @@ class BatchNorm(Layer):
         return [self.gamma, self.beta]
 
 
+class LayerNorm(Layer):
+    """层归一化层"""
+
+    def __init__(self, eps: float = 1e-4):
+        self.eps = eps
+        self.gamma = Tensor(1)
+        self.beta = Tensor(0)
+        super().__init__()
+
+    def forward(self, x: Tensor) -> Tensor:
+        return LayerNormOp(self)(x)
+
+    def save(self) -> str:
+        text = {'gamma': self.gamma.data.tolist(), 'beta': self.beta.data.tolist()}
+        return json.dumps(text)
+
+    def load(self, text: str):
+        parts = json.loads(text)
+        self.gamma = Tensor(parts['gamma'])
+        self.beta = Tensor(parts['beta'])
+
+    def param(self) -> List[Tensor]:
+        return [self.gamma, self.beta]
+
+
 class Conv2D(Layer):
+    """二维卷积层"""
+
     def __init__(self, width: int, height: int, stride_w=1, stride_h=1, pad=True, bias=True):
-        """
-        2d卷积层
-        :param width: int 卷积核的宽度（如填充，请设为奇数）
-        :param height: int 卷积核的高度（如填充，请设为奇数）
-        :param stride_w: int 横向的步长
-        :param stride_h: int 纵向的步长
-        :param pad: bool 是否进行填充（使运算的输入和输出的大小一样）
-        :param bias: bool 是否加上偏置
-        """
         self.width = width
         self.height = height
         self.stride_h = stride_h
@@ -137,29 +122,7 @@ class Conv2D(Layer):
             self.b = my_init(1)
         super().__init__()
 
-    def padding(self, x):
-        """
-        填充
-        :param x: list[Tensor(),Tensor()...]  2d的Ten，或者说列表包着的一列Ten
-        :return: list[Tensor(),Tensor()...]
-        """
-        pad_x = (self.stride_w * (len(x[0]) - 1) - len(x[0]) + self.width) // 2
-        pad_y = (self.stride_h * (len(x) - 1) - len(x) + self.height) // 2
-        x2 = []
-        for i in range(pad_y):
-            x2.append(Tensor.zeros(len(x[0]) + pad_x * 2))
-        for i in range(len(x)):
-            x2.append(Tensor.connect([Tensor.zeros(pad_x), x[i], Tensor.zeros(pad_x)]))
-        for i in range(pad_y):
-            x2.append(Tensor.zeros(len(x[0]) + pad_x * 2))
-        return x2
-
     def forward(self, x):
-        """
-        进行运算
-        :param x: list[Tensor(),Tensor()...]  2d的Ten，或者说list包着的一列Ten
-        :return: list[Tensor(),Tensor()...]
-        """
         if self.pad:
             x = self.padding(x)
         x2 = []
@@ -175,28 +138,11 @@ class Conv2D(Layer):
         return x2
 
     def save(self):
-        t = f"{self.width}/{self.height}/{self.kernel.data}/{self.stride_w}/{self.stride_h}/{self.pad}"
-        if self.bias:
-            t += f"/{self.b.data}"
-        return t
+        pass
 
     def load(self, t):
         t = t.split("/")
-        self.width = int(t[0])
-        self.height = int(t[1])
-        self.kernel = Tensor(eval(t[2]))
-        self.stride_w = int(t[3])
-        self.stride_h = int(t[4])
-        self.pad = eval(t[5])
-        if len(t) == 7:
-            self.bias = True
-            self.b = Tensor(eval(t[6]))
-        else:
-            self.bias = False
 
-    def grad_descent_zero(self, lr):
-        self.kernel.data -= self.kernel.grad * lr
-        self.kernel.zero_grad()
 
     def param(self):
         return [self.kernel, self.b]

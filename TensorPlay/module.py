@@ -48,9 +48,9 @@ class Module(Layer):
         named_param = []
         prefix = prefix + ('.' if prefix else '')
         for name, l in self.layers.items():
-            named_param.append((prefix + name, l, sum([len(i) for i in l.param()])))
+            named_param.append((prefix + name, l, sum([len(i.data) for i in l.param()])))
         for name, p in self.parameters.items():
-            named_param.append((prefix + name, p, sum([len(i) for i in l.param()])))
+            named_param.append((prefix + name, p, sum([len(i.data) for i in l.param()])))
         for name, m in self.modules.items():
             named_param.extend(m.named_params(prefix + name))
         return named_param

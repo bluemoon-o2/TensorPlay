@@ -1,6 +1,6 @@
 import random
 from TensorPlay import BatchNorm, Dense, Module, Adam, EarlyStopping
-from TensorPlay import DataLoader, cross_entropy, accuracy, mse
+from TensorPlay import DataLoader, accuracy, mse
 
 # 数据加载
 def load_data(path='D:/demo/Shen-main/krkopt.data'):
@@ -34,13 +34,11 @@ class KRKClassifier(Module):
     def __init__(self, input_size=6):
         super().__init__()
         self.fc1 = Dense(input_size, 32, bias=True)
-        self.b1 = BatchNorm(32)
         self.fc2 = Dense(32, 16, bias=True)
         self.fc3 = Dense(16, 1, bias=True)
 
     def forward(self, x):
         x = self.fc1(x).relu()
-        x = self.b1(x)
         x = self.fc2(x).relu()
         x = self.fc3(x)
         return x.sigmoid()
@@ -48,7 +46,7 @@ class KRKClassifier(Module):
 # 主训练函数
 def train(model, loader, val_data, epochs=50, lr=0.01):
     optimizer = Adam(model.params(), lr=lr)
-    stoper = EarlyStopping(patience=5, delta=0.1, verbose=True)
+    stoper = EarlyStopping(patience=10, verbose=True)
 
     for epoch in range(epochs):
         total_loss = 0
@@ -90,16 +88,13 @@ def train(model, loader, val_data, epochs=50, lr=0.01):
 def test(model, loader):
     correct = 0
     total = 0
-
-    for batch_x, batch_y in loader:
-        for x, y in zip(batch_x, batch_y):
-            pred = 1 if model(x).data[0] > 0.5 else 0
-            if pred == y.data[0]:
-                correct += 1
-            total += 1
-
-    accuracy = correct / total
-    print(f"\nTest Accuracy: {accuracy:.4f}")
+    for x, y in loader:
+        batch_size = x.shape[0]
+        total += batch_size
+        pred = model(x)
+        correct += accuracy(pred, y) * batch_size
+    acc = correct / total
+    print(f"\nTest Accuracy: {acc:.4f}")
 
 
 if __name__ == "__main__":
@@ -115,8 +110,10 @@ if __name__ == "__main__":
 
     # 初始化模型并训练
     classifier = KRKClassifier(input_size=6)
-    print("Starting training...")
-    train(classifier, train_loader, val_loader, epochs=30, lr=0.005)
+    # print("Starting training...")
+    # train(classifier, train_loader, val_loader, epochs=30, lr=0.005)
 
+    # 加载模型
+    classifier.load('best_model.tp')
     # 测试模型
-    # test(classifier, test_loader)
+    test(classifier, test_loader)

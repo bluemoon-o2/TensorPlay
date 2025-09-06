@@ -25,7 +25,7 @@ __license__ = "MIT"
 # 全局接口
 # =============================================================================
 from .core import (config, no_grad, to_data, Tensor, Layer, Operator, Optimizer)
-from .layer import (Dense, BatchNorm)
+from .layer import (Dense, BatchNorm, LayerNorm)
 from .module import (Module, Sequential)
 from .optimizer import (SGD, Adam, Momentum, AdamW, Nadam, Lookahead, RMSprop)
 from .operator import (concatenate, load_operator)

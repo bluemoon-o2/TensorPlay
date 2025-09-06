@@ -231,7 +231,14 @@ class Sigmoid(Operator):
     """Sigmoid激活函数"""
 
     def _forward(self, a: np.ndarray) -> Tensor:
-        return Tensor(np.where(a > 20, 1.0, np.where(a < -20, np.exp(a) / (1 + np.exp(a)), 1 / (1 + np.exp(-a)))))
+        mask_large = a > 20
+        mask_small = a < -20
+        mask_mid = ~mask_large & ~mask_small
+        result = np.empty_like(a, dtype=a.dtype)
+        result[mask_large] = 1.0
+        result[mask_small] = np.exp(a[mask_small]) / (1 + np.exp(a[mask_small]))
+        result[mask_mid] = 1 / (1 + np.exp(-a[mask_mid]))
+        return Tensor(result)
 
     def _backward(self) -> List[Tensor]:
         # 输入梯度 += σ(x) * (1 - σ(x)) * 输出梯度
@@ -246,8 +253,14 @@ class Gelu(Operator):
     """GeLU高斯线性单元"""
 
     def _forward(self, a: np.ndarray) -> Tensor:
-        return Tensor(a * np.where(a > 20, 1.0,
-                    np.where(a < -20, np.exp(a * 1.702) / (1 + np.exp(a * 1.702)), 1 / (1 + np.exp(-a * 1.702)))))
+        mask_large = a > 20
+        mask_small = a < -20
+        mask_mid = ~mask_large & ~mask_small
+        result = np.empty_like(a, dtype=a.dtype)
+        result[mask_large] = 1.0
+        result[mask_small] = np.exp(a[mask_small] * 1.702) / (1 + np.exp(a[mask_small] * 1.702))
+        result[mask_mid] = 1 / (1 + np.exp(-a[mask_mid] * 1.702))
+        return Tensor(result)
 
     def _backward(self) -> List[Tensor]:
         z = (self.inp[0] * 1.702).sigmoid()
@@ -785,4 +798,59 @@ class BatchNormOp(Operator):
         gx = (gy - self.beta.grad / self.inp[0].shape[0] - xc * self.gamma.grad / self.inp[0].shape[0]) * self.gamma * self.inv_std
         if self.inp[0].ndim == 4:
             gx = gx.reshape(B, H, W, C)
+        return [gx]
+
+
+class LayerNormOp(Operator):
+    """层标准化处理层（Layer Normalization）"""
+
+    def __init__(self, params: 'LayerNorm'):
+        super().__init__()
+        self.eps = params.eps
+        self.gamma = params.gamma
+        self.beta = params.beta
+
+    def _forward(self, x: np.ndarray) -> Tensor:
+        x_ndim = x.ndim
+        assert x_ndim in (2, 4), f"Only for 2D or 4D input, but got: {x_ndim}"
+        if x_ndim == 4:
+            # 均值形状：(N, 1, 1, 1)
+            m = x.mean(axis=(1, 2, 3), keepdims=True)
+            var = x.var(axis=(1, 2, 3), keepdims=True)
+        else:
+            m = x.mean(axis=1, keepdims=True)
+            var = x.var(axis=1, keepdims=True)
+        inv_std = 1 / np.sqrt(var + self.eps)
+        xc = (x - m) * inv_std
+        if Config.training:
+            self.m = Tensor(m)
+            self.var = Tensor(var)
+            self.inv_std = Tensor(inv_std)
+            self.xc = Tensor(xc)
+        return Tensor(xc * self.gamma.data + self.beta.data)
+
+    def _backward(self) -> List[Tensor]:
+        if self.inp[0].ndim == 4:
+            N, H, W, C = self.inp[0].shape
+            n = H * W * C
+            gamma_grad = (self.xc * self.out().grad).sum()
+            beta_grad = self.out().grad.sum()
+        else:
+            N, features = self.inp[0].shape
+            n = features
+            gamma_grad = (self.xc * self.out().grad).sum()
+            beta_grad = self.out().grad.sum()
+        if self.gamma.grad is None:
+            self.gamma.grad = gamma_grad
+        else:
+            self.gamma.grad = self.gamma.grad + gamma_grad
+        if self.beta.grad is None:
+            self.beta.grad = beta_grad
+        else:
+            self.beta.grad = self.beta.grad + beta_grad
+        gx_normalized = self.out().grad * self.gamma
+        gvar = (gx_normalized * (self.inp[0] - self.m) * (-0.5) * (self.var + self.eps) ** (-1.5)).sum(axis=1, dims=True)
+        gmean = (gx_normalized * (-self.inv_std)).sum(axis=1, dims=True) + gvar * (-2 / n) * (self.inp[0] - self.m).sum(
+            axis=1, dims=True)
+        gx = gx_normalized * self.inv_std + gvar * (2 / n) * (self.inp[0] - self.m) + gmean / n
         return [gx]
