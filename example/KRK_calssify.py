@@ -1,5 +1,5 @@
 import random
-from TensorPlay import Tensor, Dense, Module, Adam, EarlyStopping
+from TensorPlay import BatchNorm, Dense, Module, Adam, EarlyStopping
 from TensorPlay import DataLoader, cross_entropy, accuracy, mse
 
 # 数据加载
@@ -34,14 +34,16 @@ class KRKClassifier(Module):
     def __init__(self, input_size=6):
         super().__init__()
         self.fc1 = Dense(input_size, 32, bias=True)
+        self.b1 = BatchNorm(32)
         self.fc2 = Dense(32, 16, bias=True)
-        self.fc3 = Dense(16, 2, bias=True)
+        self.fc3 = Dense(16, 1, bias=True)
 
     def forward(self, x):
         x = self.fc1(x).relu()
+        x = self.b1(x)
         x = self.fc2(x).relu()
-        x = self.fc3(x).softmax(axis=1)
-        return x
+        x = self.fc3(x)
+        return x.sigmoid()
 
 # 主训练函数
 def train(model, loader, val_data, epochs=50, lr=0.01):
