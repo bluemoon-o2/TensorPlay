@@ -3,13 +3,13 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "TensorPlay"
+name = "tensorplay"
 description = "一个用于深度学习验证的工具包"
 version = "0.1.1"
 authors = [{name = "Welog", email = "2095774200@shu.edu.cn" }]
 readme = "README.md"
 license = { file = "LICENSE" }
-homepage = "https://github.com/bluemoon-o2/TensorPlay"
+urls = { "Homepage" = "https://github.com/bluemoon-o2/TensorPlay" }
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.8",
@@ -25,9 +25,8 @@ classifiers = [
 ]
 requires-python = ">=3.8"
 dependencies = [
-  "typing",
-  "numpy",
-  "scikit-learn"
+  "numpy>=1.21.0",
+  "scikit-learn>=1.0.0"
 ]
 
 [tool.pytest.ini_options]
