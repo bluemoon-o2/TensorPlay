@@ -1,4 +1,5 @@
 from typing import List, Union, Tuple
+from .utils import im2col_array, col2im_array
 from .core import Operator, Tensor, Config
 import numpy as np
 
@@ -675,7 +676,7 @@ class CrossEntropy(Operator):
         return [g, None]
 
 # =============================================================================
-# 层算子
+# 线性层算子
 # =============================================================================
 class MatMul(Operator):
     """矩阵乘法运算符"""
@@ -693,7 +694,7 @@ def matmul(a: Tensor, b: Tensor) -> Tensor:
 
 
 class DenseOp(Operator):
-    """线性层运算符"""
+    """全连接层运算符"""
 
     def __init__(self, matrix: 'Dense'):
         super().__init__()
@@ -854,3 +855,183 @@ class LayerNormOp(Operator):
             axis=1, dims=True)
         gx = gx_normalized * self.inv_std + gvar * (2 / n) * (self.inp[0] - self.m) + gmean / n
         return [gx]
+
+# =============================================================================
+# 卷积层算子
+# =============================================================================
+class Conv2DOp(Operator):
+    def __init__(self, strides: Tuple[int, int], padding: Tuple[int, int]):
+        super().__init__()
+        self.strides = strides
+        self.padding = padding
+
+    def _forward(self, x: np.ndarray, w: np.ndarray, b: Union[np.ndarray, None]) -> Tensor:
+        KH, KW, _, OC = w.shape
+        B, H, W, C = x.shape
+        # (B*OH*OW, C*KH*KW) * (C*KH*KW, OC) -> (B*OH*OW, OC)
+        col = im2col_array(x, (KH, KW), self.strides, self.padding)
+        OH, OW = col.shape[1:3]
+        y = col.reshape(-1, C * KH * KW) @ w.reshape(-1, OC)
+        y = y.reshape(B, OH, OW, OC)
+        if b is not None:
+            y += b
+        return Tensor(y)
+
+    def _backward(self) -> List[Tensor]:
+        gx = ReConv2DOp(self.strides, self.padding)(self.out().grad, self.inp[1], None)
+        gW = Conv2DGradW(self.inp[1].shape[0:2], self.strides, self.padding)(self.inp[0], self.out().grad)
+        if self.inp[2] is not None:
+            gb = self.out().grad.sum(axis=(0, 1, 2))
+        else:
+            gb = None
+        return [gx, gW, gb]
+
+
+class ReConv2DOp(Operator):
+    def __init__(self, strides: Tuple[int, int], padding: Tuple[int, int]):
+        super().__init__()
+        self.strides = strides
+        self.padding = padding
+
+    def _forward(self, x: np.ndarray, w: np.ndarray, b: Union[np.ndarray, None]) -> Tensor:
+        B, OH, OW, OC = x.shape
+        KH, KW, C, _ = w.shape
+        gcol = (x.reshape(-1, OC) @ w.reshape(OC, -1)).reshape(B, OH, OW, C, KH, KW)
+        y = col2im_array(gcol, (B, OH, OW, OC), (KH, KW), self.strides, self.padding)
+        # (B, H, W, C)
+        if b is not None:
+            y += b
+        return Tensor(y)
+
+    def _backward(self) -> List[Tensor]:
+        gx = Conv2DOp(self.strides, self.padding)(self.out().grad, self.inp[1], None)
+        gW = Conv2DGradW(self.inp[1].shape[0:2], self.strides, self.padding)(self.out().grad, self.inp[0])
+        if self.inp[2] is not None:
+            gb = self.out().grad.sum(axis=(0, 1, 2))
+        else:
+            gb = None
+        return [gx, gW, gb]
+
+
+class Conv2DGradW(Operator):
+    def __init__(self, kernel_size: Tuple[int, int], strides: Tuple[int, int], padding: Tuple[int, int]):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
+
+    def _forward(self, x: np.ndarray, gy: np.ndarray) -> Tensor:
+        OC = gy.shape[3]
+        col = im2col_array(x, self.kernel_size, self.strides, self.padding)
+        C, KH, KW = col.shape[3:]
+        return Tensor((col.reshape(KH * KW * C, -1) @ gy.reshape(-1, OC)).reshape(KH, KW, C, OC))
+
+    def _backward(self) -> List[Tensor]:
+        gx = ReConv2DOp(self.strides, self.padding)(self.inp[1], self.out().grad, None)
+        ggy = Conv2DOp(self.strides, self.padding)(self.inp[0], self.out().grad, None)
+        return [gx, ggy]
+
+# =============================================================================
+# 池化层算子
+# =============================================================================
+class MaxPoolingOp(Operator):
+    def __init__(self, kernel_size: Tuple[int, int], strides: Tuple[int, int] = (1, 1), padding: Tuple[int, int] = (0, 0)):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
+
+    def _forward(self, x: np.ndarray) -> Tensor:
+        col = im2col_array(x, self.kernel_size, self.strides, self.padding)
+        B, OH, OW, C, KH, KW = col.shape
+        col = col.reshape(B, KH * KW, OH, OW, C)
+        self.indexes = col.argmax(axis=1)
+        return Tensor(col.max(axis=1))
+
+    def _backward(self) -> List[Tensor]:
+        return [Pooling2DGrad(self.kernel_size, self.indexes, self.strides, self.padding)(self.out().grad, self.inp[0])]
+
+
+class Pooling2DGrad(Operator):
+    def __init__(self, kernel_size: Tuple[int, int], indexes: np.ndarray,
+                 strides: Tuple[int, int] = (1, 1), padding: Tuple[int, int] = (0, 0)):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
+        self.indexes = indexes
+
+    def _forward(self, gy: np.ndarray, x: np.ndarray) -> Tensor:
+        B, OH, OW, C = gy.shape
+        B, H, W, C = x.shape
+        KH, KW = self.kernel_size
+        # 绝对索引
+        gcol = np.zeros((B * OH * OW * C * KH * KW), dtype=x.dtype)
+        indexes = (self.indexes.ravel() + np.arange(0, self.indexes.size * KH * KW, KH * KW))
+        gcol[indexes] = gy.ravel()
+        gcol = gcol.reshape(B, C, OH, OW, KH, KW).transpose(0, 1, 4, 5, 2, 3)
+        # (B, C, KH, KW, OH, OW) -> (B, H, W, C)
+        gx = col2im_array(gcol, (B, H, W, C), self.kernel_size, self.strides, self.padding)
+        return Tensor(gx)
+
+    def _backward(self) -> List[Tensor]:
+        return [Pooling2DWithIndexes(self.mpool2d)(self.out().grad)]
+
+
+class Pooling2DWithIndexes(Operator):
+    def __init__(self, kernel_size: Tuple[int, int], indexes: np.ndarray,
+                 strides: Tuple[int, int] = (1, 1), padding: Tuple[int, int] = (0, 0)):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
+        self.indexes = indexes
+        self.input_shpae = mpool2d.inputs[0].shape
+        self.dtype = mpool2d.inputs[0].dtype
+
+    def _forward(self, x: np.ndarray) -> Tensor:
+        col = im2col_array(x, self.kernel_size, self.strides, self.padding)
+        N, C, KH, KW, OH, OW = col.shape
+        col = col.reshape(N, C, KH * KW, OH, OW)
+        col = col.transpose(0, 1, 3, 4, 2).reshape(-1, KH * KW)
+        indexes = self.indexes.ravel()
+        col = col[np.arange(len(indexes)), indexes]
+        return col.reshape(N, C, OH, OW)
+
+    def _backward(self) -> List[Tensor]:
+        pass
+
+
+def pooling(x, kernel_size, stride=1, pad=0):
+    return MaxPoolingOp(kernel_size, stride, pad)(x)
+
+
+class AveragePoolingOp(Operator):
+    def __init__(self, kernel_size, stride=1, pad=0):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.pad = pad
+        self.input_shape = None
+
+    def forward(self, x):
+        self.input_shape = x.shape
+        col = im2col_array(x, self.kernel_size, self.stride, self.pad,
+                           to_matrix=False)
+        y = col.mean(axis=(2, 3))
+        return y
+
+    def backward(self, gy):
+        # TODO(Koki): This is simple implementation
+        N, C, OH, OW = gy.shape
+        KW, KH = pair(self.kernel_size)
+        gy /= (KW * KH)
+        gcol = broadcast_to(gy.reshape(-1), (KH, KW, N * C * OH * OW))
+        gcol = gcol.reshape(KH, KW, N, C, OH, OW).transpose(2, 3, 0, 1, 4, 5)
+        gx = col2im(gcol, self.input_shape, self.kernel_size, self.stride,
+                    self.pad, to_matrix=False)
+        return gx
+
+
+def average_pooling(x, kernel_size, stride=1, pad=0):
+    return AveragePoolingOp(kernel_size, stride, pad)(x)
