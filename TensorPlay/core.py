@@ -206,8 +206,8 @@ class Operator:
 
     def __call__(self, *args):
         """前向调用接口"""
-        inputs = [inp if isinstance(inp, Tensor) else Tensor(inp) for inp in args]
-        datas = [inp.data for inp in inputs]
+        inputs = [inp if isinstance(inp, (Tensor, type(None))) else Tensor(inp) for inp in args]
+        datas = [inp.data if inp is not None else None for inp in inputs]
         out = self._forward(*datas)
         if Config.enable_grad:
             self.inp = inputs
@@ -222,8 +222,7 @@ class Operator:
         if not Config.enable_grad and self.state:
             warnings.warn('Attention: forward() run with no grad...\n'
                           'If you are not computing higher-gradients, '
-                          'please examine your code.'
-                          , UserWarning, stacklevel=2)
+                          'please examine your code.', UserWarning, stacklevel=2)
         g = self._backward()
         # 调用反向钩子
         if self.out().source_module is not None:

@@ -1,4 +1,5 @@
-from .core import Tensor
+from typing import Tuple
+from .core import Tensor, Config
 import numpy as np
 
 def my_init(size) -> Tensor:
@@ -13,10 +14,11 @@ def xavier_init(inp_size: int, out_size: int) -> Tensor:
     return Tensor(np.random.normal(0, std, (out_size, inp_size)))
 
 
-def he_init(inp_size: int, out_size: int) -> Tensor:
+def he_init(shape: Tuple[int, ...]) -> Tensor:
     """He初始化 - 适用于ReLU及其变体激活函数"""
-    std = np.sqrt(2.0 / inp_size)
-    return Tensor(np.random.normal(0, std, (out_size, inp_size)))
+    fan_in = np.prod(shape[:-1])
+    std = np.sqrt(2.0 / fan_in)
+    return Tensor(np.random.uniform(-std * np.sqrt(3), std * np.sqrt(3), shape).astype(Config.precision))
 
 
 def uniform_init(size, a=-0.05, b=0.05) -> Tensor:

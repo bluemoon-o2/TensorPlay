@@ -1,8 +1,10 @@
 import json
-from .core import Layer, to_data
-from .operator import *
-from .initializer import he_init, my_init
-
+import numpy as np
+from typing import List, Union
+from .core import Tensor, Layer, to_data
+from .initializer import he_init
+from .utils import _same_padding
+from .operator import DenseOp, BatchNormOp, LayerNormOp, Conv2DOp, MaxPoolingOp, AveragePoolingOp
 
 class ConstantTensor(Tensor, Layer):
     """单张量参数层"""
@@ -25,7 +27,7 @@ class Dense(Layer):
     """全连接层"""
 
     def __init__(self, inp_size: int, out_size: int, bias=True):
-        self.w = he_init(inp_size, out_size)
+        self.w = he_init((inp_size, out_size))
         self.bias = bias
         if bias:
             self.b = Tensor.zeros((out_size, 1))
@@ -110,64 +112,106 @@ class LayerNorm(Layer):
 class Conv2D(Layer):
     """二维卷积层"""
 
-    def __init__(self, width: int, height: int, stride_w=1, stride_h=1, pad=True, bias=True):
-        self.width = width
-        self.height = height
-        self.stride_h = stride_h
-        self.stride_w = stride_w
-        self.pad = pad
-        self.kernel = my_init(width * height)
-        self.bias = bias
+    def __init__(self, in_channels: int, filters: int, kernel_size: int, strides=(1, 1), padding='valid',
+                 bias: bool = True):
+        self.in_channels = in_channels
+        self.filters = filters
+        self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
+        self.strides = (strides, strides) if isinstance(strides, int) else strides
+        if padding == 'valid':
+            self.padding = (0, 0)
+        elif isinstance(padding, int):
+            self.padding = (padding, padding)
+        else:
+            self.padding = padding
+        # (KH, KW, in_channels, out_channels)
+        self.w = he_init((*self.kernel_size, in_channels, filters))
         if bias:
-            self.b = my_init(1)
+            self.b = Tensor.zeros((1, filters))
+        else:
+            self.b = None
         super().__init__()
 
-    def forward(self, x):
-        if self.pad:
-            x = self.padding(x)
-        x2 = []
-        for y_pos in range(0, len(x) - self.height + 1, self.stride_h):
-            x2line = []
-            for x_pos in range(0, len(x[0]) - self.width + 1, self.stride_w):
-                window = Tensor.connect([x[y_pos + i].cut(x_pos, x_pos + self.width) for i in range(self.height)])
-                v = (window * self.kernel).sum()
-                if self.bias:
-                    v += self.b
-                x2line.append(v)
-            x2.append(Tensor.connect(x2line))
-        return x2
+    def forward(self, x: Tensor) -> Tensor:
+        if self.padding == 'same':
+            self.padding = _same_padding(x.shape[1], x.shape[2], self.kernel_size, self.strides)
+        return Conv2DOp(self.strides, self.padding)(x, self.w, self.b)
 
-    def save(self):
+    def save(self) -> str:
+        text = {'w': self.w.data.tolist()}
+        if self.b is not None:
+            text['b'] = self.b.data.tolist()
+        return json.dumps(text)
+
+    def load(self, text: str) -> None:
+        parts = json.loads(text)
+        self.w = Tensor(parts['w'])
+        if self.b is not None:
+            self.b = Tensor(parts['b'])
+
+    def param(self) -> List[Tensor]:
+        return [self.w, self.b] if self.b is not None else [self.w]
+
+
+class MaxPooling(Layer):
+    """最大池化层"""
+
+    def __init__(self, kernel_size: int, strides=(1, 1), padding='valid'):
+        self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
+        self.strides = (strides, strides) if isinstance(strides, int) else strides
+        if padding == 'valid':
+            self.padding = (0, 0)
+        elif isinstance(padding, int):
+            self.padding = (padding, padding)
+        else:
+            self.padding = padding
+        super().__init__()
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self.padding == 'same':
+            self.padding = _same_padding(x.shape[1], x.shape[2], self.kernel_size, self.strides)
+        return MaxPoolingOp(self.strides, self.padding)(x)
+
+    def save(self) -> str:
+        return 'None'
+
+    def load(self, text: str):
         pass
 
-    def load(self, t):
-        t = t.split("/")
+    def param(self) -> None:
+        return None
 
 
-    def param(self):
-        return [self.kernel, self.b]
+class AveragePooling(Layer):
+    """最大池化层"""
+
+    def __init__(self, kernel_size: int, strides=(1, 1), padding='valid'):
+        self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
+        self.strides = (strides, strides) if isinstance(strides, int) else strides
+        if padding == 'valid':
+            self.padding = (0, 0)
+        elif isinstance(padding, int):
+            self.padding = (padding, padding)
+        else:
+            self.padding = padding
+        super().__init__()
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self.padding == 'same':
+            self.padding = _same_padding(x.shape[1], x.shape[2], self.kernel_size, self.strides)
+        return AveragePoolingOp(self.strides, self.padding)(x)
+
+    def save(self) -> str:
+        return 'None'
+
+    def load(self, text: str):
+        pass
+
+    def param(self) -> None:
+        return None
 
 
 # 一些复杂结构的简单实现，用于实验，未更新到Module管理
-class MiniDense:
-    """低秩全连接层"""
-
-    def __init__(self, inp_size, out_size, midsize=None, bias=True):
-        if midsize is None:
-            midsize = round(((inp_size + out_size) / 2) ** 0.5)
-        self.f1 = Dense(inp_size, midsize, bias)
-        self.f2 = Dense(midsize, out_size, bias)
-
-    def __call__(self, x):
-        x = self.f1(x)
-        x = self.f2(x)
-        return x
-
-    def grad_descent_zero(self, lr):
-        self.f1.grad_descent_zero(lr)
-        self.f2.grad_descent_zero(lr)
-
-
 class Attention:
     """单头自注意力模块"""
 

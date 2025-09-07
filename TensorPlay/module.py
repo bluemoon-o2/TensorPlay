@@ -36,9 +36,11 @@ class Module(Layer):
         """递归返回所有可训练参数"""
         param = []
         for p in self.parameters.values():
-            param.extend(p.param())
+            if p.param() is not None:
+                param.extend(p.param())
         for l in self.layers.values():
-            param.extend(l.param())
+            if l.param() is not None:
+                param.extend(l.param())
         for m in self.modules.values():
             param.extend(m.params())
         return param
@@ -48,9 +50,15 @@ class Module(Layer):
         named_param = []
         prefix = prefix + ('.' if prefix else '')
         for name, l in self.layers.items():
-            named_param.append((prefix + name, l, sum([len(i.data) for i in l.param()])))
+            if l.param() is not None:
+                named_param.append((prefix + name, l, sum([len(i.data) for i in l.param()])))
+            else:
+                named_param.append((prefix + name, l, 0))
         for name, p in self.parameters.items():
-            named_param.append((prefix + name, p, sum([len(i.data) for i in l.param()])))
+            if p.param() is not None:
+                named_param.append((prefix + name, p, sum([len(i.data) for i in p.param()])))
+            else:
+                named_param.append((prefix + name, p, 0))
         for name, m in self.modules.items():
             named_param.extend(m.named_params(prefix + name))
         return named_param

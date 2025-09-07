@@ -1,6 +1,7 @@
 import os
 import subprocess
 import numpy as np
+from typing import Tuple
 from .core import Tensor, Operator
 
 # =============================================================================
@@ -14,6 +15,64 @@ def accuracy(output: Tensor, target: Tensor) -> float:
     result = (result == target.data).astype(output.dtype).mean()
     return result
 
+# =============================================================================
+# Conv Utils
+# =============================================================================
+def recov_outsize(out_size: int, kernel_size: int, strides: int, padding: int) -> int:
+    return strides * (out_size - 1) + kernel_size - padding
+
+
+def conv_outsize(input_size: int, kernel_size: int, strides: int, padding: int) -> int:
+    return (input_size + padding - kernel_size) // strides + 1
+
+
+def _same_padding(input_height: int, input_width: int, kernel_size: Tuple[int, int],
+                  stride: Tuple[int, int]) -> Tuple[int, int]:
+    KH, KW = kernel_size
+    SH, SW = stride
+    total_pad_h = max(0, (input_height - 1) * SH + KH - input_height)
+    total_pad_w = max(0, (input_width - 1) * SW + KW - input_width)
+    return total_pad_h, total_pad_w
+
+
+def im2col_array(img: np.ndarray, kernel_size: Tuple[int, int], strides: Tuple[int, int],
+                 padding: Tuple[int, int]) -> np.ndarray:
+    """(B, OH, OW, C, KH, KW)"""
+    B, H, W, C = img.shape
+    KH, KW = kernel_size
+    SH, SW = strides
+    PH, PW = padding
+    OH = conv_outsize(H, KH, SH, PH)
+    OW = conv_outsize(W, KW, SW, PW)
+    img = np.pad(img, pad_width=((0, 0), ((PH + 1) // 2, PH // 2 + SH - 1), ((PW + 1) // 2, PW // 2 + SW - 1), (0, 0)),
+                 mode='constant')
+    col = np.empty((B, C, KH, KW, OH, OW), dtype=img.dtype)
+    for j in range(KH):
+        j_end = j + SH * OH
+        for i in range(KW):
+            i_end = i + SW * OW
+            # (B, OH, OW, C) -> (B, C, OH, OW) -> (B, C, j, i, OH, OW)
+            col[:, :, j, i, :, :] = img[:, j:j_end:SH, i:i_end:SW, :].transpose(0, 3, 1, 2)
+    # (B, C, KH, KW, OH, OW) -> (B, OH, OW, C, KH, KW)
+    return col.transpose((0, 4, 5, 1, 2, 3))
+
+
+def col2im_array(col: np.ndarray, img_shape: Tuple[int, int, int, int], kernel_size: Tuple[int, int],
+                 strides: Tuple[int, int], padding: Tuple[int, int]) -> np.ndarray:
+    """(B, H, W, C)"""
+    B, OH, OW, OC = img_shape
+    KH, KW = kernel_size
+    SH, SW = strides
+    PH, PW = padding
+    H = recov_outsize(OH, KH, SH, PH)
+    W = recov_outsize(OW, KW, SW, PW)
+    img = np.zeros((B, H + PH + SH - 1, W + PW + SW - 1, col.shape[3]), dtype=col.dtype)
+    for j in range(KH):
+        j_end = j + SH * H
+        for i in range(KW):
+            i_end = i + SW * W
+            img[:, j:j_end:SH, i:i_end:SW, :] += col[:, :, :, :, j, i]
+    return img[:, (PH + 1) // 2 : PH // 2 + SH + H, (PW + 1) // 2 : PW // 2 + SW + W, :]
 # =============================================================================
 # Graph Utils
 # =============================================================================

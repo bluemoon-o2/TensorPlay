@@ -986,52 +986,68 @@ class Pooling2DWithIndexes(Operator):
         self.strides = strides
         self.padding = padding
         self.indexes = indexes
-        self.input_shpae = mpool2d.inputs[0].shape
-        self.dtype = mpool2d.inputs[0].dtype
 
     def _forward(self, x: np.ndarray) -> Tensor:
         col = im2col_array(x, self.kernel_size, self.strides, self.padding)
-        N, C, KH, KW, OH, OW = col.shape
-        col = col.reshape(N, C, KH * KW, OH, OW)
-        col = col.transpose(0, 1, 3, 4, 2).reshape(-1, KH * KW)
+        B, OH, OW, C, KH, KW = col.shape
+        col = col.reshape(B, C, KH * KW, OH, OW).transpose(0, 1, 3, 4, 2).reshape(-1, KH * KW)
         indexes = self.indexes.ravel()
-        col = col[np.arange(len(indexes)), indexes]
-        return col.reshape(N, C, OH, OW)
+        col = col[np.arange(len(indexes)), indexes].reshape(B, OH, OW, C)
+        return Tensor(col)
 
     def _backward(self) -> List[Tensor]:
         pass
 
 
-def pooling(x, kernel_size, stride=1, pad=0):
-    return MaxPoolingOp(kernel_size, stride, pad)(x)
-
-
 class AveragePoolingOp(Operator):
-    def __init__(self, kernel_size, stride=1, pad=0):
+    def __init__(self, kernel_size: Tuple[int, int], strides: Tuple[int, int] = (1, 1),
+                 padding: Tuple[int, int] = (0, 0)):
         super().__init__()
         self.kernel_size = kernel_size
-        self.stride = stride
-        self.pad = pad
+        self.strides = strides
+        self.padding = padding
         self.input_shape = None
 
-    def forward(self, x):
+    def _forward(self, x: np.ndarray) -> Tensor:
         self.input_shape = x.shape
-        col = im2col_array(x, self.kernel_size, self.stride, self.pad,
-                           to_matrix=False)
-        y = col.mean(axis=(2, 3))
-        return y
+        col = im2col_array(x, self.kernel_size, self.strides, self.padding)
+        return Tensor(col.mean(axis=(2, 3)))
 
-    def backward(self, gy):
-        # TODO(Koki): This is simple implementation
-        N, C, OH, OW = gy.shape
-        KW, KH = pair(self.kernel_size)
-        gy /= (KW * KH)
-        gcol = broadcast_to(gy.reshape(-1), (KH, KW, N * C * OH * OW))
-        gcol = gcol.reshape(KH, KW, N, C, OH, OW).transpose(2, 3, 0, 1, 4, 5)
-        gx = col2im(gcol, self.input_shape, self.kernel_size, self.stride,
-                    self.pad, to_matrix=False)
-        return gx
+    def _backward(self) -> List[Tensor]:
+        B, OH, OW, C = self.out().grad.shape
+        KW, KH = self.kernel_size
+        gcol = broadcast((self.out().grad / (KW * KH)).reshape(-1), *(KH, KW, B * C * OH * OW))
+        gcol = gcol.reshape(KH, KW, B, C, OH, OW).transpose(2, 3, 0, 1, 4, 5)
+        gx = Col2im(self.input_shape, self.kernel_size, self.strides, self.padding)(gcol)
+        return [gx]
 
 
-def average_pooling(x, kernel_size, stride=1, pad=0):
-    return AveragePoolingOp(kernel_size, stride, pad)(x)
+class Im2col(Operator):
+    def __init__(self, kernel_size: Tuple[int, int], strides: Tuple[int, int], padding: Tuple[int, int]):
+        super().__init__()
+        self.input_shape = None
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
+
+    def _forward(self, x: np.ndarray) -> Tensor:
+        self.input_shape = x.shape
+        return Tensor(im2col_array(x, self.kernel_size, self.strides, self.padding))
+
+    def _backward(self) -> List[Tensor]:
+        return [Col2im(self.input_shape, self.kernel_size, self.strides, self.padding)(self.out().grad)]
+
+
+class Col2im(Operator):
+    def __init__(self, input_shape, kernel_size: Tuple[int, int], strides: Tuple[int, int], padding: Tuple[int, int]):
+        super().__init__()
+        self.input_shape = input_shape
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
+
+    def _forward(self, x: np.ndarray) -> Tensor:
+        return Tensor(col2im_array(x, self.input_shape, self.kernel_size, self.strides, self.padding))
+
+    def _backward(self) -> List[Tensor]:
+        return [Im2col(self.kernel_size, self.strides, self.padding)(self.out().grad)]
