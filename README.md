@@ -1,5 +1,8 @@
 # TensorPlay
 A simple deep learning framework designed for educational purposes and small-scale experiments. TensorPlay provides basic building blocks for constructing and training neural networks, including tensor operations, layers, optimizers, and training utilities.
+```bash
+pip install tensorplay
+```
 
 ## Features
 - **Core Tensor Structure**: Implements a `Tensor` class with automatic gradient computation, supporting basic arithmetic operations and common activation functions (`ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `GELU`).
@@ -7,7 +10,7 @@ A simple deep learning framework designed for educational purposes and small-sca
 - **Training Utilities**: Provides `DataLoader` for batching data, training / validation loop helpers (`train_on_batch`, `valid_on_batch`), and optimization with `Adam` optimizer.
 - **Early Stopping**: Built-in `EarlyStopping` callback to prevent overfitting.
 - **Loss Functions**: Implements common loss functions such as `MSE` (Mean Squared Error), `SSE` (Sum of Squared Errors), and NLL (Negative Log Likelihood).
-
+- 
 ## Basic Usage
 ### 1. Define a Model
 Create custom models by inheriting from `Module` and defining the forward pass:
