@@ -1,7 +1,7 @@
 """
 TensorPlay - 一个用于深度学习验证的工具包
 
-版本: 0.1.1
+版本: 0.1.2
 作者: Welog
 日期: 2025年9月3日
 
@@ -29,7 +29,7 @@ from .layer import (Dense, BatchNorm, LayerNorm, Conv2D)
 from .module import (Module, Sequential)
 from .optimizer import (SGD, Adam, Momentum, AdamW, Nadam, Lookahead, RMSprop)
 from .operator import (concatenate, load_operator)
-from .func import (mse, sse, nll, cross_entropy, sphere)
+from .func import (mse, sse, nll, cross_entropy, sphere, goldstein)
 from .initializer import (he_init, xavier_init, uniform_init, my_init)
 from .utils import (plot_dot_graph, accuracy)
 from .data import (DataLoader)

@@ -27,7 +27,7 @@ class Dense(Layer):
     """全连接层"""
 
     def __init__(self, inp_size: int, out_size: int, bias=True):
-        self.w = he_init((inp_size, out_size))
+        self.w = he_init((out_size, inp_size))
         self.bias = bias
         if bias:
             self.b = Tensor.zeros((out_size, 1))
