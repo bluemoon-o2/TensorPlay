@@ -30,8 +30,15 @@ def _same_padding(input_height: int, input_width: int, kernel_size: Tuple[int, i
                   stride: Tuple[int, int]) -> Tuple[int, int]:
     KH, KW = kernel_size
     SH, SW = stride
-    total_pad_h = max(0, (input_height - 1) * SH + KH - input_height)
-    total_pad_w = max(0, (input_width - 1) * SW + KW - input_width)
+
+    # 步骤1：先计算目标输出尺寸（SAME模式核心：输出尺寸 = 输入尺寸/步长，向上取整）
+    output_height = (input_height + SH - 1) // SH  # 等价于 ceil(input_height / SH)
+    output_width = (input_width + SW - 1) // SW
+
+    # 步骤2：根据输出尺寸反推总padding
+    total_pad_h = max(0, (output_height - 1) * SH + KH - input_height)
+    total_pad_w = max(0, (output_width - 1) * SW + KW - input_width)
+
     return total_pad_h, total_pad_w
 
 

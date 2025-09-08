@@ -1,3 +1,4 @@
-from TensorPlay import (Tensor,
+from TensorPlay import (Tensor, Module,
                         sphere, goldstein,
-                        Dense, Module, Adam, RMSprop, SGD)
+                        Dense, Conv2D, BatchNorm,
+                        Adam, RMSprop, SGD)
