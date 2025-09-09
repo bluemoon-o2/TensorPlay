@@ -1,17 +1,74 @@
+<div align="center">
+    <p>
+        <img src="./example/images/banner%20(4).png" alt="TensorPlay Banner">
+    </p>
+
+[![stars](https://img.shields.io/github/stars/TensorPlay?color=ccf)](https://github.com/bluemoon-o2/TensorPlay)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/tensorplay?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLUE&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/tensorplay)
+![PyPI - Downloads](https://img.shields.io/pypi/dm/TensorPlay?labelColor=blue)
+![GitHub last commit](https://img.shields.io/github/last-commit/bluemoon-o2/TensorPlay?labelColor=teal)
+
+![python](https://img.shields.io/badge/python-3.8~3.11-aff.svg)
+![os](https://img.shields.io/badge/os-win%2C%20linux%2C%20mac-pink.svg)
+![hardware](https://img.shields.io/badge/hardware-cpu-red.svg)
+[![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/bluemoon-o2/TensorPlay)
+
+**TensorPlay is a learner-friendly, DIY-ready deep learning framework designed for educational purposes and small-scale experiments.**
+</div>
+
 # TensorPlay
-A simple deep learning framework designed for educational purposes and small-scale experiments. TensorPlay provides basic building blocks for constructing and training neural networks, including tensor operations, layers, optimizers, and training utilities.
+[![Framework](https://img.shields.io/badge/TensorPlay-0.1.2-orange)](https://pypi.org/project/TensorPlay/)
+![Accuracy](https://img.shields.io/badge/User%20Friendliness-🌞-green)
+![Pure Python](https://img.shields.io/badge/Pure_Python-✓-purple)
+![Out of box](https://img.shields.io/badge/Out_of_the_box-🔧-maroon)
+
+> [!TIP]
+> The TensorPlay 0.1.2 Technical Report is now available. See details at: [TensorPlay 0.1.2 Documentation](https://www.welog.me/article/TensorPLay)
+
+**TensorPlay** provides basic building blocks for constructing and training neural networks, including tensor operations, layers, optimizers, and training utilities.
+
+**To start quickly**, simply run the following command in your terminal:
 ```bash
 pip install tensorplay
 ```
 
-## Features
+## TensorPlay 0.1.2 Core Features
 - **Core Tensor Structure**: Implements a `Tensor` class with automatic gradient computation, supporting basic arithmetic operations and common activation functions (`ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `GELU`).
 - **Neural Network Components**: Includes essential layers like `Dense` (fully connected layer) and a `Module` base class for building custom models.
 - **Training Utilities**: Provides `DataLoader` for batching data, training / validation loop helpers (`train_on_batch`, `valid_on_batch`), and optimization with `Adam` optimizer.
 - **Early Stopping**: Built-in `EarlyStopping` callback to prevent overfitting.
 - **Loss Functions**: Implements common loss functions such as `MSE` (Mean Squared Error), `SSE` (Sum of Squared Errors), and NLL (Negative Log Likelihood).
-- 
-## Basic Usage
+
+<div align="center">
+    <p>
+        <img src="./example/images/banner%20(1).png" alt="TensorPlay Architecture">
+    </p>
+    <p>
+        <img src="./example/images/structure.png" alt="TensorPlay Architecture">
+    </p>
+</div>
+
+### 📣 Recent updates
+<details>
+<summary><strong>🔥🔥2025.09.08: TensorPlay 0.1.2 Released</strong></summary>
+
+- **Bug Fixes:**
+  - ✍️Solve the `Initializer Error` in the `Dense` class.
+  - 🧮 Added the missing `graph` method in the `Module` class.
+
+- **Documentation Improvements:**
+  - 🌐Added a demo `KRK_classify` to the Examples.
+  - 🎯Added the raw original edition `TensorPlay v0.1` for comparison and research purposes.
+
+</details>
+
+| Dependency Packages | Corresponding Functionality                                                                                                                                       |
+|---------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Numpy`             | Provides fundamental numerical computing capabilities, supporting tensor operations, array manipulations, and underpinning the core mathematical computations of the framework. |
+| `scikit-learn`      | Offers utilities for data preprocessing, evaluation metrics, and integration with classical machine learning workflows, enhancing TensorPlay's compatibility with standard ML pipelines. |
+
+## ⚡Basic Usage
 ### 1. Define a Model
 Create custom models by inheriting from `Module` and defining the forward pass:
 ```python
@@ -105,7 +162,7 @@ def test(model, test_loader):
             total += 1
     print(f"Test Accuracy: {correct/total:.4f}")
 ```
-## Example: KRK Chess Endgame Classification
+## 🧩Example: KRK Chess Endgame Classification
 The `demo/KRK_classify.py` script demonstrates classifying chess endgame positions (King-Rook-King) as either a draw or not. Key steps:
 1. **Data Loading**: Parses `krkopt.data` into numerical features.
 2. **Data Preparation**: Splits data into training, validation, and test sets.
@@ -117,7 +174,8 @@ Run the example:
 ```bash
 python demo/KRK_classify.py
 ```
-## Limitations and Future Improvements
+
+## 🔄Limitations and Future Improvement
 ### Current Limitations
 - Only supports 1D `tensors`, no higher-dimensional data (matrices, images).
 - Limited layer types (only `Dense` is implemented).
@@ -133,8 +191,13 @@ python demo/KRK_classify.py
 - Include more loss functions (`Cross-Entropy`, `MAE`).
 - Add visualization tools for computation graphs and training metrics.
 
-## Contributing
+## 👩‍👩‍👧‍👦Contributing
 Contributions are welcome! Feel free to open issues for bugs or feature requests, or submit pull requests with improvements.
 
-## License
-[MIT](https://opensource.org/licenses/MIT)
+## 📄 License
+This project is released under the [MIT license](LICENSE).  
+
+## 🔗Links
+* [Source code and issue tracker](https://github.com/bluemoon-o2/TensorPlay)
+* [PyPI release](https://pypi.org/project/TensorPlay/)
+* [Documentation](https://www.welog.me/article/TensorPLay)
