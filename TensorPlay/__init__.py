@@ -32,7 +32,7 @@ from .operator import (concatenate, load_operator)
 from .func import (mse, sse, nll, cross_entropy, sphere, goldstein)
 from .initializer import (he_init, xavier_init, uniform_init, my_init)
 from .utils import (plot_dot_graph, accuracy)
-from .data import (DataLoader)
+from .data import (DataLoader, load_moons, load_iris)
 from .scheduler import (StepLR, MultiStepLR, ExponentialLR, EarlyStopping)
 
 load_operator()
