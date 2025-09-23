@@ -1,5 +1,5 @@
 from typing import Tuple
-from .core import Tensor, Config
+from .core import Tensor
 import numpy as np
 
 def my_init(size) -> Tensor:
@@ -18,7 +18,7 @@ def he_init(shape: Tuple[int, ...]) -> Tensor:
     """He初始化 - 适用于ReLU及其变体激活函数"""
     fan_in = np.prod(shape[:-1])
     std = np.sqrt(2.0 / fan_in)
-    return Tensor(np.random.uniform(-std * np.sqrt(3), std * np.sqrt(3), shape).astype(Config.precision))
+    return Tensor(np.random.uniform(-std * np.sqrt(3), std * np.sqrt(3), shape))
 
 
 def uniform_init(size, a=-0.05, b=0.05) -> Tensor:

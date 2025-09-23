@@ -1,5 +1,6 @@
 from .core import Layer, Config
 from .layer import ConstantTensor
+from .utils import get_layer_info, plot_dot_graph
 import json
 
 
@@ -113,20 +114,6 @@ class Module(Layer):
                 raise ValueError(f"Layers type mismatched: expect {layer[i][1]}, got {text[i]['type']}!")
             layer[i][1].load(text[i]["params"])
 
-    @staticmethod
-    def _get_layer_info(layer):
-        layer_type = str(layer).split(".")[-1]
-        if layer_type == "Dense":
-            return None, len(layer.w)
-        elif layer_type == "Conv2D":
-            return "Conv2D"
-        elif layer_type == "AveragePooling2D":
-            return "AveragePooling2D"
-        elif layer_type == "Flatten":
-            return "Flatten"
-        else:
-            return (None,)
-
     def summary(self):
         """打印模型摘要，包括各层类型、输出形状和参数"""
         # 收集层信息的列表
@@ -138,7 +125,7 @@ class Module(Layer):
             total_params += p[2]
             if p[1].training:
                 trainable_params += p[2]
-            out_shape = Module._get_layer_info(p[1])
+            out_shape = get_layer_info(p[1])
             layers_info.append({
                 "name": p[0],
                 "type": str(p[1]).split(".")[-1],

@@ -333,7 +333,6 @@ class Layer:
         for hooks in [self._forward_pre_hooks, self._forward_hooks, self._backward_hooks]:
             if handle in hooks:
                 del hooks[handle]
-                return
 
     def _call_forward_pre_hooks(self, *args: Tensor, **kwargs) -> None:
         """调用前向传播前的钩子"""
@@ -383,7 +382,7 @@ class Layer:
 # =============================================================================
 class Optimizer:
     """优化器类，储存参数需要重写接口函数save()和load()"""
-    hooks = []  # 用于存储钩子函数的列表
+    hooks = {}  # 用于存储钩子函数的字典，键为钩子函数的ID，值为钩子函数
 
     def __init__(self, params=None):
         """
@@ -411,8 +410,8 @@ class Optimizer:
 
     def register_hook(self, hook: Callable) -> int:
         """注册钩子函数"""
-        self.hooks.append(hook)
-        return len(self.hooks) - 1
+        self.hooks[id(hook)] = hook
+        return id(hook)
 
     def remove_hook(self, handle: int):
         """移除指定的钩子函数"""

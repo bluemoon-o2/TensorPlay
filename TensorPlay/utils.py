@@ -16,6 +16,22 @@ def accuracy(output: Tensor, target: Tensor) -> float:
     return result
 
 # =============================================================================
+# Graph Utils
+# =============================================================================
+def get_layer_info(layer):
+    layer_type = str(layer).split(".")[-1]
+    if layer_type == "Dense":
+        return None, len(layer.w)
+    elif layer_type == "Conv2D":
+        return "Conv2D", len(layer.w)
+    elif layer_type == "AveragePooling2D":
+        return "AveragePooling2D"
+    elif layer_type == "Flatten":
+        return "Flatten"
+    else:
+        return (None,)
+
+# =============================================================================
 # Conv Utils
 # =============================================================================
 def recov_outsize(out_size: int, kernel_size: int, strides: int, padding: int) -> int:
@@ -80,6 +96,7 @@ def col2im_array(col: np.ndarray, img_shape: Tuple[int, int, int, int], kernel_s
             i_end = i + SW * W
             img[:, j:j_end:SH, i:i_end:SW, :] += col[:, :, :, :, j, i]
     return img[:, (PH + 1) // 2 : PH // 2 + SH + H, (PW + 1) // 2 : PW // 2 + SW + W, :]
+
 # =============================================================================
 # Graph Utils
 # =============================================================================
