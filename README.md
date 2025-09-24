@@ -177,19 +177,12 @@ python demo/KRK_classify.py
 
 ## 🔄Limitations and Future Improvement
 ### Current Limitations
-- Only supports 1D `tensors`, no higher-dimensional data (matrices, images).
-- Limited layer types (only `Dense` is implemented).
-- Basic optimizer support (only `Adam` is available).
 - No `GPU` acceleration; all operations are `CPU`-bound.
 - Limited debugging tools for computation graphs.
 
 ### Planned Improvements
-- Add support for n-dimensional tensors (`matrices`, `3D tensors`).
-- Implement more layers (`Dropout`, `BatchNorm`).
 - Support GPU acceleration via `CUDA` for faster training.
 - Improve automatic differentiation efficiency.
-- Include more loss functions (`Cross-Entropy`, `MAE`).
-- Add visualization tools for computation graphs and training metrics.
 
 ## 👩‍👩‍👧‍👦Contributing
 Contributions are welcome! Feel free to open issues for bugs or feature requests, or submit pull requests with improvements.

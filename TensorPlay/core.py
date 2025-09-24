@@ -35,7 +35,7 @@ def no_grad() -> contextlib._GeneratorContextManager:
 # =============================================================================
 def to_data(data: Union[np.ndarray, tuple, list, int, float]) -> np.ndarray:
     """将数据转换为张量要求格式"""
-    if isinstance(data, (tuple, list, int, float, Config.precision)):
+    if isinstance(data, (tuple, list, int, float)):
         return np.array(data, dtype=Config.precision)
     if isinstance(data, np.ndarray):
         return data.astype(Config.precision)
