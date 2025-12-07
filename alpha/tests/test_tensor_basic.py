@@ -1,5 +1,5 @@
 import numpy as np
-from tests import Tensor, sphere, goldstein
+from alpha.tests import Tensor, sphere, goldstein
 
 
 def test_tensor_creation():

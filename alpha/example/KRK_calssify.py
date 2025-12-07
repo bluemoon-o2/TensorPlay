@@ -1,6 +1,6 @@
 import random
-from TensorPlay import BatchNorm, Dense, Module, Adam, EarlyStopping
-from TensorPlay import DataLoader, accuracy, mse
+from alpha.TensorPlay import Dense, Module, Adam, EarlyStopping
+from alpha.TensorPlay import DataLoader, accuracy, mse
 
 # 数据加载
 def load_data(path='D:/demo/Shen-main/krkopt.data'):

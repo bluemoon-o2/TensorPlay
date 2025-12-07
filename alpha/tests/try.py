@@ -1,4 +1,4 @@
-from tests import Tensor, Module, Dense, Conv2D, BatchNorm
+from alpha.tests import Tensor, Module, Dense, Conv2D, BatchNorm
 import numpy as np
 
 class Model(Module):
@@ -23,7 +23,7 @@ class Model(Module):
         return x.softmax()
 
 
-def test_model_creation():
+if __name__ == '__main__':
     model = Model(num_classes=2)
     x = Tensor(np.random.randn(10, 128, 128, 3))
     y = model(x)

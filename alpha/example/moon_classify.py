@@ -1,4 +1,4 @@
-from TensorPlay import DataLoader, Dense, Module, Adam, accuracy, mse, load_moons
+from alpha.TensorPlay import DataLoader, Dense, Module, Adam, accuracy, mse, load_moons
 
 class MoonClassify(Module):
     def __init__(self):
