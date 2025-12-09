@@ -24,15 +24,25 @@
 ![Out of box](https://img.shields.io/badge/Out_of_the_box-🔧-maroon)
 
 > [!TIP]
-> The TensorPlay is under development—boasting a more mature next-generation architecture and built entirely on 
-> a C++ core for enhanced performance and reliability. See /alpha to get the latest version(0.1.2).
+> The TensorPlay is under development—boasting a more mature high-performance architecture.
+> See /alpha to get the latest version(0.1.2).
+
+### 📣 Recent updates
+<details>
+<summary><strong>🔥🔥2025.12.9: The latest benchmark report is available.</strong></summary>
+
+- **Benchmark rivals:**
+  - 🧮 NumPy and PyTorch.
+  - ✍️ See [here](./docs/benchmark/mm.md) for more details.
+
+</details>
 
 
 ## 👩‍👩‍👧‍👦Contributing
 Contributions are welcome! Feel free to open issues for bugs or feature requests, or submit pull requests with improvements.
 
 ## 📄 License
-This project is released under the [MIT license](LICENSE).  
+This project is released under the [Apache 2.0 license](LICENSE).  
 
 ## 🔗Links
 * [Source code and issue tracker](https://github.com/bluemoon-o2/TensorPlay)

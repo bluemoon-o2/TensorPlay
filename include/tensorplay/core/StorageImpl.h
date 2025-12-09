@@ -3,13 +3,14 @@
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
-#include <stdexcept>
 #include "tensorplay/core/DataPtr.h"
 #include "tensorplay/core/Allocator.h"
+#include "tensorplay/core/Macros.h"
+#include "tensorplay/core/Exception.h"
 
 namespace tensorplay {
 
-struct StorageImpl {
+struct TENSORPLAY_API StorageImpl {
     DataPtr data_ptr;
     size_t nbytes;
     Allocator* allocator;
@@ -36,7 +37,7 @@ struct StorageImpl {
     void set_nbytes(size_t new_nbytes) {
         if (nbytes == new_nbytes) return;
         if (!resizable || !allocator) {
-            throw std::runtime_error("Storage is not resizable");
+            TP_THROW(RuntimeError, "Storage is not resizable");
         }
         
         DataPtr new_data = allocator->allocate(new_nbytes);

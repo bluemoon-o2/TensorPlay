@@ -3,6 +3,7 @@
 #include <string>
 #include <memory>
 #include <cctype>
+#include "tensorplay/core/Macros.h"
 
 namespace tensorplay {
 
@@ -20,7 +21,7 @@ enum class DeviceType : int8_t {
 };
 
 // Device class to represent computation device
-class Device {
+class TENSORPLAY_API Device {
 private:
     DeviceType type_;
     int64_t index_;  // For multi-GPU systems, -1 for CPU
@@ -28,6 +29,8 @@ private:
 public:
     Device() : type_(DeviceType::CPU), index_(-1) {}
     Device(DeviceType type, int64_t index = -1) : type_(type), index_(index) {}
+    Device(const std::string& device_str);
+    Device(const std::string& type_str, int64_t index);
     
     // Expose type_ and index_ for external use
     DeviceType type() const { return type_; }

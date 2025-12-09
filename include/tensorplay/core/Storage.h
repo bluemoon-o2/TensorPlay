@@ -2,10 +2,11 @@
 
 #include <memory>
 #include "tensorplay/core/StorageImpl.h"
+#include "tensorplay/core/Macros.h"
 
 namespace tensorplay {
 
-class Storage {
+class TENSORPLAY_API Storage {
 public:
     Storage() = default;
     

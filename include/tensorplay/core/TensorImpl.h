@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <random>
 #include <cstring>
+#include "tensorplay/core/Macros.h"
 #include "tensorplay/core/DType.h"
 #include "tensorplay/core/Device.h"
 #include "tensorplay/core/Autograd.h"
@@ -17,7 +18,7 @@ namespace tensorplay {
 
 class Tensor;
 
-class TensorImpl {
+class TENSORPLAY_API TensorImpl {
 private:
     Storage storage_;
     size_t storage_offset_;
@@ -68,6 +69,9 @@ public:
     // Autograd
     bool requires_grad() const { return autograd_meta_ && autograd_meta_->requires_grad(); }
     void set_requires_grad(bool requires_grad);
+    Tensor grad() const;
+    void set_grad(const Tensor& grad);
+    void retain_grad();
     AutogradMetaInterface* autograd_meta() const { return autograd_meta_.get(); }
     
     // Access to raw data pointer (typed)

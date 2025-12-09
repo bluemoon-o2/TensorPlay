@@ -5,15 +5,17 @@
 #include <optional>
 #include <string>
 #include <cstring>
+#include "tensorplay/core/Macros.h"
 #include "tensorplay/core/DType.h"
 #include "tensorplay/core/Device.h"
 #include "tensorplay/core/Scalar.h"
 #include "tensorplay/core/TensorImpl.h"
 #include "tensorplay/core/Dispatcher.h"
+#include "tensorplay/core/Exception.h"
 
 namespace tensorplay {
 
-class Size {
+class TENSORPLAY_API Size {
 public:
     using iterator = std::vector<int64_t>::iterator;
     using const_iterator = std::vector<int64_t>::const_iterator;
@@ -47,9 +49,9 @@ private:
     std::vector<int64_t> sizes_;
 };
 
-std::ostream& operator<<(std::ostream& os, const Size& s);
+TENSORPLAY_API std::ostream& operator<<(std::ostream& os, const Size& s);
 
-class Tensor {
+class TENSORPLAY_API Tensor {
 private:
     std::shared_ptr<TensorImpl> impl_;
 
@@ -64,6 +66,9 @@ public:
     // Constructor from Storage (for advanced usage)
     Tensor(Storage storage, const std::vector<int64_t>& sizes, DType dtype);
 
+    // Utils
+    bool defined() const { return impl_ != nullptr; }
+    
     // Constructor with Scalar fill value
     Tensor(const std::vector<int64_t>& sizes, Scalar fill_value, const Device& device = Device());
 
@@ -72,7 +77,7 @@ public:
     static Tensor tensor(const std::vector<T>& data, std::optional<DType> dtype = std::nullopt, const Device& device = Device(DeviceType::CPU)) {
         DType inferred_dtype = dtype.value_or(TypeTraits<T>::dtype);
         if (inferred_dtype == DType::Undefined) {
-             throw std::runtime_error("Could not infer dtype from C++ type");
+             TP_THROW(RuntimeError, "Could not infer dtype from C++ type");
         }
         
         std::vector<int64_t> size = {static_cast<int64_t>(data.size())};
@@ -101,11 +106,11 @@ public:
                      bool* ptr = t.data_ptr<bool>();
                      for(size_t i=0; i<data.size(); ++i) ptr[i] = static_cast<bool>(data[i]);
                  } else {
-                     throw std::runtime_error("Type conversion in tensor() not fully implemented for this dtype");
+                     TP_THROW(NotImplementedError, "Type conversion in tensor() not fully implemented for this dtype");
                  }
             }
         } else {
-             throw std::runtime_error("tensor() currently only supports CPU");
+             TP_THROW(NotImplementedError, "tensor() currently only supports CPU");
         }
         
         return t;
@@ -128,12 +133,15 @@ public:
     Device device() const;
     size_t itemsize() const;
     bool is_contiguous() const;
-    bool defined() const { return impl_ != nullptr; }
     
     // Autograd
     bool requires_grad() const;
     void set_requires_grad(bool r);
     Tensor grad() const;
+    void set_grad(const Tensor& grad);
+    void retain_grad();
+    bool is_leaf() const;
+    Tensor detach() const;
     
     // Data access
     template<typename T>
@@ -148,15 +156,28 @@ public:
     
     // View methods
     Tensor view(const std::vector<int64_t>& shape) const;
-    Tensor reshape(const std::vector<int64_t>& shape) const;
+    // Tensor reshape(const std::vector<int64_t>& shape) const; // Generated
     Tensor as_strided(const std::vector<int64_t>& size, const std::vector<int64_t>& stride, std::optional<int64_t> storage_offset = std::nullopt) const;
     Tensor select(int64_t dim, int64_t index) const;
     Tensor slice(int64_t dim, int64_t start, int64_t end, int64_t step = 1) const;
     Tensor expand(const std::vector<int64_t>& size) const;
     
+    // Tensor transpose(int64_t dim0, int64_t dim1) const; // Generated
+    // Tensor t() const; // Generated
+    // Tensor permute(const std::vector<int64_t>& dims) const; // Generated
+    // Tensor squeeze() const; // Generated
+    // Tensor squeeze(int64_t dim) const; // Generated
+    // Tensor unsqueeze(int64_t dim) const; // Generated
+
+    // std::vector<Tensor> unbind(int64_t dim = 0) const; // Generated
+
+    // std::vector<Tensor> split(int64_t split_size, int64_t dim = 0) const; // Generated
+    // std::vector<Tensor> split(const std::vector<int64_t>& split_sizes, int64_t dim = 0) const; // Generated
+    // std::vector<Tensor> chunk(int64_t chunks, int64_t dim = 0) const; // Generated
+
     // Modification
-    Tensor& copy_(const Tensor& src);
-    Tensor& fill_(Scalar value);
+    // Tensor& copy_(const Tensor& src); // Generated
+    // Tensor& fill_(Scalar value); // Generated
     Tensor& zero_();
     
     // Scalar access
@@ -171,14 +192,19 @@ public:
     Tensor clone() const;
 
     // Factories (static)
-    static Tensor empty(const std::vector<int64_t>& size, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU));
-    static Tensor full(const std::vector<int64_t>& size, Scalar fill_value, DType dtype = DType::Undefined, Device device = Device(DeviceType::CPU));
-    static Tensor zeros(const std::vector<int64_t>& size, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU));
-    static Tensor ones(const std::vector<int64_t>& size, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU));
-    static Tensor eye(int64_t n, int64_t m = -1, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU));
-    static Tensor arange(Scalar start, Scalar end, Scalar step = Scalar(1), DType dtype = DType::Undefined, Device device = Device(DeviceType::CPU));
-    static Tensor arange(Scalar end, DType dtype = DType::Undefined, Device device = Device(DeviceType::CPU));
-    static Tensor rand(const std::vector<int64_t>& size, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU));
+    // static Tensor empty(const std::vector<int64_t>& size, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU)); // Generated
+    // static Tensor full(const std::vector<int64_t>& size, Scalar fill_value, DType dtype = DType::Undefined, Device device = Device(DeviceType::CPU)); // Generated
+    // static Tensor zeros(const std::vector<int64_t>& size, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU)); // Generated
+    // static Tensor ones(const std::vector<int64_t>& size, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU)); // Generated
+    // static Tensor eye(int64_t n, int64_t m = -1, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU)); // Generated
+    // static Tensor arange(Scalar start, Scalar end, Scalar step = Scalar(1), DType dtype = DType::Undefined, Device device = Device(DeviceType::CPU)); // Generated
+    // static Tensor arange(Scalar end, DType dtype = DType::Undefined, Device device = Device(DeviceType::CPU)); // Generated
+    // static Tensor linspace(Scalar start, Scalar end, int64_t steps, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU)); // Generated
+    // static Tensor logspace(Scalar start, Scalar end, int64_t steps, double base = 10.0, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU)); // Generated
+    // static Tensor rand(const std::vector<int64_t>& size, DType dtype = DType::Float32, Device device = Device(DeviceType::CPU)); // Generated
+    
+    // static Tensor cat(const std::vector<Tensor>& tensors, int64_t dim = 0); // Generated
+    // static Tensor stack(const std::vector<Tensor>& tensors, int64_t dim = 0); // Generated // Generated
 
     // *_like factories
     static Tensor empty_like(const Tensor& input, std::optional<DType> dtype = std::nullopt, std::optional<Device> device = std::nullopt);
@@ -187,11 +213,13 @@ public:
     static Tensor ones_like(const Tensor& input, std::optional<DType> dtype = std::nullopt, std::optional<Device> device = std::nullopt);
 
     // Explicit arithmetic methods
-    Tensor add(const Tensor& other, Scalar alpha = Scalar(1)) const;
-    Tensor sub(const Tensor& other, Scalar alpha = Scalar(1)) const;
-    Tensor mul(const Tensor& other) const;
-    Tensor div(const Tensor& other) const;
-
+    // Tensor add(const Tensor& other, Scalar alpha = Scalar(1)) const; // Generated
+    // Tensor sub(const Tensor& other, Scalar alpha = Scalar(1)) const; // Generated
+    // Tensor mul(const Tensor& other) const; // Generated
+    // Tensor div(const Tensor& other) const; // Generated
+    // Tensor mm(const Tensor& other) const; // Generated
+    Tensor matmul(const Tensor& other) const;
+    
     // Type conversion
     Tensor to(DType dtype, bool non_blocking = false, bool copy = false) const;
     Tensor to(Device device, DType dtype, bool non_blocking = false, bool copy = false) const;
@@ -218,17 +246,20 @@ public:
     Tensor& operator-=(Scalar other);
     Tensor& operator*=(Scalar other);
     Tensor& operator/=(Scalar other);
+
+    // Generated methods
+    #include "tensorplay/ops/TensorGenerated.h"
 };
 
 // Unary operators
-Tensor operator-(const Tensor& t);
+TENSORPLAY_API Tensor operator-(const Tensor& t);
 
 // Global operators for Scalar first
-inline Tensor operator+(Scalar s, const Tensor& t) { return t + s; }
-inline Tensor operator-(Scalar s, const Tensor& t) { return (-t) + s; } // unary minus needed
-inline Tensor operator*(Scalar s, const Tensor& t) { return t * s; }
+TENSORPLAY_API inline Tensor operator+(Scalar s, const Tensor& t) { return t + s; }
+TENSORPLAY_API inline Tensor operator-(Scalar s, const Tensor& t) { return (-t) + s; } // unary minus needed
+TENSORPLAY_API inline Tensor operator*(Scalar s, const Tensor& t) { return t * s; }
 // inline Tensor operator/(Scalar s, const Tensor& t) { ... } // Need specialized impl
 
-std::ostream& operator<<(std::ostream& os, const Tensor& t);
+TENSORPLAY_API std::ostream& operator<<(std::ostream& os, const Tensor& t);
 
 } // namespace tensorplay

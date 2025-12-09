@@ -1,12 +1,13 @@
 #pragma once
 #include <memory>
 #include <cstdint>
+#include "tensorplay/core/Macros.h"
 
 namespace tensorplay {
 
 class Tensor; // Forward declaration
 
-class AutogradMetaInterface {
+class TENSORPLAY_API AutogradMetaInterface {
 public:
     virtual ~AutogradMetaInterface() = default;
     
@@ -24,11 +25,16 @@ public:
     
     // Accumulate gradient
     virtual void accum_grad(const Tensor& grad) = 0;
+
+    // Retain gradient (for non-leaf tensors)
+    virtual bool retain_grad() const = 0;
+    virtual void set_retain_grad(bool retain_grad) = 0;
 };
 
-class AutogradMeta : public AutogradMetaInterface {
+class TENSORPLAY_API AutogradMeta : public AutogradMetaInterface {
 private:
     bool requires_grad_;
+    bool retain_grad_;
     std::shared_ptr<Tensor> grad_;
     
 public:
@@ -39,10 +45,13 @@ public:
     Tensor grad() const override;
     void set_grad(const Tensor& grad) override;
     void accum_grad(const Tensor& grad) override;
+    
+    bool retain_grad() const override;
+    void set_retain_grad(bool retain_grad) override;
 };
 
 // Version counter for tracking tensor modifications
-class VariableVersion {
+class TENSORPLAY_API VariableVersion {
 private:
     uint32_t version_;
     bool enabled_;

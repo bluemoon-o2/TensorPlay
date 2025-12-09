@@ -1,6 +1,7 @@
 #include "tensorplay/core/Tensor.h"
-#include "tensorplay/core/Generator.h"
 #include "tensorplay/core/Dispatcher.h"
+#include "tensorplay/core/Exception.h"
+#include "tensorplay/core/Generator.h"
 #include <iostream>
 #include <cstring>
 #include <cmath>
@@ -11,6 +12,7 @@
 #include <sstream>
 #include <functional>
 #include <type_traits>
+#include <numeric>
 
 namespace tensorplay {
 
@@ -50,13 +52,13 @@ Size Tensor::shape() const { return impl_ ? Size(impl_->sizes()) : Size({}); }
 std::vector<int64_t> Tensor::strides() const { return impl_ ? impl_->strides() : std::vector<int64_t>{}; }
 
 int64_t Tensor::size(int64_t dim) const { 
-    if (!impl_) throw std::runtime_error("Tensor not defined");
+    if (!impl_) TP_THROW(RuntimeError, "Tensor not defined");
     if (dim < 0) dim += impl_->dim();
     return impl_->size(dim); 
 }
 
 int64_t Tensor::stride(int64_t dim) const {
-    if (!impl_) throw std::runtime_error("Tensor not defined");
+    if (!impl_) TP_THROW(RuntimeError, "Tensor not defined");
     if (dim < 0) dim += impl_->dim();
     return impl_->stride(dim);
 }
@@ -70,15 +72,60 @@ bool Tensor::requires_grad() const { return impl_ ? impl_->requires_grad() : fal
 void Tensor::set_requires_grad(bool r) { if (impl_) impl_->set_requires_grad(r); }
 
 Tensor Tensor::grad() const { 
-    if (impl_ && impl_->autograd_meta()) return impl_->autograd_meta()->grad();
+    if (impl_) return impl_->grad();
     return Tensor();
+}
+
+void Tensor::set_grad(const Tensor& grad) {
+    if (impl_) impl_->set_grad(grad);
+}
+
+void Tensor::retain_grad() {
+    if (impl_) impl_->retain_grad();
+}
+
+bool Tensor::is_leaf() const {
+    // In PyTorch, a tensor is a leaf if:
+    // 1. It does not require grad (requires_grad = False)
+    // 2. It requires grad but was created by the user (does not have a grad_fn)
+    // Since we don't have grad_fn yet, we consider all tensors created explicitly as leaf tensors.
+    // If we implement autograd ops later, they will produce tensors with grad_fn, which are not leaf.
+    // For now, checking if it has a "grad_fn" equivalent would be needed, but since we don't have it,
+    // we return true for now, unless we can distinguish.
+    // Actually, in our current simple implementation, all tensors are leaf tensors because we don't
+    // construct the graph yet.
+    return true; 
+}
+
+Tensor Tensor::detach() const {
+    if (!impl_) return Tensor();
+    
+    // Create a new Tensor that shares the same storage
+    Tensor result;
+    // We need to access the storage and properties of the current tensor
+    // and create a new TensorImpl with them, but WITHOUT autograd history/meta.
+    // However, TensorImpl constructor takes Storage, but we need to share it properly.
+    
+    // We can manually construct a TensorImpl sharing storage
+    std::shared_ptr<TensorImpl> new_impl = std::make_shared<TensorImpl>(
+        impl_->storage(), 
+        static_cast<std::vector<int64_t>>(shape()), 
+        strides(),
+        dtype(), 
+        impl_->storage_offset()
+    );
+    
+    // detach() means requires_grad=False
+    // The default TensorImpl constructor sets autograd_meta_ to null (effectively requires_grad=False)
+    
+    return Tensor(std::move(new_impl));
 }
 
 void* Tensor::data_ptr() const { return impl_ ? impl_->data() : nullptr; }
 
 Scalar Tensor::item() const {
     if (numel() != 1) {
-        throw std::runtime_error("item() only supported for 1-element tensors");
+        TP_THROW(ValueError, "item() only supported for 1-element tensors");
     }
     
     #define ITEM_CASE(ctype, name) \
@@ -90,13 +137,13 @@ Scalar Tensor::item() const {
         } else if constexpr (std::is_integral_v<ctype>) { \
             return Scalar(static_cast<int64_t>(*data_ptr<ctype>())); \
         } else { \
-             throw std::runtime_error("item() not implemented for complex types yet"); \
+             TP_THROW(NotImplementedError, "item() not implemented for complex types yet"); \
         } \
     }
 
     switch (dtype()) {
         TENSORPLAY_FORALL_SCALAR_TYPES(ITEM_CASE)
-        default: throw std::runtime_error("item() not implemented for this dtype");
+        default: TP_THROW(NotImplementedError, "item() not implemented for this dtype");
     }
     #undef ITEM_CASE
 }
@@ -175,15 +222,17 @@ std::string Tensor::toString() const {
         print_recursive(*this, 0, 7); // 7 for "tensor(" length
     }
     
-    // Append size and dtype if needed
-    // PyTorch style: does not print shape usually in __repr__ unless very large?
-    // Actually PyTorch prints nothing else usually for default repr.
-    // But we might want to add dtype if not float32?
-    // For now, simple.
+    // Append metadata
+    if (device().type() != DeviceType::CPU) {
+        ss << ", device='" << device().toString() << "'";
+    }
     
     if (dtype() != DType::Float32) {
-        ss << ", dtype=" << ::tensorplay::toString(dtype());
+        std::string dt = ::tensorplay::toString(dtype());
+        std::transform(dt.begin(), dt.end(), dt.begin(), [](unsigned char c){ return std::tolower(c); });
+        ss << ", dtype=tensorplay." << dt;
     }
+    
     ss << ")";
     return ss.str();
 }
@@ -191,43 +240,54 @@ std::string Tensor::toString() const {
 // View methods
 
 Tensor Tensor::as_strided(const std::vector<int64_t>& size, const std::vector<int64_t>& stride, std::optional<int64_t> storage_offset) const {
-    if (!impl_) throw std::runtime_error("Tensor not defined");
+    if (!impl_) TP_THROW(RuntimeError, "Tensor not defined");
     size_t new_offset = storage_offset.value_or(impl_->storage_offset());
     return Tensor(std::make_shared<TensorImpl>(impl_->storage(), size, stride, impl_->dtype(), new_offset));
 }
 
 Tensor Tensor::view(const std::vector<int64_t>& shape) const {
     if (!is_contiguous()) {
-        throw std::runtime_error("view() is only supported on contiguous tensors. Use reshape() instead.");
+        TP_THROW(RuntimeError, "view() is only supported on contiguous tensors. Use reshape() instead.");
     }
     
     int64_t new_numel = 1;
-    for (auto s : shape) new_numel *= s;
-    if (new_numel != numel()) {
-        throw std::runtime_error("view(): invalid shape, numel mismatch");
+    int infer_dim = -1;
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (shape[i] == -1) {
+            if (infer_dim != -1) TP_THROW(RuntimeError, "view(): only one dimension can be inferred");
+            infer_dim = i;
+        } else {
+            if (shape[i] < 0) TP_THROW(RuntimeError, "view(): invalid negative dimension");
+            new_numel *= shape[i];
+        }
     }
     
-    std::vector<int64_t> new_strides = SizesAndStrides::compute_contiguous_strides(shape);
-    return as_strided(shape, new_strides);
+    std::vector<int64_t> final_shape = shape;
+    if (infer_dim != -1) {
+        if (new_numel == 0) TP_THROW(RuntimeError, "view(): cannot infer shape when other dimensions are 0");
+        if (numel() % new_numel != 0) TP_THROW(RuntimeError, "view(): shape inference failed");
+        final_shape[infer_dim] = numel() / new_numel;
+        new_numel *= final_shape[infer_dim];
+    }
+    
+    if (new_numel != numel()) {
+        TP_THROW(RuntimeError, "view(): invalid shape, numel mismatch");
+    }
+    
+    std::vector<int64_t> new_strides = SizesAndStrides::compute_contiguous_strides(final_shape);
+    return as_strided(final_shape, new_strides);
 }
 
-Tensor Tensor::reshape(const std::vector<int64_t>& shape) const {
-    if (is_contiguous()) {
-         return view(shape);
-    }
-    // TODO: if not contiguous, clone then view
-    return clone().view(shape);
-}
 
 Tensor Tensor::select(int64_t dim, int64_t index) const {
-    if (!impl_) throw std::runtime_error("Tensor not defined");
+    if (!impl_) TP_THROW(RuntimeError, "Tensor not defined");
     int64_t ndim = this->dim();
     if (dim < 0) dim += ndim;
-    if (dim < 0 || dim >= ndim) throw std::out_of_range("Dimension out of range");
+    if (dim < 0 || dim >= ndim) TP_THROW(IndexError, "Dimension out of range");
     
     int64_t size_dim = size(dim);
     if (index < 0) index += size_dim;
-    if (index < 0 || index >= size_dim) throw std::out_of_range("Index out of range");
+    if (index < 0 || index >= size_dim) TP_THROW(IndexError, "Index out of range");
     
     std::vector<int64_t> new_sizes = static_cast<std::vector<int64_t>>(shape());
     std::vector<int64_t> new_strides = strides();
@@ -241,10 +301,10 @@ Tensor Tensor::select(int64_t dim, int64_t index) const {
 }
 
 Tensor Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const {
-    if (!impl_) throw std::runtime_error("Tensor not defined");
+    if (!impl_) TP_THROW(RuntimeError, "Tensor not defined");
     int64_t ndim = this->dim();
     if (dim < 0) dim += ndim;
-    if (dim < 0 || dim >= ndim) throw std::out_of_range("Dimension out of range");
+    if (dim < 0 || dim >= ndim) TP_THROW(IndexError, "Dimension out of range");
     
     int64_t size_dim = size(dim);
     if (start < 0) start += size_dim;
@@ -253,7 +313,7 @@ Tensor Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) cons
     if (start > size_dim) start = size_dim;
     if (end < start) end = start;
     if (end > size_dim) end = size_dim;
-    if (step <= 0) throw std::invalid_argument("Step must be positive");
+    if (step <= 0) TP_THROW(ValueError, "Step must be positive");
     
     int64_t new_len = (end - start + step - 1) / step;
     if (new_len < 0) new_len = 0;
@@ -270,12 +330,12 @@ Tensor Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) cons
 }
 
 Tensor Tensor::expand(const std::vector<int64_t>& size) const {
-    if (!impl_) throw std::runtime_error("Tensor not defined");
+    if (!impl_) TP_THROW(RuntimeError, "Tensor not defined");
     int64_t ndim = dim();
     int64_t new_ndim = size.size();
     
     if (new_ndim < ndim) {
-        throw std::runtime_error("expand(): the number of sizes provided must be greater or equal to the number of dimensions in the tensor.");
+        TP_THROW(RuntimeError, "expand(): the number of sizes provided must be greater or equal to the number of dimensions in the tensor.");
     }
     
     std::vector<int64_t> new_sizes(size);
@@ -297,11 +357,11 @@ Tensor Tensor::expand(const std::vector<int64_t>& size) const {
                 new_sizes[i] = size_dim;
                 new_strides[i] = stride_dim;
             } else {
-                throw std::runtime_error("expand(): inconsistent tensor size.");
+                TP_THROW(RuntimeError, "expand(): inconsistent tensor size.");
             }
         } else {
             // New dimension added at front
-            if (new_sizes[i] == -1) throw std::runtime_error("expand(): cannot infer size for new dimension");
+            if (new_sizes[i] == -1) TP_THROW(RuntimeError, "expand(): cannot infer size for new dimension");
             new_strides[i] = 0;
         }
     }
@@ -310,99 +370,8 @@ Tensor Tensor::expand(const std::vector<int64_t>& size) const {
 }
 
 // Modification
-// Recursive application of copy with type conversion
-template <typename T_DST, typename T_SRC>
-void apply_copy_recursive(T_DST* dst_ptr, const std::vector<int64_t>& dst_strides,
-                          const T_SRC* src_ptr, const std::vector<int64_t>& src_strides,
-                          int dim, int64_t dst_offset, int64_t src_offset,
-                          const std::vector<int64_t>& shape) {
-    int64_t size = shape[dim];
-    if (dim == shape.size() - 1) {
-        // Inner loop
-        int64_t dst_stride = dst_strides[dim];
-        int64_t src_stride = src_strides[dim];
-        for (int64_t i = 0; i < size; ++i) {
-            dst_ptr[dst_offset + i * dst_stride] = static_cast<T_DST>(src_ptr[src_offset + i * src_stride]);
-        }
-    } else {
-        for (int64_t i = 0; i < size; ++i) {
-            apply_copy_recursive(dst_ptr, dst_strides, src_ptr, src_strides,
-                                 dim + 1,
-                                 dst_offset + i * dst_strides[dim],
-                                 src_offset + i * src_strides[dim],
-                                 shape);
-        }
-    }
-}
+// copy_ and fill_ are generated
 
-Tensor& Tensor::copy_(const Tensor& src) {
-    if (numel() != src.numel()) {
-        throw std::runtime_error("copy_: shapes mismatch (broadcasting not full implemented in copy_)");
-    }
-    
-    // Fast path: Contiguous and same type
-    if (is_contiguous() && src.is_contiguous() && dtype() == src.dtype()) {
-        std::memcpy(data_ptr(), src.data_ptr(), numel() * itemsize());
-        return *this;
-    }
-
-    // Generic path: Recursive copy with casting
-    if (device().type() == DeviceType::CPU && src.device().type() == DeviceType::CPU) {
-        
-        #define DISPATCH_COPY_SRC(T_DST, T_SRC) \
-            apply_copy_recursive<T_DST, T_SRC>( \
-                this->data_ptr<T_DST>(), this->strides(), \
-                src.data_ptr<T_SRC>(), src.strides(), \
-                0, 0, 0, static_cast<std::vector<int64_t>>(this->shape()));
-
-        auto dispatch_src = [&]<typename T_DST>() {
-            #define SRC_CASE(ctype, name) \
-            case DType::name: { DISPATCH_COPY_SRC(T_DST, ctype); break; }
-            
-            switch (src.dtype()) {
-                TENSORPLAY_FORALL_SCALAR_TYPES(SRC_CASE)
-                default: throw std::runtime_error("copy_: unsupported source dtype");
-            }
-            #undef SRC_CASE
-        };
-
-        #define DST_CASE(ctype, name) \
-        case DType::name: { dispatch_src.template operator()<ctype>(); break; }
-
-        switch (dtype()) {
-            TENSORPLAY_FORALL_SCALAR_TYPES(DST_CASE)
-            default: throw std::runtime_error("copy_: unsupported destination dtype");
-        }
-        #undef DST_CASE
-        #undef DISPATCH_COPY_SRC
-        
-    } else {
-        throw std::runtime_error("copy_ only supports CPU tensors for now");
-    }
-
-    return *this;
-}
-
-Tensor& Tensor::fill_(Scalar value) {
-    // Dispatch based on internal type
-    if (device().is_cpu()) {
-        #define FILL_CASE(ctype, name) \
-        case DType::name: { \
-            ctype val = value.to<ctype>(); \
-            ctype* data = data_ptr<ctype>(); \
-            int64_t n = numel(); \
-            for (int64_t i = 0; i < n; ++i) data[i] = val; \
-            break; \
-        }
-
-        switch (dtype()) {
-            TENSORPLAY_FORALL_SCALAR_TYPES(FILL_CASE)
-            default: throw std::runtime_error("Fill not implemented for this dtype");
-        }
-        #undef FILL_CASE
-    }
-    return *this;
-}
 
 Tensor& Tensor::zero_() {
     return fill_(Scalar(0));
@@ -415,92 +384,7 @@ Tensor Tensor::clone() const {
 }
 
 // Factories
-Tensor Tensor::empty(const std::vector<int64_t>& size, DType dtype, Device device) {
-    return Tensor(size, dtype, device);
-}
-
-Tensor Tensor::full(const std::vector<int64_t>& size, Scalar fill_value, DType dtype, Device device) {
-    if (dtype == DType::Undefined) dtype = fill_value.dtype();
-    Tensor t = empty(size, dtype, device);
-    t.fill_(fill_value);
-    return t;
-}
-
-Tensor Tensor::zeros(const std::vector<int64_t>& size, DType dtype, Device device) {
-    return full(size, Scalar(0), dtype, device);
-}
-
-Tensor Tensor::ones(const std::vector<int64_t>& size, DType dtype, Device device) {
-    return full(size, Scalar(1), dtype, device);
-}
-
-Tensor Tensor::eye(int64_t n, int64_t m, DType dtype, Device device) {
-    if (m == -1) m = n;
-    Tensor t = zeros({n, m}, dtype, device);
-    int64_t min_dim = std::min(n, m);
-    
-    if (device.is_cpu()) {
-        #define EYE_CASE(ctype, name) \
-        case DType::name: { \
-            ctype* ptr = t.data_ptr<ctype>(); \
-            for (int64_t i = 0; i < min_dim; ++i) { \
-                int64_t offset = i * m + i; \
-                ptr[offset] = static_cast<ctype>(1); \
-            } \
-            break; \
-        }
-
-        switch (dtype) {
-            TENSORPLAY_FORALL_SCALAR_TYPES(EYE_CASE)
-            default: {
-                 // Fallback for non-contiguous or unknown types (though zeros guarantees contiguous here)
-                 for (int64_t i = 0; i < min_dim; ++i) {
-                     t.select(0, i).select(0, i).fill_(Scalar(1));
-                 }
-            }
-        }
-        #undef EYE_CASE
-    }
-    return t;
-}
-
-Tensor Tensor::arange(Scalar start, Scalar end, Scalar step, DType dtype, Device device) {
-    double s = start.to<double>();
-    double e = end.to<double>();
-    double st = step.to<double>();
-    int64_t len = static_cast<int64_t>(std::ceil((e - s) / st));
-    
-    if (len < 0) len = 0; // Safety check
-
-    if (dtype == DType::Undefined) {
-        // Infer from scalars (simple rule: if any float, result float)
-        if (start.isFloatingPoint() || end.isFloatingPoint() || step.isFloatingPoint()) dtype = DType::Float32;
-        else dtype = DType::Int64;
-    }
-    
-    Tensor t = empty({len}, dtype, device);
-    
-    if (device.is_cpu()) {
-        #define ARANGE_CASE(ctype, name) \
-        case DType::name: { \
-            ctype* ptr = t.data_ptr<ctype>(); \
-            for(int64_t i=0; i<len; ++i) ptr[i] = static_cast<ctype>(s + i * st); \
-            break; \
-        }
-
-        switch (dtype) {
-            TENSORPLAY_FORALL_SCALAR_TYPES(ARANGE_CASE)
-            default: throw std::runtime_error("arange not implemented for this dtype");
-        }
-        #undef ARANGE_CASE
-    }
-    
-    return t;
-}
-
-Tensor Tensor::arange(Scalar end, DType dtype, Device device) {
-    return arange(Scalar(0), end, Scalar(1), dtype, device);
-}
+// empty, full, zeros, ones, eye, arange are generated
 
 // *_like factories
 Tensor Tensor::empty_like(const Tensor& input, std::optional<DType> dtype, std::optional<Device> device) {
@@ -520,120 +404,14 @@ Tensor Tensor::ones_like(const Tensor& input, std::optional<DType> dtype, std::o
 }
 
 // Operators
+// add, sub, mul, div, mm are generated
 
-// Helper to broadcast shapes
-static std::vector<int64_t> broadcast_shapes(const std::vector<int64_t>& shape1, const std::vector<int64_t>& shape2) {
-    int64_t ndim1 = shape1.size();
-    int64_t ndim2 = shape2.size();
-    int64_t ndim = std::max(ndim1, ndim2);
-    std::vector<int64_t> result_shape(ndim);
-    
-    for (int64_t i = 0; i < ndim; ++i) {
-        int64_t dim1 = (i < ndim - ndim1) ? 1 : shape1[i - (ndim - ndim1)];
-        int64_t dim2 = (i < ndim - ndim2) ? 1 : shape2[i - (ndim - ndim2)];
-        
-        if (dim1 == 1) result_shape[i] = dim2;
-        else if (dim2 == 1) result_shape[i] = dim1;
-        else if (dim1 == dim2) result_shape[i] = dim1;
-        else throw std::runtime_error("The size of tensor a must match the size of tensor b at non-singleton dimension");
-    }
-    return result_shape;
-}
+Tensor Tensor::operator+(const Tensor& other) const { return add(other); }
+Tensor Tensor::operator-(const Tensor& other) const { return sub(other); }
+Tensor Tensor::operator*(const Tensor& other) const { return mul(other); }
+Tensor Tensor::operator/(const Tensor& other) const { return div(other); }
 
-// Recursive application of binary op
-template <typename T, typename Op>
-void apply_op_recursive(T* out_ptr, const std::vector<int64_t>& out_strides,
-                       const Tensor& a, const std::vector<int64_t>& a_strides,
-                       const Tensor& b, const std::vector<int64_t>& b_strides,
-                       int dim, int64_t out_offset, int64_t a_offset, int64_t b_offset,
-                       const std::vector<int64_t>& shape, Op op) {
-    int64_t size = shape[dim];
-    if (dim == shape.size() - 1) {
-        // Base case: inner loop
-        T* a_data = a.data_ptr<T>();
-        T* b_data = b.data_ptr<T>();
-        
-        for (int64_t i = 0; i < size; ++i) {
-            out_ptr[out_offset + i * out_strides[dim]] = op(
-                a_data[a_offset + i * a_strides[dim]],
-                b_data[b_offset + i * b_strides[dim]]
-            );
-        }
-    } else {
-        for (int64_t i = 0; i < size; ++i) {
-            apply_op_recursive<T>(out_ptr, out_strides, a, a_strides, b, b_strides,
-                                 dim + 1,
-                                 out_offset + i * out_strides[dim],
-                                 a_offset + i * a_strides[dim],
-                                 b_offset + i * b_strides[dim],
-                                 shape, op);
-        }
-    }
-}
 
-template <typename Op>
-Tensor binary_op(const Tensor& a, const Tensor& b, Op op) {
-    std::vector<int64_t> out_shape = broadcast_shapes(static_cast<std::vector<int64_t>>(a.shape()), static_cast<std::vector<int64_t>>(b.shape()));
-    
-    // Determine output dtype (simplified)
-    DType out_dtype = a.dtype(); 
-    auto isFloating = [](DType dt) {
-        return dt == DType::Float32 || dt == DType::Float64;
-    };
-    if (isFloating(b.dtype()) && !isFloating(out_dtype)) out_dtype = b.dtype();
-    
-    // Cast inputs if necessary (to ensure type safety in kernel)
-    Tensor a_cast = (a.dtype() == out_dtype) ? a : a.to(out_dtype);
-    Tensor b_cast = (b.dtype() == out_dtype) ? b : b.to(out_dtype);
-
-    // Expand inputs to output shape (logical expansion via strides)
-    Tensor a_expanded = a_cast.expand(out_shape);
-    Tensor b_expanded = b_cast.expand(out_shape);
-    
-    Tensor out = Tensor::empty(out_shape, out_dtype, a.device());
-    
-    #define OP_CASE(ctype, name) \
-    case DType::name: { \
-        apply_op_recursive<ctype>(out.data_ptr<ctype>(), out.strides(), \
-                                 a_expanded, a_expanded.strides(), \
-                                 b_expanded, b_expanded.strides(), \
-                                 0, 0, 0, 0, out_shape, op); \
-        break; \
-    }
-
-    switch (out_dtype) {
-        TENSORPLAY_FORALL_SCALAR_TYPES(OP_CASE)
-        default: throw std::runtime_error("binary_op: unsupported dtype");
-    }
-    #undef OP_CASE
-    
-    return out;
-}
-
-// Explicit arithmetic methods
-Tensor Tensor::add(const Tensor& other, Scalar alpha) const {
-    if (alpha.to<double>() == 1.0) {
-        return *this + other;
-    }
-    return *this + (other * alpha);
-}
-
-Tensor Tensor::sub(const Tensor& other, Scalar alpha) const {
-    if (alpha.to<double>() == 1.0) {
-        return *this - other;
-    }
-    return *this - (other * alpha);
-}
-
-Tensor Tensor::mul(const Tensor& other) const {
-    return *this * other;
-}
-
-Tensor Tensor::div(const Tensor& other) const {
-    return *this / other;
-}
-
-// Type conversion
 Tensor Tensor::to(DType dtype, bool non_blocking, bool copy) const {
     return to(device(), dtype, non_blocking, copy);
 }
@@ -651,7 +429,7 @@ Tensor Tensor::to(Device dst_device, DType dst_dtype, bool non_blocking, bool co
     }
 
     if (dst_device.type() != DeviceType::CPU || this->device().type() != DeviceType::CPU) {
-        throw std::runtime_error("to(): GPU support not implemented yet");
+        TP_THROW(NotImplementedError, "to(): GPU support not implemented yet");
     }
 
     Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(this->shape()), dst_dtype, dst_device);
@@ -667,9 +445,23 @@ Tensor Tensor::to(Device dst_device, DType dst_dtype, bool non_blocking, bool co
     // Helper macro for destination dispatch
     #define DISPATCH_DST(T_SRC) \
         switch(dst_dtype) { \
-            TENSORPLAY_FORALL_SCALAR_TYPES(DST_CASE_##T_SRC) \
-            default: throw std::runtime_error("to(): unsupported destination dtype"); \
+            TENSORPLAY_FORALL_SCALAR_TYPES_WITH_COMPLEX(DST_CASE_##T_SRC) \
+            default: TP_THROW(TypeError, "to(): unsupported destination dtype"); \
         }
+
+    // Helper for safe casting (including complex handling)
+    auto cast_and_store = [&]<typename Dst, typename Src>(Dst* dst, const Src* src, int64_t n) {
+        for(int64_t i=0; i<n; ++i) {
+            if constexpr ((std::is_same_v<Src, std::complex<float>> || std::is_same_v<Src, std::complex<double>>) &&
+                          !(std::is_same_v<Dst, std::complex<float>> || std::is_same_v<Dst, std::complex<double>>)) {
+                // Complex to Scalar: take real part
+                dst[i] = static_cast<Dst>(src[i].real());
+            } else {
+                // Scalar to Scalar, Scalar to Complex, Complex to Complex
+                dst[i] = static_cast<Dst>(src[i]);
+            }
+        }
+    };
 
     // Since we cannot nest macros easily with arguments, we use a trick or just templates.
     // Actually, let's use a templated helper lambda.
@@ -679,13 +471,14 @@ Tensor Tensor::to(Device dst_device, DType dst_dtype, bool non_blocking, bool co
         #define DST_CASE(ctype, name) \
         case DType::name: { \
             ctype* dst_ptr = out.data_ptr<ctype>(); \
-            for(int64_t i=0; i<n; ++i) dst_ptr[i] = static_cast<ctype>(src_ptr[i]); \
+            cast_and_store(dst_ptr, src_ptr, n); \
             break; \
         }
 
         switch(dst_dtype) {
-            TENSORPLAY_FORALL_SCALAR_TYPES(DST_CASE)
-            default: throw std::runtime_error("to(): unsupported destination dtype");
+            TENSORPLAY_FORALL_SCALAR_TYPES_WITH_COMPLEX(DST_CASE)
+            default: 
+                TP_THROW(TypeError, "to(): unsupported destination dtype");
         }
         #undef DST_CASE
     };
@@ -694,25 +487,22 @@ Tensor Tensor::to(Device dst_device, DType dst_dtype, bool non_blocking, bool co
     case DType::name: { dispatch_src.template operator()<ctype>(); break; }
 
     switch(this->dtype()) {
-        TENSORPLAY_FORALL_SCALAR_TYPES(SRC_CASE)
-        default: throw std::runtime_error("to(): unsupported source dtype");
+        TENSORPLAY_FORALL_SCALAR_TYPES_WITH_COMPLEX(SRC_CASE)
+        default: 
+            TP_THROW(TypeError, "to(): unsupported source dtype");
     }
     #undef SRC_CASE
 
     return out;
 }
 
-Tensor Tensor::operator+(const Tensor& other) const { return binary_op(*this, other, std::plus<>()); }
-Tensor Tensor::operator-(const Tensor& other) const { return binary_op(*this, other, std::minus<>()); }
-Tensor Tensor::operator*(const Tensor& other) const { return binary_op(*this, other, std::multiplies<>()); }
-Tensor Tensor::operator/(const Tensor& other) const { 
-    return binary_op(*this, other, [](auto a, auto b) {
-        if constexpr (std::is_same_v<decltype(a), bool>) {
-            return static_cast<float>(a) / static_cast<float>(b);
-        } else {
-            return a / b;
-        }
-    }); 
+// mm is generated
+
+Tensor Tensor::matmul(const Tensor& other) const {
+    if (this->dim() == 2 && other.dim() == 2) {
+        return mm(other);
+    }
+    TP_THROW(RuntimeError, "matmul: Only 2D matrices supported for now (use mm)");
 }
 
 Tensor Tensor::operator+(Scalar other) const { 
@@ -733,40 +523,32 @@ Tensor Tensor::operator/(Scalar other) const {
     return *this / t; 
 }
 
-Tensor& Tensor::operator+=(const Tensor& other) { *this = *this + other; return *this; }
-Tensor& Tensor::operator-=(const Tensor& other) { *this = *this - other; return *this; }
-Tensor& Tensor::operator*=(const Tensor& other) { *this = *this * other; return *this; }
-Tensor& Tensor::operator/=(const Tensor& other) { *this = *this / other; return *this; }
+Tensor& Tensor::operator+=(const Tensor& other) { return add_(other); }
+Tensor& Tensor::operator-=(const Tensor& other) { return sub_(other); }
+Tensor& Tensor::operator*=(const Tensor& other) { return mul_(other); }
+Tensor& Tensor::operator/=(const Tensor& other) { return div_(other); }
 
-Tensor& Tensor::operator+=(Scalar other) { *this = *this + other; return *this; }
-Tensor& Tensor::operator-=(Scalar other) { *this = *this - other; return *this; }
-Tensor& Tensor::operator*=(Scalar other) { *this = *this * other; return *this; }
-Tensor& Tensor::operator/=(Scalar other) { *this = *this / other; return *this; }
+Tensor& Tensor::operator+=(Scalar other) { 
+    Tensor t = Tensor({1}, other, device()).view({});
+    return add_(t); 
+}
+Tensor& Tensor::operator-=(Scalar other) { 
+    Tensor t = Tensor({1}, other, device()).view({});
+    return sub_(t); 
+}
+Tensor& Tensor::operator*=(Scalar other) { 
+    Tensor t = Tensor({1}, other, device()).view({});
+    return mul_(t); 
+}
+Tensor& Tensor::operator/=(Scalar other) { 
+    Tensor t = Tensor({1}, other, device()).view({});
+    return div_(t); 
+}
 
 Tensor operator-(const Tensor& t) {
     return t * Scalar(-1);
 }
 
-Tensor Tensor::rand(const std::vector<int64_t>& size, DType dtype, Device device) {
-    Tensor t = empty(size, dtype, device);
-    if (device.is_cpu()) {
-        if (dtype == DType::Float32) {
-             float* ptr = t.data_ptr<float>();
-             int64_t n = t.numel();
-             // Simple random generation
-             for(int64_t i=0; i<n; ++i) ptr[i] = static_cast<float>(std::rand()) / RAND_MAX;
-        } else if (dtype == DType::Float64) {
-             double* ptr = t.data_ptr<double>();
-             int64_t n = t.numel();
-             for(int64_t i=0; i<n; ++i) ptr[i] = static_cast<double>(std::rand()) / RAND_MAX;
-        } else {
-             throw std::runtime_error("rand() only implemented for float32/float64 on CPU");
-        }
-    } else {
-         throw std::runtime_error("rand() only supports CPU");
-    }
-    return t;
-}
 
 std::ostream& operator<<(std::ostream& os, const Tensor& t) {
     os << t.toString();

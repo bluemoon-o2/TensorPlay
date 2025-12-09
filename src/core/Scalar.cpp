@@ -1,6 +1,8 @@
 #include "tensorplay/core/Scalar.h"
 #include "tensorplay/core/TypePromotion.h"
+#include "tensorplay/core/Exception.h"
 #include <cmath>
+#include <sstream>
 
 namespace tensorplay {
 
@@ -36,7 +38,7 @@ Scalar Scalar::operator OP(const Scalar& other) const { \
         /* For now, let's cast to int64 if operation is arithmetic */ \
         return Scalar(static_cast<int64_t>(v1) OP static_cast<int64_t>(v2)); \
     } \
-    throw std::runtime_error("Unsupported scalar types for " #NAME); \
+    TP_THROW(TypeError, "Unsupported scalar types for " #NAME); \
 }
 
 SCALAR_BINARY_OP(+, add)

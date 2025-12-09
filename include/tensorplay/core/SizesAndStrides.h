@@ -2,11 +2,12 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include "tensorplay/core/Macros.h"
 
 namespace tensorplay {
 
 // Class to manage tensor sizes and strides
-class SizesAndStrides {
+class TENSORPLAY_API SizesAndStrides {
 private:
     std::vector<int64_t> sizes_;
     std::vector<int64_t> strides_;

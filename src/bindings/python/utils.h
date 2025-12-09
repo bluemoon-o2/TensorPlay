@@ -1,16 +1,17 @@
 #pragma once
 #include <Python.h>
 #include "tensorplay/core/Tensor.h"
+#include "tensorplay/core/Exception.h"
+#include <nanobind/nanobind.h>
 
 namespace tensorplay {
 namespace python {
 
 // Recursively parse Python list shape, verify regularity 
 // (e.g., [[1,2],[3]] is irregular, throw error)
-void parse_shape(PyObject* list, std::vector<int64_t>& shape) {
+inline void parse_shape(PyObject* list, std::vector<int64_t>& shape) {
     if (!PyList_Check(list)) {
-        PyErr_SetString(PyExc_TypeError, "Input must be a list");
-        throw std::runtime_error("Non-list type");
+        TP_THROW(TypeError, "Input must be a list");
     }
     int64_t len = PyList_Size(list);
     shape.push_back(len);
@@ -25,14 +26,12 @@ void parse_shape(PyObject* list, std::vector<int64_t>& shape) {
         for (int64_t i = 1; i < len; ++i) {
             PyObject* sublist = PyList_GetItem(list, i);
             if (!PyList_Check(sublist)) {
-                PyErr_SetString(PyExc_ValueError, "Irregular list (mixed types)");
-                throw std::runtime_error("Irregular list");
+                TP_THROW(ValueError, "Irregular list (mixed types)");
             }
             std::vector<int64_t> cur_sub_shape;
             parse_shape(sublist, cur_sub_shape);
             if (cur_sub_shape != sub_shape) {
-                PyErr_SetString(PyExc_ValueError, "Irregular list (sublists have different lengths)");
-                throw std::runtime_error("Irregular list");
+                TP_THROW(ValueError, "Irregular list (sublists have different lengths)");
             }
         }
         // Merge sub-shape (e.g., [2] + [3] -> [2,3])
@@ -42,20 +41,15 @@ void parse_shape(PyObject* list, std::vector<int64_t>& shape) {
 
 // Infer data type of list elements 
 // (uniform to highest precision, e.g., int and float mixed -> float64)
-DType infer_dtype(PyObject* list) {
+inline DType infer_dtype(PyObject* list) {
     if (!PyList_Check(list)) {
-        PyErr_SetString(
-            PyExc_TypeError,
-            ("Can not transform " + std::string(Py_TYPE(list)->tp_name) + " to tensor").c_str()
-        );
-        throw std::runtime_error("Non-list type");
+        TP_THROW(TypeError, "Can not transform " + std::string(Py_TYPE(list)->tp_name) + " to tensor");
     }
     int64_t len = PyList_Size(list);
     if (len == 0) return DType::Float32;  // Empty list default to float32
 
     DType dtype = DType::Int64;  // Default to int64
     bool has_float = false;
-    bool has_int64 = false;
     
     for (int64_t i = 0; i < len; ++i) {
         PyObject* item = PyList_GetItem(list, i);
@@ -73,10 +67,9 @@ DType infer_dtype(PyObject* list) {
             } else if (PyLong_Check(item)) {
                 // Int is fine
             } else if (PyBool_Check(item)) {
-                 // Bool is fine, compatible with Int/Float
+                 // Bool is fine
             } else {
-                PyErr_SetString(PyExc_TypeError, "Unsupported element type (only int/float/bool supported)");
-                throw std::runtime_error("Unsupported element type");
+                TP_THROW(TypeError, "Unsupported element type (only int/float/bool supported)");
             }
         }
     }
@@ -99,214 +92,80 @@ void copy_data(PyObject* list, T* data, size_t& index, const std::vector<int64_t
         PyObject* item = PyList_GetItem(list, i);
         if (PyList_Check(item)) {
              if (dim >= shape.size() - 1) {
-                 throw std::runtime_error("Unexpected nesting level in list");
+                 TP_THROW(RuntimeError, "Unexpected nesting level in list");
              }
              copy_data(item, data, index, shape, dim + 1);
         } else {
              // Basic types
-             if (PyFloat_Check(item)) {
-                 data[index++] = static_cast<T>(PyFloat_AsDouble(item));
-             } else if (PyLong_Check(item)) {
-                 data[index++] = static_cast<T>(PyLong_AsLongLong(item));
-             } else if (PyBool_Check(item)) {
-                 data[index++] = static_cast<T>(PyObject_IsTrue(item));
-             } else {
-                 throw std::runtime_error("Unsupported element type during copy");
+             if (dim != shape.size() - 1) {
+                 TP_THROW(RuntimeError, "Unexpected non-list element (ragged nested list?)");
              }
+             
+             T val;
+             if (PyFloat_Check(item)) {
+                 val = static_cast<T>(PyFloat_AsDouble(item));
+             } else if (PyBool_Check(item)) {
+                 val = static_cast<T>(item == Py_True);
+             } else if (PyLong_Check(item)) {
+                 val = static_cast<T>(PyLong_AsLongLong(item));
+             } else {
+                 TP_THROW(TypeError, "Unsupported element type");
+             }
+             
+             data[index++] = val;
         }
     }
 }
 
-// Python list -> C++ Tensor
-Tensor list_to_tensor(PyObject* py_list) {
-    // 1. Parse shape
+// Helper dispatch macro for local use
+#define TP_DISPATCH_CASE(enum_type, type, ...) \
+  case enum_type: { \
+    using scalar_t = type; \
+    __VA_ARGS__(); \
+    break; \
+  }
+
+#define TP_DISPATCH_ALL_TYPES(dtype, NAME, ...) \
+  switch (dtype) { \
+    TP_DISPATCH_CASE(DType::UInt8, uint8_t, __VA_ARGS__) \
+    TP_DISPATCH_CASE(DType::Int8, int8_t, __VA_ARGS__) \
+    TP_DISPATCH_CASE(DType::Int16, int16_t, __VA_ARGS__) \
+    TP_DISPATCH_CASE(DType::Int32, int32_t, __VA_ARGS__) \
+    TP_DISPATCH_CASE(DType::Int64, int64_t, __VA_ARGS__) \
+    TP_DISPATCH_CASE(DType::UInt16, uint16_t, __VA_ARGS__) \
+    TP_DISPATCH_CASE(DType::UInt32, uint32_t, __VA_ARGS__) \
+    TP_DISPATCH_CASE(DType::UInt64, uint64_t, __VA_ARGS__) \
+    TP_DISPATCH_CASE(DType::Float32, float, __VA_ARGS__) \
+    TP_DISPATCH_CASE(DType::Float64, double, __VA_ARGS__) \
+    TP_DISPATCH_CASE(DType::Bool, bool, __VA_ARGS__) \
+    default: \
+      TP_THROW(NotImplementedError, std::string(NAME) + " not implemented for this dtype"); \
+  }
+
+inline Tensor list_to_tensor(PyObject* list) {
     std::vector<int64_t> shape;
-    parse_shape(py_list, shape);
-
-    // 2. Infer data type
-    DType dtype = infer_dtype(py_list);
-
-    // 3. Create Tensor (pre-allocate memory)
-    Tensor tensor(shape, dtype);
-
-    // 4. Copy data based on dtype
-    // Use reinterpret_cast to avoid template type checking issues
-    size_t index = 0;
-    switch (dtype) {
-        case DType::Float32:
-            copy_data<float>(py_list, reinterpret_cast<float*>(tensor.data_ptr()), index, shape, 0);
-            break;
-        case DType::Float64:
-            copy_data<double>(py_list, reinterpret_cast<double*>(tensor.data_ptr()), index, shape, 0);
-            break;
-        case DType::Int32:
-            copy_data<int32_t>(py_list, reinterpret_cast<int32_t*>(tensor.data_ptr()), index, shape, 0);
-            break;
-        case DType::Int64:
-            copy_data<int64_t>(py_list, reinterpret_cast<int64_t*>(tensor.data_ptr()), index, shape, 0);
-            break;
-        case DType::UInt32:
-            copy_data<uint32_t>(py_list, reinterpret_cast<uint32_t*>(tensor.data_ptr()), index, shape, 0);
-            break;
-        case DType::UInt64:
-            copy_data<uint64_t>(py_list, reinterpret_cast<uint64_t*>(tensor.data_ptr()), index, shape, 0);
-            break;
-        case DType::Bool:
-            copy_data<bool>(py_list, reinterpret_cast<bool*>(tensor.data_ptr()), index, shape, 0);
-            break;
-    }
-
-    return tensor;
-}
-
-// Convert tensor data from one dtype to another
-void convert_tensor_data(const Tensor& src, Tensor& dst) {
-    // Get total number of elements in the tensor
-    size_t total_elements = src.numel();
+    parse_shape(list, shape);
     
-    // Handle different type conversions
-    if (src.dtype() == DType::Float32 && dst.dtype() == DType::Float64) {
-        const float* src_data = src.data_ptr<float>();
-        double* dst_data = dst.data_ptr<double>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<double>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Float64 && dst.dtype() == DType::Float32) {
-        const double* src_data = src.data_ptr<double>();
-        float* dst_data = dst.data_ptr<float>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<float>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Int32 && dst.dtype() == DType::Int64) {
-        const int32_t* src_data = src.data_ptr<int32_t>();
-        int64_t* dst_data = dst.data_ptr<int64_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int64_t>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Int64 && dst.dtype() == DType::Int32) {
-        const int64_t* src_data = src.data_ptr<int64_t>();
-        int32_t* dst_data = dst.data_ptr<int32_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int32_t>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Float32 && dst.dtype() == DType::Int32) {
-        const float* src_data = src.data_ptr<float>();
-        int32_t* dst_data = dst.data_ptr<int32_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int32_t>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Float32 && dst.dtype() == DType::Int64) {
-        const float* src_data = src.data_ptr<float>();
-        int64_t* dst_data = dst.data_ptr<int64_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int64_t>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Float64 && dst.dtype() == DType::Int32) {
-        const double* src_data = src.data_ptr<double>();
-        int32_t* dst_data = dst.data_ptr<int32_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int32_t>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Float64 && dst.dtype() == DType::Int64) {
-        const double* src_data = src.data_ptr<double>();
-        int64_t* dst_data = dst.data_ptr<int64_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int64_t>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Int32 && dst.dtype() == DType::Float32) {
-        const int32_t* src_data = src.data_ptr<int32_t>();
-        float* dst_data = dst.data_ptr<float>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<float>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Int32 && dst.dtype() == DType::Float64) {
-        const int32_t* src_data = src.data_ptr<int32_t>();
-        double* dst_data = dst.data_ptr<double>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<double>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Int64 && dst.dtype() == DType::Float32) {
-        const int64_t* src_data = src.data_ptr<int64_t>();
-        float* dst_data = dst.data_ptr<float>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<float>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Int64 && dst.dtype() == DType::Float64) {
-        const int64_t* src_data = src.data_ptr<int64_t>();
-        double* dst_data = dst.data_ptr<double>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<double>(src_data[i]);
-        }
-    } else if (src.dtype() == dst.dtype()) {
-        // Same dtype, just copy
-        memcpy(dst.data_ptr(), src.data_ptr(), total_elements * src.itemsize());
-    } else if (src.dtype() == DType::UInt32 && dst.dtype() == DType::Float32) {
-        const uint32_t* src_data = src.data_ptr<uint32_t>();
-        float* dst_data = dst.data_ptr<float>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<float>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::UInt32 && dst.dtype() == DType::Float64) {
-        const uint32_t* src_data = src.data_ptr<uint32_t>();
-        double* dst_data = dst.data_ptr<double>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<double>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::UInt32 && dst.dtype() == DType::Int32) {
-        const uint32_t* src_data = src.data_ptr<uint32_t>();
-        int32_t* dst_data = dst.data_ptr<int32_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int32_t>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::UInt32 && dst.dtype() == DType::Int64) {
-        const uint32_t* src_data = src.data_ptr<uint32_t>();
-        int64_t* dst_data = dst.data_ptr<int64_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int64_t>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::UInt64 && dst.dtype() == DType::Float32) {
-        const uint64_t* src_data = src.data_ptr<uint64_t>();
-        float* dst_data = dst.data_ptr<float>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<float>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::UInt64 && dst.dtype() == DType::Float64) {
-        const uint64_t* src_data = src.data_ptr<uint64_t>();
-        double* dst_data = dst.data_ptr<double>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<double>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::UInt64 && dst.dtype() == DType::Int32) {
-        const uint64_t* src_data = src.data_ptr<uint64_t>();
-        int32_t* dst_data = dst.data_ptr<int32_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int32_t>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::UInt64 && dst.dtype() == DType::Int64) {
-        const uint64_t* src_data = src.data_ptr<uint64_t>();
-        int64_t* dst_data = dst.data_ptr<int64_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int64_t>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Bool && dst.dtype() == DType::Float32) {
-        const bool* src_data = src.data_ptr<bool>();
-        float* dst_data = dst.data_ptr<float>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<float>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Bool && dst.dtype() == DType::Float64) {
-        const bool* src_data = src.data_ptr<bool>();
-        double* dst_data = dst.data_ptr<double>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<double>(src_data[i]);
-        }
-    } else if (src.dtype() == DType::Bool && dst.dtype() == DType::Int32) {
-        const bool* src_data = src.data_ptr<bool>();
-        int32_t* dst_data = dst.data_ptr<int32_t>();
-        for (size_t i = 0; i < total_elements; ++i) {
-            dst_data[i] = static_cast<int32_t>(src_data[i]);
-        }
-    }
+    DType dtype = infer_dtype(list);
+    
+    // Create CPU tensor
+    Tensor t(shape, dtype, Device(DeviceType::CPU));
+    
+    // Dispatch copy_data based on dtype
+    size_t index = 0;
+    
+    TP_DISPATCH_ALL_TYPES(dtype, "list_to_tensor", [&] {
+        using T = scalar_t;
+        T* data_ptr = t.data_ptr<T>();
+        copy_data(list, data_ptr, index, shape, 0);
+    });
+    
+    return t;
 }
 
-}} // namespace tensorplay::python
+inline void convert_tensor_data(const Tensor& src, Tensor& dst) {
+    dst.copy_(src);
+}
+
+} // namespace python
+} // namespace tensorplay

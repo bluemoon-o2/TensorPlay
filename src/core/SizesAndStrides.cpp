@@ -1,5 +1,5 @@
 #include "tensorplay/core/SizesAndStrides.h"
-#include <stdexcept>
+#include "tensorplay/core/Exception.h"
 #include <sstream>
 
 namespace tensorplay {
@@ -11,7 +11,7 @@ SizesAndStrides::SizesAndStrides(const std::vector<int64_t>& sizes, const std::v
     : sizes_(sizes), strides_(strides) {
     
     if (sizes.size() != strides.size()) {
-        throw std::invalid_argument("Sizes and strides must have the same length");
+        TP_THROW(ValueError, "Sizes and strides must have the same length");
     }
 }
 
@@ -22,7 +22,7 @@ void SizesAndStrides::resize(const std::vector<int64_t>& new_sizes) {
 
 void SizesAndStrides::set_sizes_and_strides(const std::vector<int64_t>& new_sizes, const std::vector<int64_t>& new_strides) {
     if (new_sizes.size() != new_strides.size()) {
-        throw std::invalid_argument("Sizes and strides must have the same length");
+        TP_THROW(ValueError, "Sizes and strides must have the same length");
     }
     
     sizes_ = new_sizes;
@@ -31,7 +31,7 @@ void SizesAndStrides::set_sizes_and_strides(const std::vector<int64_t>& new_size
 
 void SizesAndStrides::set_size(size_t dim, int64_t new_size) {
     if (dim >= sizes_.size()) {
-        throw std::out_of_range("Dimension out of range");
+        TP_THROW(IndexError, "Dimension out of range");
     }
     
     sizes_[dim] = new_size;
@@ -40,7 +40,7 @@ void SizesAndStrides::set_size(size_t dim, int64_t new_size) {
 
 void SizesAndStrides::set_stride(size_t dim, int64_t new_stride) {
     if (dim >= strides_.size()) {
-        throw std::out_of_range("Dimension out of range");
+        TP_THROW(IndexError, "Dimension out of range");
     }
     
     strides_[dim] = new_stride;

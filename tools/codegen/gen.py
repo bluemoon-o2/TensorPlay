@@ -2,104 +2,84 @@ import yaml
 import os
 import re
 import argparse
+import copy
+
+import codegen_utils
 
 # Type mapping from YAML schema to C++ signature
 TYPE_MAP = {
     'int64_t[]': 'const std::vector<int64_t>&',
+    'Tensor[]': 'const std::vector<Tensor>&',
     'DType': 'DType',
     'Device': 'Device',
     'double': 'double',
     'bool': 'bool',
     'Scalar': 'Scalar',
+    'Scalar?': 'std::optional<Scalar>',
     'Tensor': 'const Tensor&',
     'Tensor(a!)': 'Tensor&',
+    'Scalar?': 'std::optional<Scalar>',
+    'int64_t?': 'std::optional<int64_t>',
 }
 
 # Type mapping for DispatchStub template arguments
-# Usually we pass by value or const ref.
+# Usually we pass by value to python adapter often easier, or stick to const ref
 STUB_TYPE_MAP = {
     'int64_t[]': 'const std::vector<int64_t>&',
+    'Tensor[]': 'const std::vector<Tensor>&',
     'DType': 'DType',
     'Device': 'Device',
     'double': 'double',
     'bool': 'bool',
     'Scalar': 'Scalar',
+    'Scalar?': 'std::optional<Scalar>',
     'Tensor': 'const Tensor&',
     'Tensor(a!)': 'Tensor&',
+    'Scalar?': 'std::optional<Scalar>',
+    'int64_t?': 'std::optional<int64_t>',
 }
 
-def parse_args(arg_str):
-    # Split by comma, handling nested parens if necessary (not needed for this simple schema)
-    args = []
-    if not arg_str:
-        return args
-    
-    # Simple split by comma
-    parts = [p.strip() for p in arg_str.split(',')]
-    for p in parts:
-        # Parse "Type name=Default"
-        default = None
-        if '=' in p:
-            p, default = p.split('=', 1)
-            p = p.strip()
-            default = default.strip()
-            # Handle enum defaults
-            if default == 'Float32': default = 'DType::Float32'
-            if default == 'CPU': default = 'Device(DeviceType::CPU)'
-            if default == 'Int64': default = 'DType::Int64'
-        
-        # Parse "Type name"
-        # Handle "Tensor(a!) self"
-        if ' ' not in p:
-            raise ValueError(f"Invalid arg: {p}")
-        
-        type_str, name = p.rsplit(' ', 1)
-        type_str = type_str.strip()
-        name = name.strip()
-        
-        cpp_type = TYPE_MAP.get(type_str, type_str)
-        stub_type = STUB_TYPE_MAP.get(type_str, type_str)
-        
-        # Handle Scalar defaults (explicit construction)
-        if default and type_str == 'Scalar' and re.match(r'^-?\d+(\.\d+)?$', default):
-            default = f'Scalar({default})'
-        
-        args.append({
-            'name': name,
-            'type': type_str,
-            'cpp_type': cpp_type,
-            'stub_type': stub_type,
-            'default': default
-        })
-    return args
+def default_handler(type_str, default):
+    if default == 'Float32': return 'DType::Float32'
+    if default == 'CPU': return 'Device(DeviceType::CPU)'
+    if default == 'Int64': return 'DType::Int64'
+    if default == 'Undefined': return 'DType::Undefined'
+    if default == 'None': return 'std::nullopt'
+    if type_str == 'Scalar' and re.match(r'^-?\d+(\.\d+)?$', default):
+        return f'Scalar({default})'
+    return default
 
 def parse_func(func_str):
-    # "name(args) -> Return"
-    match = re.match(r'(\w+)\((.*)\)\s*->\s*(.*)', func_str)
-    if not match:
-        raise ValueError(f"Invalid func: {func_str}")
+    # Use shared util
+    # Adjust return type map for Tensor(a!) -> Tensor& manually or via map
+    # The utils_parse_func uses the map for return type too.
+    # TYPE_MAP has 'Tensor(a!)': 'Tensor&'
     
-    name = match.group(1)
-    args_str = match.group(2)
-    return_type_str = match.group(3).strip()
+    # We need to map 'Tensor' return type to 'Tensor' (value), not 'const Tensor&'
+    # But TYPE_MAP maps 'Tensor' to 'const Tensor&' for arguments.
+    # So we should pass a specific map for return types or handle it.
     
-    # Handle Return type
-    # Tensor(a!) -> Tensor&
-    if return_type_str == 'Tensor(a!)':
-        return_type = 'Tensor&'
-    elif return_type_str == 'Tensor':
-        return_type = 'Tensor'
-    else:
-        return_type = return_type_str
+    # Let's just use TYPE_MAP and fix return type if needed.
+    # Actually, utils_parse_func uses type_map for return type.
+    # 'Tensor' in return type should be 'Tensor', not 'const Tensor&'.
+    
+    # Let's use a copy of TYPE_MAP for args
+    arg_type_map = TYPE_MAP.copy()
+    
+    f = codegen_utils.parse_func(func_str, arg_type_map, default_handler)
+    
+    if f['schema_return_type'] == 'Tensor':
+        f['return_type'] = 'Tensor'
+    if f['schema_return_type'] == 'Tensor(a!)':
+        f['return_type'] = 'Tensor&'
+    elif f['schema_return_type'] == 'Tensor[]':
+        f['return_type'] = 'std::vector<Tensor>'
         
-    args = parse_args(args_str)
-    
-    return {
-        'name': name,
-        'args': args,
-        'return_type': return_type,
-        'schema_return_type': return_type_str
-    }
+    # Add stub_type
+    for arg in f['args']:
+        arg['stub_type'] = STUB_TYPE_MAP.get(arg['type'], arg['type'])
+        
+    return f
 
 def generate_header(funcs):
     lines = []
@@ -119,6 +99,12 @@ def generate_header(funcs):
     for f in funcs:
         sig = f['return_type'] + " " + f['name'] + "("
         arg_strs = []
+        is_const_method = False
+        if f['variants'] == 'method':
+             self_arg = next((arg for arg in f['args'] if arg['name'] == 'self'), None)
+             if self_arg and '!' not in self_arg['type']:
+                 is_const_method = True
+
         for arg in f['args']:
             # Skip 'self' argument for methods
             if f['variants'] == 'method' and arg['name'] == 'self':
@@ -129,6 +115,9 @@ def generate_header(funcs):
                 s += f" = {arg['default']}"
             arg_strs.append(s)
         sig += ", ".join(arg_strs) + ")"
+        
+        if is_const_method:
+            sig += " const"
         
         if f['variants'] == 'function':
             lines.append(f"    static {sig};")
@@ -143,6 +132,7 @@ def generate_cpp(funcs):
     lines.append("// Generated by tools/codegen/gen.py")
     lines.append("#include \"tensorplay/core/Tensor.h\"")
     lines.append("#include \"tensorplay/core/Dispatcher.h\"")
+    lines.append("#include \"tensorplay/core/Exception.h\"")
     lines.append("")
     lines.append("namespace tensorplay {")
     lines.append("")
@@ -151,6 +141,12 @@ def generate_cpp(funcs):
         # Implementation signature (no defaults)
         sig = f['return_type'] + " Tensor::" + f['name'] + "("
         arg_strs = []
+        is_const_method = False
+        if f['variants'] == 'method':
+             self_arg = next((arg for arg in f['args'] if arg['name'] == 'self'), None)
+             if self_arg and '!' not in self_arg['type']:
+                 is_const_method = True
+
         for arg in f['args']:
             # Skip 'self' argument for methods
             if f['variants'] == 'method' and arg['name'] == 'self':
@@ -160,14 +156,17 @@ def generate_cpp(funcs):
             arg_strs.append(s)
         sig += ", ".join(arg_strs) + ")"
         
+        if is_const_method:
+            sig += " const"
+        
         lines.append(sig + " {")
         
         # Body
         # 1. Validation (if any)
         if f['name'] == 'copy_':
-             lines.append('    if (!impl_ || !src.impl_) throw std::runtime_error("Tensor not defined");')
+             lines.append('    if (!impl_ || !src.impl_) TP_THROW(RuntimeError, "Tensor not defined");')
              lines.append('    if (this->shape() != src.shape()) {')
-             lines.append('        throw std::runtime_error("copy_(): shapes mismatch (broadcasting not yet supported)");')
+             lines.append('        TP_THROW(RuntimeError, "copy_(): shapes mismatch (broadcasting not yet supported)");')
              lines.append('    }')
         
         # 2. Compute Dispatch Key
@@ -191,7 +190,8 @@ def generate_cpp(funcs):
         # DispatchStub<Return, Args...>::call(op_name, key, args...)
         
         template_args = [f['return_type']]
-        call_args = [f'"{f["name"]}"', "key"]
+        # Use full func_name (e.g. "add.Tensor") for dispatch to support overloads
+        call_args = [f'"{f["func_name"]}"', "key"]
         
         for arg in f['args']:
             template_args.append(arg['stub_type'])
@@ -225,9 +225,14 @@ def main():
         
     funcs = []
     for item in data:
-        f = parse_func(item['func'])
-        f['variants'] = item.get('variants', 'function')
-        funcs.append(f)
+        base_f = parse_func(item['func'])
+        variants_str = item.get('variants', 'function')
+        variants = [v.strip() for v in variants_str.split(',')]
+        
+        for v in variants:
+            f = copy.deepcopy(base_f)
+            f['variants'] = v
+            funcs.append(f)
         
     if not os.path.exists(args.out_dir):
         os.makedirs(args.out_dir)

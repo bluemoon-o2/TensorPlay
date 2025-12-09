@@ -1,4 +1,5 @@
 #include "tensorplay/core/Allocator.h"
+#include "tensorplay/core/Exception.h"
 #include <memory>
 #include <mutex>
 #include <cstdlib>
@@ -54,8 +55,10 @@ Allocator* getAllocator(DeviceType t) {
     if (t == DeviceType::CPU) {
         return getCPUAllocator();
     }
-    // TODO: Register other allocators
-    return nullptr;
+    // Future expansion: CUDA allocator
+    // if (t == DeviceType::CUDA) return getCUDAAllocator();
+    
+    TP_THROW(NotImplementedError, "Allocator not implemented for this device type");
 }
 
 } // namespace tensorplay

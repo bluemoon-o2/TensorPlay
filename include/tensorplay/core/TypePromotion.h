@@ -19,7 +19,14 @@ inline DType promoteTypes(DType type1, DType type2) {
     // Priority: Complex > Float > Int > Bool
     // Within category: larger size wins
     
-    // TODO: Handle complex types if needed
+    bool is_complex1 = (type1 == DType::ComplexFloat || type1 == DType::ComplexDouble);
+    bool is_complex2 = (type2 == DType::ComplexFloat || type2 == DType::ComplexDouble);
+
+    if (is_complex1 && is_complex2) {
+        return (elementSize(type1) >= elementSize(type2)) ? type1 : type2;
+    }
+    if (is_complex1) return type1;
+    if (is_complex2) return type2;
     
     bool is_float1 = isFloatingType(type1);
     bool is_float2 = isFloatingType(type2);

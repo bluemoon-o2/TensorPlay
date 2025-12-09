@@ -3,9 +3,9 @@
 #include <unordered_map>
 #include <string>
 #include <mutex>
-#include <stdexcept>
 #include "DispatchKey.h"
 #include "tensorplay/core/Device.h"
+#include "tensorplay/core/Exception.h"
 
 namespace tensorplay {
 
@@ -46,8 +46,9 @@ public:
     static Return call(const std::string& op_name, DispatchKey key, Args... args) {
         auto kernel_void = Dispatcher::singleton().getKernel(op_name, key);
         if (!kernel_void) {
-            throw std::runtime_error("Kernel not found for op: " + op_name + " on backend: " + toString(key));
+            TP_THROW(NotImplementedError, "Kernel not found for op: " + op_name + " on backend: " + toString(key));
         }
+        
         using FuncType = Return(*)(Args...);
         auto kernel = reinterpret_cast<FuncType>(kernel_void);
         return kernel(std::forward<Args>(args)...);
@@ -61,5 +62,16 @@ public:
             ::tensorplay::Dispatcher::singleton().registerKernel(#OP_NAME, ::tensorplay::DispatchKey::KEY, (::tensorplay::KernelFunction)FUNC); \
         } \
     } register_##OP_NAME##KEY;
+
+// Macro for registration with explicit string name (handling dots etc.)
+#define TP_CONCAT_IMPL(x, y) x##y
+#define TP_CONCAT(x, y) TP_CONCAT_IMPL(x, y)
+
+#define TENSORPLAY_REGISTER_KERNEL_STR(OP_STR, KEY, FUNC) \
+    static struct TP_CONCAT(RegisterKernel##KEY, __LINE__) { \
+        TP_CONCAT(RegisterKernel##KEY, __LINE__)() { \
+            ::tensorplay::Dispatcher::singleton().registerKernel(OP_STR, ::tensorplay::DispatchKey::KEY, (::tensorplay::KernelFunction)FUNC); \
+        } \
+    } TP_CONCAT(register_kernel_##KEY, __LINE__);
 
 } // namespace tensorplay

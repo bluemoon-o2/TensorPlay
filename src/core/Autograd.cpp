@@ -3,7 +3,7 @@
 
 namespace tensorplay {
 
-AutogradMeta::AutogradMeta(bool requires_grad) : requires_grad_(requires_grad) {}
+AutogradMeta::AutogradMeta(bool requires_grad) : requires_grad_(requires_grad), retain_grad_(false) {}
 
 bool AutogradMeta::requires_grad() const {
     return requires_grad_;
@@ -11,6 +11,14 @@ bool AutogradMeta::requires_grad() const {
 
 void AutogradMeta::set_requires_grad(bool requires_grad) {
     requires_grad_ = requires_grad;
+}
+
+bool AutogradMeta::retain_grad() const {
+    return retain_grad_;
+}
+
+void AutogradMeta::set_retain_grad(bool retain_grad) {
+    retain_grad_ = retain_grad;
 }
 
 Tensor AutogradMeta::grad() const {
@@ -21,16 +29,19 @@ Tensor AutogradMeta::grad() const {
 }
 
 void AutogradMeta::set_grad(const Tensor& grad) {
-    grad_ = std::make_shared<Tensor>(grad);
+    if (grad.defined()) {
+        grad_ = std::make_shared<Tensor>(grad);
+    } else {
+        grad_ = nullptr;
+    }
 }
 
 void AutogradMeta::accum_grad(const Tensor& grad) {
     if (!grad_) {
         grad_ = std::make_shared<Tensor>(grad);
     } else {
-        // TODO: Implement actual accumulation (addition)
-        // For now, replace
-        *grad_ = grad;
+        // Accumulate gradient
+        *grad_ += grad;
     }
 }
 

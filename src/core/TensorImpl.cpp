@@ -68,4 +68,25 @@ void TensorImpl::set_requires_grad(bool requires_grad) {
     }
 }
 
+Tensor TensorImpl::grad() const {
+    if (autograd_meta_) {
+        return autograd_meta_->grad();
+    }
+    return Tensor();
+}
+
+void TensorImpl::set_grad(const Tensor& grad) {
+    if (!autograd_meta_) {
+        autograd_meta_ = std::make_shared<AutogradMeta>(false);
+    }
+    autograd_meta_->set_grad(grad);
+}
+
+void TensorImpl::retain_grad() {
+    if (!autograd_meta_) {
+        autograd_meta_ = std::make_shared<AutogradMeta>(false);
+    }
+    autograd_meta_->set_retain_grad(true);
+}
+
 } // namespace tensorplay

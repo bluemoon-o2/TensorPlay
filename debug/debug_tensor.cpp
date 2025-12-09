@@ -2,6 +2,7 @@
 #include <vector>
 #include <algorithm>
 #include "tensorplay/core/Tensor.h"
+#include "tensorplay/core/Exception.h"
 
 using namespace tensorplay;
 
@@ -96,7 +97,7 @@ int main() {
         std::cout << "Scalar Add: " << sc3.toString() << std::endl;
         
         if (sc3.to<float>() != 12.0f) {
-             throw std::runtime_error("Scalar add failed");
+             TP_THROW(RuntimeError, "Scalar add failed");
         }
         
         // Test New Constructor
@@ -118,7 +119,7 @@ int main() {
         Tensor t_init = Tensor::tensor({10, 20, 30}, DType::Int32); // Infer int32
         std::cout << "Tensor from init_list {10, 20, 30}:\n" << t_init << std::endl;
         if (t_init.dtype() != DType::Int32) {
-             throw std::runtime_error("Tensor factory dtype inference failed for int");
+             TP_THROW(RuntimeError, "Tensor factory dtype inference failed for int");
         }
 
         // Test 10.6: Shape Class
@@ -126,7 +127,7 @@ int main() {
         Tensor t_shape = Tensor::zeros({2, 3});
         std::cout << "Shape of {2, 3} tensor: " << t_shape.shape() << std::endl;
         if (t_shape.shape()[0] != 2 || t_shape.shape()[1] != 3) {
-            throw std::runtime_error("Shape mismatch");
+            TP_THROW(RuntimeError, "Shape mismatch");
         }
 
         // Test 11: DataPtr with Lambda Deleter

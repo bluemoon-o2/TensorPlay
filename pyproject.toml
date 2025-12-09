@@ -1,0 +1,29 @@
+[build-system]
+requires = ["scikit-build-core", "nanobind", "PyYAML"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "tensorplay"
+version = "1.0.0rc0"
+description = "A simple deep learning framework designed for educational purposes and small-scale experiments."
+readme = "README.md"
+authors = [{ name = "zlx", email = "2095774200@shu.edu.cn" }]
+requires-python = ">=3.8"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/bluemoon-o2/tensorplay"
+
+[tool.scikit-build]
+cmake.version = ">=3.18"
+# Ensure the package is built in release mode
+cmake.build-type = "Release"
+# Install prefix handled by scikit-build-core
+# But we need to make sure our CMake install commands target the right place
+# scikit-build-core sets CMAKE_INSTALL_PREFIX to the wheel directory
+# Our CMakeLists.txt installs to "tensorplay", so it will be "wheel_dir/tensorplay"
+# which matches the python package structure if "tensorplay" is the package name.
+wheel.packages = ["tensorplay"]
+
+# Enable logging
+logging.level = "INFO"

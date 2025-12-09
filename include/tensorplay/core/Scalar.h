@@ -1,17 +1,18 @@
 #pragma once
 
 #include <variant>
-#include <stdexcept>
 #include <iostream>
 #include <string>
 #include <type_traits>
 
 #include "tensorplay/core/DType.h"
+#include "tensorplay/core/Macros.h"
+#include "tensorplay/core/Exception.h"
 
 namespace tensorplay {
 
 // Scalar class aligned with Tensor DType system
-class Scalar {
+class TENSORPLAY_API Scalar {
 public:
     Scalar() : type_(DType::Undefined) {}
 
@@ -31,29 +32,38 @@ public:
     Scalar& operator=(Scalar&&) = default;
 
     // Accessors
+    double toDouble() const {
+        if (type_ == DType::Float64) return std::get<double>(val_);
+        if (type_ == DType::Float32) return static_cast<double>(std::get<float>(val_));
+        if (type_ == DType::Int64) return static_cast<double>(std::get<int64_t>(val_));
+        if (type_ == DType::Int32) return static_cast<double>(std::get<int32_t>(val_));
+        if (type_ == DType::Bool) return static_cast<double>(std::get<bool>(val_));
+        TP_THROW(RuntimeError, "Scalar is undefined");
+    }
+
     template<typename T>
     T to() const {
         // Strict safe conversion or same-precision conversion
         if (type_ == DType::Float64) {
-            if constexpr (std::is_integral_v<T>) throw std::runtime_error("Cannot safely convert Float64 Scalar to Integral type");
+            if constexpr (std::is_integral_v<T>) TP_THROW(TypeError, "Cannot safely convert Float64 Scalar to Integral type");
             return static_cast<T>(std::get<double>(val_));
         } else if (type_ == DType::Float32) {
-            if constexpr (std::is_integral_v<T>) throw std::runtime_error("Cannot safely convert Float32 Scalar to Integral type");
+            if constexpr (std::is_integral_v<T>) TP_THROW(TypeError, "Cannot safely convert Float32 Scalar to Integral type");
             return static_cast<T>(std::get<float>(val_));
         } else if (type_ == DType::Int64) {
             int64_t v = std::get<int64_t>(val_);
             // Safe narrowing check for int32
             if constexpr (std::is_same_v<T, int32_t>) {
-                if (v > INT32_MAX || v < INT32_MIN) throw std::runtime_error("Scalar value overflow for Int32");
+                if (v > INT32_MAX || v < INT32_MIN) TP_THROW(RuntimeError, "Scalar value overflow for Int32");
             }
             return static_cast<T>(v);
         } else if (type_ == DType::Int32) {
             return static_cast<T>(std::get<int32_t>(val_));
         } else if (type_ == DType::Bool) {
-            if constexpr (!std::is_same_v<T, bool>) throw std::runtime_error("Cannot convert Bool Scalar to non-Bool type implicitly");
+            if constexpr (!std::is_same_v<T, bool>) TP_THROW(TypeError, "Cannot convert Bool Scalar to non-Bool type implicitly");
             return static_cast<T>(std::get<bool>(val_));
         }
-        throw std::runtime_error("Scalar is undefined");
+        TP_THROW(RuntimeError, "Scalar is undefined");
     }
 
     // Type checking
