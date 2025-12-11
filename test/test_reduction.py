@@ -8,6 +8,7 @@ import tensorplay as tp
 class TestReduction(unittest.TestCase):
     def test_prod(self):
         x = tp.tensor([[1.0, 2.0], [3.0, 4.0]])
+        print(f"test_prod x.dtype: {x.dtype}")
         self.assertAlmostEqual(x.prod().item(), 24.0)
         
         p0 = x.prod(dim=0)

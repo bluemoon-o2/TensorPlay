@@ -3,19 +3,32 @@
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/shared_ptr.h>
 #include <nanobind/operators.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/make_iterator.h>
 
-#include "tensorplay/core/Tensor.h"
-#include "tensorplay/core/Device.h"
-#include "tensorplay/core/DType.h"
-#include "tensorplay/core/Exception.h"
-#include "tensorplay/core/Generator.h"
+#include "TPXTensor.h"
+#include "Device.h"
+#include "DType.h"
+#include "Exception.h"
+#include "Generator.h"
+#include "Autograd.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
-using namespace tensorplay;
+
+using tensorplay::Device;
+using tensorplay::DeviceType;
+using tensorplay::DType;
+using tensorplay::Size;
+using tensorplay::Scalar;
+using tensorplay::Generator;
+using tensorplay::default_generator;
+using tensorplay::manual_seed;
+using Tensor = tensorplay::tpx::Tensor;
+
+// using namespace tensorplay; // Avoid P10 Tensor ambiguity
 
 void init_tensor(nb::module_& m);
 void init_device(nb::module_& m);

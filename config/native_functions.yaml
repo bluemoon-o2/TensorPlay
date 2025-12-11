@@ -1,0 +1,463 @@
+- func: conv2d(Tensor input, Tensor weight, Tensor bias={}, int64_t[] stride={1, 1}, int64_t[] padding={0, 0}, int64_t[] dilation={1, 1}, int64_t groups=1) -> Tensor
+  variants: function
+
+- func: add.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor
+  variants: method
+  dispatch:
+    CPU: add_cpu
+    CUDA: add_cuda
+
+- func: add.Scalar(Tensor self, Scalar other, Scalar alpha=1) -> Tensor
+  variants: method
+  dispatch:
+    CPU: add_scalar_cpu
+    CUDA: add_scalar_cuda
+
+- func: add_.Tensor(Tensor(a!) self, Tensor other, *, Scalar alpha=1) -> Tensor(a!)
+  variants: method
+  dispatch:
+    CPU: add_cpu
+    CUDA: add_cuda
+
+- func: add_.Scalar(Tensor(a!) self, Scalar other, Scalar alpha=1) -> Tensor(a!)
+  variants: method
+  dispatch:
+    CPU: add_scalar_cpu
+    CUDA: add_scalar_cuda
+
+- func: sub.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor
+  variants: method
+  dispatch:
+    CPU: sub_cpu
+    CUDA: sub_cuda
+
+- func: sub.Scalar(Tensor self, Scalar other, Scalar alpha=1) -> Tensor
+  variants: method
+  dispatch:
+    CPU: sub_scalar_cpu
+    CUDA: sub_scalar_cuda
+
+- func: sub_.Tensor(Tensor(a!) self, Tensor other, *, Scalar alpha=1) -> Tensor(a!)
+  variants: method
+  dispatch:
+    CPU: sub_cpu
+    CUDA: sub_cuda
+
+- func: sub_.Scalar(Tensor(a!) self, Scalar other, Scalar alpha=1) -> Tensor(a!)
+  variants: method
+  dispatch:
+    CPU: sub_scalar_cpu
+    CUDA: sub_scalar_cuda
+
+- func: mul.Tensor(Tensor self, Tensor other) -> Tensor
+  variants: method
+  dispatch:
+    CPU: mul_cpu
+    CUDA: mul_cuda
+
+- func: mul.Scalar(Tensor self, Scalar other) -> Tensor
+  variants: method
+  dispatch:
+    CPU: mul_scalar_cpu
+    CUDA: mul_scalar_cuda
+
+- func: mul_.Tensor(Tensor(a!) self, Tensor other) -> Tensor(a!)
+  variants: method
+  dispatch:
+    CPU: mul_cpu
+    CUDA: mul_cuda
+
+- func: mul_.Scalar(Tensor(a!) self, Scalar other) -> Tensor(a!)
+  variants: method
+  dispatch:
+    CPU: mul_scalar_cpu
+    CUDA: mul_scalar_cuda
+
+- func: div.Tensor(Tensor self, Tensor other) -> Tensor
+  variants: method
+  dispatch:
+    CPU: div_cpu
+    CUDA: div_cuda
+
+- func: div.Scalar(Tensor self, Scalar other) -> Tensor
+  variants: method
+  dispatch:
+    CPU: div_scalar_cpu
+    CUDA: div_scalar_cuda
+
+- func: div_.Tensor(Tensor(a!) self, Tensor other) -> Tensor(a!)
+  variants: method
+  dispatch:
+    CPU: div_cpu
+    CUDA: div_cuda
+
+- func: div_.Scalar(Tensor(a!) self, Scalar other) -> Tensor(a!)
+  variants: method
+  dispatch:
+    CPU: div_scalar_cpu
+    CUDA: div_scalar_cuda
+
+- func: mm(Tensor self, Tensor other) -> Tensor
+  variants: function, method
+  dispatch:
+    CPU: mm_kernel
+
+- func: matmul(Tensor self, Tensor other) -> Tensor
+  variants: function, method
+  dispatch:
+    CPU: matmul_kernel
+
+- func: eq.Tensor(Tensor self, Tensor other) -> Tensor
+  variants: function, method
+
+- func: eq.Scalar(Tensor self, Scalar other) -> Tensor
+  variants: function, method
+
+- func: ne.Tensor(Tensor self, Tensor other) -> Tensor
+  variants: function, method
+
+- func: ne.Scalar(Tensor self, Scalar other) -> Tensor
+  variants: function, method
+
+- func: lt.Tensor(Tensor self, Tensor other) -> Tensor
+  variants: function, method
+
+- func: lt.Scalar(Tensor self, Scalar other) -> Tensor
+  variants: function, method
+
+- func: le.Tensor(Tensor self, Tensor other) -> Tensor
+  variants: function, method
+
+- func: le.Scalar(Tensor self, Scalar other) -> Tensor
+  variants: function, method
+
+- func: gt.Tensor(Tensor self, Tensor other) -> Tensor
+  variants: function, method
+
+- func: gt.Scalar(Tensor self, Scalar other) -> Tensor
+  variants: function, method
+
+- func: ge.Tensor(Tensor self, Tensor other) -> Tensor
+  variants: function, method
+
+- func: ge.Scalar(Tensor self, Scalar other) -> Tensor
+  variants: function, method
+
+- func: copy_(Tensor(a!) self, Tensor src) -> Tensor(a!)
+  variants: method
+
+- func: view(Tensor self, int64_t[] shape) -> Tensor
+  variants: method
+  skip_implementation: true
+
+- func: fill_.Scalar(Tensor(a!) self, Scalar value) -> Tensor(a!)
+  variants: method
+
+- func: transpose(Tensor self, int64_t dim0, int64_t dim1) -> Tensor
+  variants: function, method
+
+- func: t(Tensor self) -> Tensor
+  variants: function, method
+
+- func: permute(Tensor self, int64_t[] dims) -> Tensor
+  variants: function, method
+
+- func: squeeze(Tensor self) -> Tensor
+  variants: function, method
+
+- func: squeeze.dim(Tensor self, int64_t dim) -> Tensor
+  variants: function, method
+
+- func: unsqueeze(Tensor self, int64_t dim) -> Tensor
+  variants: function, method
+
+- func: cat(Tensor[] tensors, int64_t dim=0) -> Tensor
+  variants: function
+
+- func: stack(Tensor[] tensors, int64_t dim=0) -> Tensor
+  variants: function
+
+- func: split(Tensor self, int64_t split_size, int64_t dim=0) -> Tensor[]
+  variants: function, method
+
+- func: split.sizes(Tensor self, int64_t[] split_sizes, int64_t dim=0) -> Tensor[]
+  variants: function, method
+
+- func: chunk(Tensor self, int64_t chunks, int64_t dim=0) -> Tensor[]
+  variants: function, method
+
+- func: reshape(Tensor self, int64_t[] shape) -> Tensor
+  variants: function, method
+
+- func: unbind(Tensor self, int64_t dim=0) -> Tensor[]
+  variants: function, method
+
+- func: rand(int64_t[] size, *, DType dtype=Float32, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: rand_like(Tensor self, *, DType dtype=Undefined, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: randint(int64_t low, int64_t high, int64_t[] size, *, DType dtype=Int64, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: randint_like(Tensor self, int64_t low, int64_t high, *, DType dtype=Undefined, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: randn(int64_t[] size, *, DType dtype=Float32, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: randn_like(Tensor self, *, DType dtype=Undefined, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: randperm(int64_t n, *, DType dtype=Int64, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: bernoulli(Tensor self) -> Tensor
+  variants: method, function
+
+
+- func: normal(Tensor mean, Tensor std) -> Tensor
+  variants: function
+
+- func: abs(Tensor self) -> Tensor
+  variants: function, method
+
+- func: acos(Tensor self) -> Tensor
+  variants: function, method
+
+- func: acosh(Tensor self) -> Tensor
+  variants: function, method
+
+- func: angle(Tensor self) -> Tensor
+  variants: function, method
+
+- func: asin(Tensor self) -> Tensor
+  variants: function, method
+
+- func: asinh(Tensor self) -> Tensor
+  variants: function, method
+
+- func: atan(Tensor self) -> Tensor
+  variants: function, method
+
+- func: poisson(Tensor self) -> Tensor
+  variants: function, method
+
+- func: atanh(Tensor self) -> Tensor
+  variants: function, method
+
+- func: ceil(Tensor self) -> Tensor
+  variants: function, method
+
+- func: clamp(Tensor self, Scalar? min=None, Scalar? max=None) -> Tensor
+  variants: function, method
+
+- func: cos(Tensor self) -> Tensor
+  variants: function, method
+
+- func: cosh(Tensor self) -> Tensor
+  variants: function, method
+
+- func: exp(Tensor self) -> Tensor
+  variants: function, method
+
+- func: floor(Tensor self) -> Tensor
+  variants: function, method
+
+- func: lerp(Tensor self, Tensor end, Scalar weight) -> Tensor
+  variants: function, method
+
+- func: lerp.Tensor(Tensor self, Tensor end, Tensor weight) -> Tensor
+  variants: function, method
+
+- func: log(Tensor self) -> Tensor
+  variants: function, method
+
+- func: neg(Tensor self) -> Tensor
+  variants: function, method
+
+- func: pow.Tensor_Scalar(Tensor self, Scalar exponent) -> Tensor
+  variants: function, method
+
+- func: pow.Tensor_Tensor(Tensor self, Tensor exponent) -> Tensor
+  variants: function, method
+
+- func: round(Tensor self) -> Tensor
+  variants: function, method
+
+- func: rsqrt(Tensor self) -> Tensor
+  variants: function, method
+
+- func: sigmoid(Tensor self) -> Tensor
+  variants: function, method
+
+- func: sign(Tensor self) -> Tensor
+  variants: function, method
+
+- func: sin(Tensor self) -> Tensor
+  variants: function, method
+
+- func: sinh(Tensor self) -> Tensor
+  variants: function, method
+
+- func: softmax(Tensor self, int64_t dim, DType dtype=Undefined) -> Tensor
+  variants: function, method
+
+- func: sqrt(Tensor self) -> Tensor
+  variants: function, method
+
+- func: square(Tensor self) -> Tensor
+  variants: function, method
+
+- func: tan(Tensor self) -> Tensor
+  variants: function, method
+
+- func: tanh(Tensor self) -> Tensor
+  variants: function, method
+
+- func: relu(Tensor self) -> Tensor
+  variants: function, method
+
+- func: gelu(Tensor self) -> Tensor
+  variants: function, method
+
+- func: silu(Tensor self) -> Tensor
+  variants: function, method
+
+- func: empty(int64_t[] size, *, DType dtype=Float32, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: full(int64_t[] size, Scalar fill_value, *, DType dtype=Undefined, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: zeros(int64_t[] size, *, DType dtype=Float32, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: ones(int64_t[] size, *, DType dtype=Float32, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: eye(int64_t n, int64_t m=-1, *, DType dtype=Float32, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: arange(Scalar start, Scalar end, Scalar step=1, *, DType dtype=Undefined, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: arange.end(Scalar end, *, DType dtype=Undefined, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: linspace(Scalar start, Scalar end, int64_t steps, *, DType dtype=Float32, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: logspace(Scalar start, Scalar end, int64_t steps, double base=10.0, *, DType dtype=Float32, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: sum(Tensor self, *, DType dtype=Undefined) -> Tensor
+  variants: function, method
+
+- func: sum.dim_IntList(Tensor self, int64_t[] dim, bool keepdim=false, *, DType dtype=Undefined) -> Tensor
+  variants: function, method
+
+- func: mean(Tensor self, *, DType dtype=Undefined) -> Tensor
+  variants: function, method
+
+- func: mean.dim(Tensor self, int64_t[] dim, bool keepdim=false, *, DType dtype=Undefined) -> Tensor
+  variants: function, method
+
+- func: max(Tensor self) -> Tensor
+  variants: function, method
+
+- func: max.dim(Tensor self, int64_t[] dim, bool keepdim=false) -> Tensor
+  variants: function, method
+
+- func: min(Tensor self) -> Tensor
+  variants: function, method
+
+- func: min.dim(Tensor self, int64_t[] dim, bool keepdim=false) -> Tensor
+  variants: function, method
+
+- func: prod(Tensor self, *, DType dtype=Undefined) -> Tensor
+  variants: function, method
+
+- func: prod.dim_IntList(Tensor self, int64_t[] dim, bool keepdim=false, *, DType dtype=Undefined) -> Tensor
+  variants: function, method
+
+- func: argmax(Tensor self, int64_t? dim=None, bool keepdim=false) -> Tensor
+  variants: function, method
+
+- func: argmin(Tensor self, int64_t? dim=None, bool keepdim=false) -> Tensor
+  variants: function, method
+
+- func: all(Tensor self) -> Tensor
+  variants: function, method
+
+- func: all.dim(Tensor self, int64_t[] dim, bool keepdim=false) -> Tensor
+  variants: function, method
+
+- func: any(Tensor self) -> Tensor
+  variants: function, method
+
+- func: any.dim(Tensor self, int64_t[] dim, bool keepdim=false) -> Tensor
+  variants: function, method
+
+- func: var(Tensor self, int64_t correction=1) -> Tensor
+  variants: function, method
+
+- func: var.dim(Tensor self, int64_t[] dim, int64_t correction=1, bool keepdim=false) -> Tensor
+  variants: function, method
+
+- func: std(Tensor self, int64_t correction=1) -> Tensor
+  variants: function, method
+
+- func: std.dim(Tensor self, int64_t[] dim, int64_t correction=1, bool keepdim=false) -> Tensor
+  variants: function, method
+
+- func: norm(Tensor self, double p=2.0) -> Tensor
+  variants: function, method
+
+- func: norm.dim(Tensor self, int64_t[] dim, double p=2.0, bool keepdim=false) -> Tensor
+  variants: function, method
+
+- func: exponential_(Tensor(a!) self, double lambd=1.0) -> Tensor(a!)
+  variants: method
+
+- func: geometric_(Tensor(a!) self, double p) -> Tensor(a!)
+  variants: method
+
+- func: log_normal_(Tensor(a!) self, double mean=1.0, double std=2.0) -> Tensor(a!)
+  variants: method
+
+- func: normal_(Tensor(a!) self, double mean=0.0, double std=1.0) -> Tensor(a!)
+  variants: method
+
+- func: random_(Tensor(a!) self, int64_t low=0, int64_t high=0) -> Tensor(a!)
+  variants: method
+
+- func: uniform_(Tensor(a!) self, double from=0.0, double to=1.0) -> Tensor(a!)
+  variants: method
+
+- func: bernoulli_(Tensor(a!) self) -> Tensor(a!)
+  variants: method
+
+- func: cauchy_(Tensor(a!) self, double median=0.0, double sigma=1.0) -> Tensor(a!)
+  variants: method
+
+- func: empty_like(Tensor self, *, DType dtype=Undefined, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: zeros_like(Tensor self, *, DType dtype=Undefined, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: ones_like(Tensor self, *, DType dtype=Undefined, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: full_like(Tensor self, Scalar fill_value, *, DType dtype=Undefined, Device device=CPU, bool requires_grad=false) -> Tensor
+  variants: function
+
+- func: masked_select(Tensor self, Tensor mask) -> Tensor
+  variants: function, method
+  dispatch:
+    CPU: masked_select_cpu
+
+- func: zero_(Tensor(a!) self) -> Tensor(a!)
+  variants: method

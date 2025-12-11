@@ -1,5 +1,6 @@
 #include "python_bindings.h"
 #include "tensorplay/ops/Config.h"
+#include <cstdlib>
 
 // Extern declarations (if not in header)
 void init_scalar(nb::module_& m);
@@ -11,7 +12,8 @@ NB_MODULE(_C, m) {
     nb::register_exception_translator([](const std::exception_ptr &p, void * /* unused */) {
         auto set_error = [](PyObject* type, const tensorplay::Exception& e) {
             std::string msg = e.msg();
-            if (!e.stacktrace().empty()) {
+            const char* env_val = std::getenv("TENSORPLAY_SHOW_CPP_STACKTRACES");
+            if (env_val && std::string(env_val) == "1" && !e.stacktrace().empty()) {
                 msg += "\n\n" + e.stacktrace();
             }
             PyErr_SetString(type, msg.c_str());
@@ -29,6 +31,8 @@ NB_MODULE(_C, m) {
             set_error(PyExc_NotImplementedError, e);
         } catch (const tensorplay::Exception &e) {
             set_error(PyExc_RuntimeError, e);
+        } catch (const std::exception &e) {
+            PyErr_SetString(PyExc_RuntimeError, e.what());
         }
     });
 
@@ -48,7 +52,24 @@ NB_MODULE(_C, m) {
     init_ops(m);
 
     // CUDA availability
-    m.def("cuda_is_available", []() {
+    m.def("is_cuda_available", []() {
+#ifdef TENSORPLAY_USE_CUDA
+        return true;
+#else
         return false;
+#endif
     });
+
+    // Numpy availability
+    m.def("is_numpy_available", []() {
+        try {
+            nb::module_::import_("numpy");
+            return true;
+        } catch (...) {
+            return false;
+        }
+    });
+
+    // Config
+    m.def("_show_config", &tensorplay::show_config);
 }

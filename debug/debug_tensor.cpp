@@ -1,8 +1,8 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
-#include "tensorplay/core/Tensor.h"
-#include "tensorplay/core/Exception.h"
+#include "Tensor.h"
+#include "Exception.h"
 
 using namespace tensorplay;
 

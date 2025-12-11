@@ -1,8 +1,9 @@
 import os
 import subprocess
-
+import time
 
 def main():
+    start_time = time.time()
     cwd = os.path.dirname(os.path.abspath(__file__))
     build_dir = os.path.join(cwd, "build")
     
@@ -14,9 +15,14 @@ def main():
     
     print("Building project...")
     # --parallel for faster build
-    subprocess.check_call(["cmake", "--build", ".", "--config", "Release", "--parallel", "4"], cwd=build_dir)
+    import multiprocessing
+    # Recommended: CPU count * 1.2 for better I/O handling
+    n_jobs = str(int(multiprocessing.cpu_count() * 1.2))
+    subprocess.check_call(["cmake", "--build", ".", "--config", "Release", "--parallel", n_jobs], cwd=build_dir)
     
-    print("Build complete.")
+    end_time = time.time()
+    elapsed = end_time - start_time
+    print(f"Build complete. Total time: {elapsed:.2f} seconds")
 
 if __name__ == "__main__":
     main()

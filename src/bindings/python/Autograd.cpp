@@ -1,6 +1,9 @@
 #include "python_bindings.h"
+#include "Node.h"
 
 void init_autograd(nb::module_& m) {
+    nb::class_<tensorplay::tpx::Node>(m, "Node");
+
     nb::module_ autograd = m.def_submodule("autograd", "Autograd mechanism");
     
     // Profiler submodule

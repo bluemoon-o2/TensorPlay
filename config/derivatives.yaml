@@ -1,0 +1,58 @@
+- name: add.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor
+  self: grad
+  other: grad * alpha
+
+- name: sub.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor
+  self: grad
+  other: grad.neg() * alpha
+
+- name: mul.Tensor(Tensor self, Tensor other) -> Tensor
+  self: grad * other
+  other: grad * self
+
+- name: div.Tensor(Tensor self, Tensor other) -> Tensor
+  self: grad / other
+  other: -grad * self / (other * other)
+
+- name: mm(Tensor self, Tensor other) -> Tensor
+  self: grad.mm(other.t())
+  other: self.t().mm(grad)
+
+- name: sin(Tensor self) -> Tensor
+  self: grad * self.cos()
+
+- name: cos(Tensor self) -> Tensor
+  self: grad * -self.sin()
+
+- name: pow.Tensor_Scalar(Tensor self, Scalar exponent) -> Tensor
+  self: grad * exponent * self.pow(exponent - 1)
+
+- name: exp(Tensor self) -> Tensor
+  self: grad * self.exp()
+
+- name: sqrt(Tensor self) -> Tensor
+  self: grad / (2 * self.sqrt())
+
+- name: sum(Tensor self, *, DType dtype=Undefined) -> Tensor
+  self: grad.expand(static_cast<std::vector<int64_t>>(self.shape()))
+
+- name: view(Tensor self, int64_t[] shape) -> Tensor
+  self: grad.view(static_cast<std::vector<int64_t>>(self.shape()))
+
+- name: reshape(Tensor self, int64_t[] shape) -> Tensor
+  self: grad.reshape(static_cast<std::vector<int64_t>>(self.shape()))
+
+- name: neg(Tensor self) -> Tensor
+  self: grad.neg()
+
+- name: add.Scalar(Tensor self, Scalar other, Scalar alpha=1) -> Tensor
+  self: grad
+
+- name: sub.Scalar(Tensor self, Scalar other, Scalar alpha=1) -> Tensor
+  self: grad
+
+- name: mul.Scalar(Tensor self, Scalar other) -> Tensor
+  self: grad * other
+
+- name: div.Scalar(Tensor self, Scalar other) -> Tensor
+  self: grad / other

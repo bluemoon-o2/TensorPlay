@@ -1,35 +1,73 @@
 #pragma once
 #include <Python.h>
-#include "tensorplay/core/Tensor.h"
-#include "tensorplay/core/Exception.h"
+#include "TPXTensor.h"
+#include "Exception.h"
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/vector.h>
 
 namespace tensorplay {
 namespace python {
 
+using Tensor = tensorplay::tpx::Tensor;
+
+// Helper function to parse shape from args
+inline std::vector<int64_t> parse_shape_args(nanobind::args args) {
+    std::vector<int64_t> shape;
+    if (args.size() == 1 && (nanobind::isinstance<nanobind::list>(args[0]) || nanobind::isinstance<nanobind::tuple>(args[0]) || nanobind::isinstance<Size>(args[0]))) {
+        nanobind::object obj = args[0];
+        for (auto item : obj) {
+            shape.push_back(nanobind::cast<int64_t>(item));
+        }
+    } else {
+        for (auto item : args) {
+            shape.push_back(nanobind::cast<int64_t>(item));
+        }
+    }
+    return shape;
+}
+
 // Recursively parse Python list shape, verify regularity 
 // (e.g., [[1,2],[3]] is irregular, throw error)
-inline void parse_shape(PyObject* list, std::vector<int64_t>& shape) {
-    if (!PyList_Check(list)) {
-        TP_THROW(TypeError, "Input must be a list");
+inline bool IsListOrTuple(PyObject* obj) {
+    return PyList_Check(obj) || PyTuple_Check(obj);
+}
+
+inline int64_t GetSize(PyObject* obj) {
+    if (PyList_Check(obj)) return PyList_Size(obj);
+    if (PyTuple_Check(obj)) return PyTuple_Size(obj);
+    return 0;
+}
+
+inline PyObject* GetItem(PyObject* obj, int64_t i) {
+    if (PyList_Check(obj)) return PyList_GetItem(obj, i); // Borrowed
+    if (PyTuple_Check(obj)) return PyTuple_GetItem(obj, i); // Borrowed
+    return nullptr;
+}
+
+inline void parse_shape(PyObject* list, std::vector<int64_t>& shape, int depth = 0) {
+    if (depth > 128) {
+        TP_THROW(RuntimeError, "Recursion depth exceeded in list_to_tensor");
     }
-    int64_t len = PyList_Size(list);
+    if (!IsListOrTuple(list)) {
+        TP_THROW(TypeError, "Input must be a list or tuple");
+    }
+    int64_t len = GetSize(list);
     shape.push_back(len);
     if (len == 0) return;
 
     // Ensure all sublists have the same length and recursively check shape
-    PyObject* first = PyList_GetItem(list, 0);
-    if (PyList_Check(first)) {
+    PyObject* first = GetItem(list, 0);
+    if (IsListOrTuple(first)) {
         std::vector<int64_t> sub_shape;
-        parse_shape(first, sub_shape);
+        parse_shape(first, sub_shape, depth + 1);
         // Verify all sublists have the same shape
         for (int64_t i = 1; i < len; ++i) {
-            PyObject* sublist = PyList_GetItem(list, i);
-            if (!PyList_Check(sublist)) {
+            PyObject* sublist = GetItem(list, i);
+            if (!IsListOrTuple(sublist)) {
                 TP_THROW(ValueError, "Irregular list (mixed types)");
             }
             std::vector<int64_t> cur_sub_shape;
-            parse_shape(sublist, cur_sub_shape);
+            parse_shape(sublist, cur_sub_shape, depth + 1);
             if (cur_sub_shape != sub_shape) {
                 TP_THROW(ValueError, "Irregular list (sublists have different lengths)");
             }
@@ -41,79 +79,89 @@ inline void parse_shape(PyObject* list, std::vector<int64_t>& shape) {
 
 // Infer data type of list elements 
 // (uniform to highest precision, e.g., int and float mixed -> float64)
-inline DType infer_dtype(PyObject* list) {
-    if (!PyList_Check(list)) {
-        TP_THROW(TypeError, "Can not transform " + std::string(Py_TYPE(list)->tp_name) + " to tensor");
+inline DType infer_dtype(PyObject* list, int depth = 0) {
+    if (depth > 128) {
+        TP_THROW(RuntimeError, "Recursion depth exceeded in infer_dtype");
     }
-    int64_t len = PyList_Size(list);
+    if (!IsListOrTuple(list)) {
+        TP_THROW(TypeError, "Can not transform ", std::string(Py_TYPE(list)->tp_name), " to tensor");
+    }
+    int64_t len = GetSize(list);
     if (len == 0) return DType::Float32;  // Empty list default to float32
 
-    DType dtype = DType::Int64;  // Default to int64
     bool has_float = false;
+    bool has_int = false;
+    bool has_bool = false;
+    
+    // We only check the first element to guess type for optimization? 
+    // Actually, we check all elements to be safe.
+    // For example, for mixed types like [1.0, 2], we need to scan.
+    // Let's scan all elements at this level. Recursive calls will scan sub-levels.
     
     for (int64_t i = 0; i < len; ++i) {
-        PyObject* item = PyList_GetItem(list, i);
-        if (PyList_Check(item)) {
+        PyObject* item = GetItem(list, i);
+        if (IsListOrTuple(item)) {
             // Recursively infer dtype of sublists
-            DType sub_dtype = infer_dtype(item);
-            // Track float presence
-            if (sub_dtype == DType::Float32 || sub_dtype == DType::Float64) {
-                has_float = true;
-            }
+            DType sub_dtype = infer_dtype(item, depth + 1);
+            if (sub_dtype == DType::Float32 || sub_dtype == DType::Float64) has_float = true;
+            else if (sub_dtype == DType::Int64 || sub_dtype == DType::Int32) has_int = true;
+            else if (sub_dtype == DType::Bool) has_bool = true;
         } else {
-            // Basic type inference
             if (PyFloat_Check(item)) {
-                has_float = true;  // Mark that we have a float
-            } else if (PyLong_Check(item)) {
-                // Int is fine
+                has_float = true;
             } else if (PyBool_Check(item)) {
-                 // Bool is fine
+                has_bool = true;
+            } else if (PyLong_Check(item)) {
+                has_int = true;
             } else {
                 TP_THROW(TypeError, "Unsupported element type (only int/float/bool supported)");
             }
         }
     }
     
-    // Determine final dtype based on what we found
-    if (has_float) {
-        dtype = DType::Float32;  // Default to float32 for any float
-    } else {
-        dtype = DType::Int64;    // Default to Int64 for ints
-    }
+    if (has_float) return DType::Float32;
+    if (has_int) return DType::Int64;
+    if (has_bool) return DType::Bool;
     
-    return dtype;
+    return DType::Float32; // Default if nothing found (e.g. empty sublists)
+}
+
+// Optimized flat copy for the last dimension
+template <typename T>
+void copy_data_flat(PyObject* list, T* data, size_t& index) {
+    int64_t len = GetSize(list);
+    for (int64_t i = 0; i < len; ++i) {
+         PyObject* item = GetItem(list, i);
+         T val;
+         // We trust parse_shape so we don't check for list again
+         if (PyFloat_Check(item)) {
+             val = static_cast<T>(PyFloat_AsDouble(item));
+         } else if (PyBool_Check(item)) {
+             val = static_cast<T>(item == Py_True);
+         } else if (PyLong_Check(item)) {
+             val = static_cast<T>(PyLong_AsLongLong(item));
+         } else {
+             // Fallback for safety
+             TP_THROW(TypeError, "Unsupported element type in flat copy");
+         }
+         data[index++] = val;
+    }
 }
 
 // Recursively copy list data to Tensor memory (row-major order)
 template <typename T>
 void copy_data(PyObject* list, T* data, size_t& index, const std::vector<int64_t>& shape, int dim) {
-    int64_t len = PyList_Size(list);
+    // Optimization for 1D case (last dimension)
+    if (dim == shape.size() - 1) {
+        copy_data_flat(list, data, index);
+        return;
+    }
+
+    int64_t len = GetSize(list);
     for (int64_t i = 0; i < len; ++i) {
-        PyObject* item = PyList_GetItem(list, i);
-        if (PyList_Check(item)) {
-             if (dim >= shape.size() - 1) {
-                 TP_THROW(RuntimeError, "Unexpected nesting level in list");
-             }
-             copy_data(item, data, index, shape, dim + 1);
-        } else {
-             // Basic types
-             if (dim != shape.size() - 1) {
-                 TP_THROW(RuntimeError, "Unexpected non-list element (ragged nested list?)");
-             }
-             
-             T val;
-             if (PyFloat_Check(item)) {
-                 val = static_cast<T>(PyFloat_AsDouble(item));
-             } else if (PyBool_Check(item)) {
-                 val = static_cast<T>(item == Py_True);
-             } else if (PyLong_Check(item)) {
-                 val = static_cast<T>(PyLong_AsLongLong(item));
-             } else {
-                 TP_THROW(TypeError, "Unsupported element type");
-             }
-             
-             data[index++] = val;
-        }
+        PyObject* item = GetItem(list, i);
+        // We trust parse_shape so we know item is a list
+        copy_data(item, data, index, shape, dim + 1);
     }
 }
 
@@ -142,14 +190,25 @@ void copy_data(PyObject* list, T* data, size_t& index, const std::vector<int64_t
       TP_THROW(NotImplementedError, std::string(NAME) + " not implemented for this dtype"); \
   }
 
-inline Tensor list_to_tensor(PyObject* list) {
+inline Tensor list_to_tensor(PyObject* list, std::optional<DType> requested_dtype = std::nullopt, std::optional<Device> device = std::nullopt) {
     std::vector<int64_t> shape;
     parse_shape(list, shape);
     
-    DType dtype = infer_dtype(list);
+    DType dtype;
+    if (requested_dtype.has_value()) {
+        dtype = *requested_dtype;
+    } else {
+        dtype = infer_dtype(list);
+    }
     
-    // Create CPU tensor
-    Tensor t(shape, dtype, Device(DeviceType::CPU));
+    // Determine target device
+    Device target_device = device.value_or(Device(DeviceType::CPU));
+    
+    // Optimization: If target is CPU, create directly.
+    // If target is GPU, create on CPU first (staging) then copy.
+    // TODO: Use pinned memory for staging if target is GPU
+    
+    Tensor t = Tensor(shape, dtype, Device(DeviceType::CPU));
     
     // Dispatch copy_data based on dtype
     size_t index = 0;
@@ -159,6 +218,11 @@ inline Tensor list_to_tensor(PyObject* list) {
         T* data_ptr = t.data_ptr<T>();
         copy_data(list, data_ptr, index, shape, 0);
     });
+    
+    // Move to target device if needed
+    if (target_device.type() != DeviceType::CPU) {
+        return t.to(target_device);
+    }
     
     return t;
 }

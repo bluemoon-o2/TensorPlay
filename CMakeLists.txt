@@ -9,6 +9,12 @@ if(WIN32)
     add_compile_options(/std:c++20 /EHsc)
     if(MSVC)
         add_compile_options(/wd4251 /wd4275)
+        # Enable multi-processor compilation
+        add_compile_options(/MP)
+        # Disable minimal rebuild for better parallelism
+        add_compile_options(/Gm-)
+        # Enable optimization for Release builds
+        add_compile_options($<$<CONFIG:Release>:/O2>)
     endif()
 else()
     add_compile_options(-std=c++20 -O3 -Wall -Wextra -Wpedantic)
@@ -19,7 +25,7 @@ endif()
 
 include_directories(include)
 
-# Nanobind requires "Python" (not Python3) package to be found first
+# Nanobind requires "Python" package to be found first
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
 
 # Derive Python Root if not set
@@ -37,18 +43,37 @@ set(GEN_BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/generated")
 set(GEN_INCLUDE_DIR "${GEN_BASE_DIR}/tensorplay/ops")
 set(GEN_HEADER "${GEN_INCLUDE_DIR}/TensorGenerated.h")
 set(GEN_CPP "${GEN_INCLUDE_DIR}/TensorGenerated.cpp")
+set(GEN_BINDINGS_HEADER "${GEN_INCLUDE_DIR}/TensorBindingsGenerated.h")
+set(GEN_AUTOGRAD_NODES_H "${GEN_INCLUDE_DIR}/AutogradNodesGenerated.h")
+set(GEN_TPX_OPS_H "${GEN_INCLUDE_DIR}/TPXOpsGenerated.h")
+set(GEN_TPX_OPS_CPP "${GEN_INCLUDE_DIR}/TPXOpsGenerated.cpp")
+
+# Python Interface Stub Generation
+set(PYI_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/tools/codegen/templates/_C.pyi.in")
+set(TP_PACKAGE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tensorplay")
+set(PYI_OUTPUT "${TP_PACKAGE_DIR}/_C.pyi")
 
 # Code generation
 add_custom_command(
-    OUTPUT ${GEN_HEADER} ${GEN_CPP}
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/codegen/gen.py 
-        --yaml ${CMAKE_CURRENT_SOURCE_DIR}/native_functions.yaml 
-        --out_dir ${GEN_INCLUDE_DIR}
-    DEPENDS 
-        ${CMAKE_CURRENT_SOURCE_DIR}/native_functions.yaml
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools/codegen/gen.py
-    COMMENT "Generating Tensor methods from native_functions.yaml"
-)
+            OUTPUT ${GEN_HEADER} ${GEN_CPP} ${GEN_BINDINGS_HEADER} ${PYI_OUTPUT} 
+                   ${GEN_AUTOGRAD_NODES_H} ${GEN_TPX_OPS_H} ${GEN_TPX_OPS_CPP}
+            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/codegen/gen.py 
+                    --yaml ${CMAKE_CURRENT_SOURCE_DIR}/config/native_functions.yaml 
+                    --derivatives ${CMAKE_CURRENT_SOURCE_DIR}/config/derivatives.yaml
+                    --out_dir ${GEN_INCLUDE_DIR}
+                    --pyi_template ${PYI_TEMPLATE}
+                    --pyi_out ${PYI_OUTPUT}
+                    --functional_out ${CMAKE_CURRENT_SOURCE_DIR}/tensorplay/functional.py
+            DEPENDS 
+                ${CMAKE_CURRENT_SOURCE_DIR}/config/native_functions.yaml
+                ${CMAKE_CURRENT_SOURCE_DIR}/config/derivatives.yaml
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/codegen/gen.py
+                ${PYI_TEMPLATE}
+            COMMENT "Generating Tensor methods, bindings and pyi stubs from native_functions.yaml"
+        )
+
+# Add a custom target to ensure code generation runs before library building
+add_custom_target(generate_code DEPENDS ${GEN_HEADER} ${GEN_CPP} ${GEN_TPX_OPS_CPP})
 
 include_directories(${GEN_BASE_DIR})
 
@@ -287,8 +312,8 @@ if(NOT BLAS_FOUND)
                  # Copy to build output dirs
                  file(COPY ${DLL} DESTINATION ${CMAKE_BINARY_DIR}/Release)
                  file(COPY ${DLL} DESTINATION ${CMAKE_BINARY_DIR}/Debug)
-                 # Copy to Python package dir (for import tensorplay)
-                 file(COPY ${DLL} DESTINATION ${CMAKE_SOURCE_DIR}/tensorplay)
+                 # Copy to Python package lib dir (for import tensorplay)
+                file(COPY ${DLL} DESTINATION ${CMAKE_SOURCE_DIR}/tensorplay/lib)
                  message(STATUS "  - Copied DLL: ${DLL}")
              endforeach()
         else()
@@ -333,49 +358,17 @@ namespace tensorplay {
 ")
 file(WRITE "${GEN_BASE_DIR}/tensorplay/ops/Config.h" "${CONFIG_CONTENT}")
 
-# Core library
-add_library(tensorplay_core SHARED
-    src/core/Allocator.cpp
-    src/core/Autograd.cpp
-    src/core/Device.cpp
-    src/core/Dispatcher.cpp
-    src/core/Exception.cpp
-    src/core/Generator.cpp
-    src/core/Scalar.cpp
-    src/core/SizesAndStrides.cpp
-    src/core/Stacktrace.cpp
-    src/core/Tensor.cpp
-    src/core/TensorImpl.cpp
-    ${GEN_CPP}
-    src/backend/cpu/ArithmeticKernels.cpp
-    src/backend/cpu/FactoryKernels.cpp
-    src/backend/cpu/LinearAlgebraKernels.cpp
-    src/backend/cpu/ConvKernels.cpp
-    src/backend/cpu/CopyKernel.cpp
-    src/backend/cpu/ViewKernels.cpp
-    src/backend/cpu/ReductionKernels.cpp
-    src/backend/cpu/RandomKernels.cpp
-    src/backend/cpu/PointwiseKernels.cpp
-)
-target_include_directories(tensorplay_core PUBLIC include ${GEN_BASE_DIR})
-target_compile_definitions(tensorplay_core PRIVATE TENSORPLAY_EXPORTS)
-if(COMPUTE_LIBS)
-    target_link_libraries(tensorplay_core PRIVATE ${COMPUTE_LIBS})
-endif()
+# Add p10
+add_subdirectory(p10)
 
-# Set output directory to package folder to avoid copying
-set(TP_PACKAGE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tensorplay")
-set_target_properties(tensorplay_core PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${TP_PACKAGE_DIR}"
-    LIBRARY_OUTPUT_DIRECTORY "${TP_PACKAGE_DIR}"
-    ARCHIVE_OUTPUT_DIRECTORY "${TP_PACKAGE_DIR}"
-    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${TP_PACKAGE_DIR}"
-    LIBRARY_OUTPUT_DIRECTORY_RELEASE "${TP_PACKAGE_DIR}"
-    ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${TP_PACKAGE_DIR}"
-    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${TP_PACKAGE_DIR}"
-    LIBRARY_OUTPUT_DIRECTORY_DEBUG "${TP_PACKAGE_DIR}"
-    ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${TP_PACKAGE_DIR}"
-)
+# Add tpx
+add_subdirectory(tpx)
+
+# Add stax (Optional)
+add_subdirectory(stax)
+
+# Add nn (Optional)
+add_subdirectory(nn)
 
 # Python Bindings
 nanobind_add_module(_C 
@@ -389,11 +382,12 @@ nanobind_add_module(_C
     src/bindings/python/Ops.cpp
     src/bindings/python/Tensor.cpp
 )
-target_link_libraries(_C PRIVATE tensorplay_core)
+target_link_libraries(_C PRIVATE p10 tpx nn stax)
+target_include_directories(_C PRIVATE ${GEN_BASE_DIR} include)
 
-if(WIN32)
-    target_link_libraries(tensorplay_core PRIVATE Dbghelp)
-endif()
+set(TP_PACKAGE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tensorplay")
+set(TP_LIB_DIR "${TP_PACKAGE_DIR}/lib")
+file(MAKE_DIRECTORY "${TP_LIB_DIR}")
 
 set_target_properties(_C PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${TP_PACKAGE_DIR}"
@@ -407,29 +401,14 @@ set_target_properties(_C PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${TP_PACKAGE_DIR}"
 )
 
-# Generate .pyi stub
-if (NOT CMAKE_CROSSCOMPILING)
-    add_custom_command(TARGET _C POST_BUILD
-        COMMAND "${Python_EXECUTABLE}" -m nanobind.stubgen -m _C -o "${TP_PACKAGE_DIR}/_C.pyi"
-        WORKING_DIRECTORY $<TARGET_FILE_DIR:_C>
-        COMMENT "Generating .pyi stub for _C"
-    )
-endif()
-
 # Installation
-install(TARGETS tensorplay_core
-    RUNTIME DESTINATION tensorplay
-    LIBRARY DESTINATION tensorplay
-    ARCHIVE DESTINATION tensorplay
-)
-
 install(TARGETS _C
     LIBRARY DESTINATION tensorplay
     RUNTIME DESTINATION tensorplay
 )
 
 # Install the generated stub file
-install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/_C.pyi" DESTINATION tensorplay)
+install(FILES "${PYI_OUTPUT}" DESTINATION tensorplay)
 
 
 # Add custom target for building python extension
@@ -440,8 +419,7 @@ add_custom_target(build_python
 
 # Debug Executable (Pure C++)
 add_executable(debug_tensor debug/debug_tensor.cpp)
-target_include_directories(debug_tensor PRIVATE include)
-target_link_libraries(debug_tensor PRIVATE tensorplay_core)
+target_link_libraries(debug_tensor PRIVATE p10)
 
 # Testing support
 option(BUILD_TESTS "Build tests" OFF)

@@ -8,7 +8,7 @@ import unittest
 class TestRandom(unittest.TestCase):
     def test_bernoulli(self):
         t = tp.rand([100])
-        b = t.bernoulli()
+        b = tp.bernoulli(t)
         # Check values are 0 or 1
         flat = b.view([-1])
         for i in range(flat.numel()):
