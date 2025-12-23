@@ -4,6 +4,7 @@
     "ignoreCommand": "if [ \"$VERCEL_GIT_COMMIT_REF\" != \"website-deploy\" ]; then exit 0; else exit 1; fi"
   },
   "name": "tensorplay-download",
+  "cleanUrls": true,
   "public": true,
   "rewrites": [
     {
