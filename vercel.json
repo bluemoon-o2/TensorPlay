@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "git": {
+    "ignoreCommand": "if [ \"$VERCEL_GIT_COMMIT_REF\" != \"website-deploy\" ]; then exit 0; else exit 1; fi"
+  },
+  "name": "tensorplay-download",
+  "public": true,
+  "rewrites": [
+    {
+      "source": "/whl/(.*)",
+      "destination": "/whl/$1"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/whl/(.*)\\.whl",
+      "headers": [
+        {
+          "key": "Content-Type",
+          "value": "application/octet-stream"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    }
+  ]
+}
