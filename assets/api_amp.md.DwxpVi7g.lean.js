@@ -1,0 +1,1 @@
+import{_ as s,c as a,o as e,ah as i}from"./chunks/framework.DJtYh1Hc.js";const n=JSON.parse('{"title":"tensorplay.amp","description":"","frontmatter":{},"headers":[],"relativePath":"api/amp.md","filePath":"api/amp.md"}');const t=s({name:"api/amp.md"},[["render",function(s,n,t,l,o,r){return e(),a("div",null,[...n[0]||(n[0]=[i("",61)])])}]]);export{n as __pageData,t as default};

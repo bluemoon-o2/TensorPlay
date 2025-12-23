@@ -1,0 +1,1 @@
+import{_ as e,c as s,o as a,ah as o}from"./chunks/framework.DJtYh1Hc.js";const t=JSON.parse('{"title":"tensorplay._C","description":"","frontmatter":{},"headers":[],"relativePath":"api/_C.md","filePath":"api/_C.md"}');const n=e({name:"api/_C.md"},[["render",function(e,t,n,i,l,r){return a(),s("div",null,[...t[0]||(t[0]=[o("",22)])])}]]);export{t as __pageData,n as default};

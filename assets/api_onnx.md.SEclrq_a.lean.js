@@ -1,0 +1,1 @@
+import{_ as s,c as a,o as i,ah as n}from"./chunks/framework.DJtYh1Hc.js";const t=JSON.parse('{"title":"tensorplay.onnx","description":"","frontmatter":{},"headers":[],"relativePath":"api/onnx.md","filePath":"api/onnx.md"}');const e=s({name:"api/onnx.md"},[["render",function(s,t,e,o,r,l){return i(),a("div",null,[...t[0]||(t[0]=[n("",7)])])}]]);export{t as __pageData,e as default};

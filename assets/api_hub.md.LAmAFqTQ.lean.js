@@ -1,0 +1,1 @@
+import{_ as s,c as i,o as a,ah as e}from"./chunks/framework.DJtYh1Hc.js";const t=JSON.parse('{"title":"tensorplay.hub","description":"","frontmatter":{},"headers":[],"relativePath":"api/hub.md","filePath":"api/hub.md"}');const l=s({name:"api/hub.md"},[["render",function(s,t,l,r,o,n){return a(),i("div",null,[...t[0]||(t[0]=[e("",17)])])}]]);export{t as __pageData,l as default};

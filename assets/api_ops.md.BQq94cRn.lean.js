@@ -1,0 +1,1 @@
+import{_ as a,c as o,o as e,ah as r}from"./chunks/framework.DJtYh1Hc.js";const t=JSON.parse('{"title":"tensorplay.ops","description":"","frontmatter":{},"headers":[],"relativePath":"api/ops.md","filePath":"api/ops.md"}');const s=a({name:"api/ops.md"},[["render",function(a,t,s,n,i,l){return e(),o("div",null,[...t[0]||(t[0]=[r("",5)])])}]]);export{t as __pageData,s as default};

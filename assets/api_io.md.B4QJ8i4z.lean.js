@@ -1,0 +1,1 @@
+import{_ as a,c as e,o as s,ah as i}from"./chunks/framework.DJtYh1Hc.js";const o=JSON.parse('{"title":"tensorplay.audio.io","description":"","frontmatter":{},"headers":[],"relativePath":"api/io.md","filePath":"api/io.md"}');const t=a({name:"api/io.md"},[["render",function(a,o,t,n,r,l){return s(),e("div",null,[...o[0]||(o[0]=[i("",20)])])}]]);export{o as __pageData,t as default};

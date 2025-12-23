@@ -1,0 +1,1 @@
+import{_ as e,c as a,o,ah as s}from"./chunks/framework.DJtYh1Hc.js";const t=JSON.parse('{"title":"tensorplay.types","description":"","frontmatter":{},"headers":[],"relativePath":"api/types.md","filePath":"api/types.md"}');const r=e({name:"api/types.md"},[["render",function(e,t,r,l,n,i){return o(),a("div",null,[...t[0]||(t[0]=[s("",5)])])}]]);export{t as __pageData,r as default};

@@ -1,0 +1,1 @@
+import{_ as e,c as o,o as a,ah as n}from"./chunks/framework.DJtYh1Hc.js";const r=JSON.parse('{"title":"tensorplay.nn.modules","description":"","frontmatter":{},"headers":[],"relativePath":"api/nn.md","filePath":"api/nn.md"}');const l=e({name:"api/nn.md"},[["render",function(e,r,l,i,s,t){return a(),o("div",null,[...r[0]||(r[0]=[n("",7)])])}]]);export{r as __pageData,l as default};
