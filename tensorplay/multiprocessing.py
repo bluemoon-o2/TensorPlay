@@ -7,13 +7,16 @@ from multiprocessing.reduction import ForkingPickler
 # shared memory passing of Tensor objects. 
 
 def reduce_tensor(t):
-    if not t.is_shared():
-        t.share_memory_()
-    # Manually construct reduce tuple to bypass broken __reduce__ in nanobind bindings
-    # (reconstructor, args, state)
-    # Tensor() constructor takes args, but we use __setstate__ to initialize
-    # So we pass empty args to constructor (which creates empty tensor) and then state
-    return t.__class__, (), t.__getstate__()
+    # Use the bytes-based (data copy) state: the SharedMemory zero-copy
+    # branch mutates the source tensor via share_memory_() and cannot be
+    # reconstructed reliably in forked children (empty tensor / segfault).
+    if t.is_shared():
+        t = t.clone()
+    # Use the __newobj__ protocol (NEWOBJ + BUILD) which reconstructs via
+    # __setstate__: the plain (cls, (), state) REDUCE form creates an empty
+    # tensor and the setstate replacement is lost.
+    import copyreg
+    return copyreg.__newobj__, (t.__class__,), t.__getstate__()
 
 # Register for TensorBase too since Tensor is an alias
 try:

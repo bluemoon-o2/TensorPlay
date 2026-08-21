@@ -57,6 +57,10 @@ class DType(enum.Enum):
 
     float64 = 9
 
+    float16 = 10
+
+    bfloat16 = 11
+
     int32 = 3
 
     int64 = 4
@@ -73,9 +77,29 @@ class DType(enum.Enum):
 
     uint64 = 7
 
-    bool = 10
+    complex32 = 15
 
-    undefined = 13
+    complex64 = 13
+
+    complex128 = 14
+
+    bcomplex32 = 16
+
+    bool = 12
+
+    undefined = 17
+
+    @property
+    def is_floating_point(self) -> bool: ...
+
+    @property
+    def is_complex(self) -> bool: ...
+
+    @property
+    def is_signed(self) -> bool: ...
+
+    @property
+    def itemsize(self) -> int: ...
 
 float32: DType = DType.float32
 
@@ -97,9 +121,39 @@ uint32: DType = DType.uint32
 
 uint64: DType = DType.uint64
 
+float16: DType = DType.float16
+
+bfloat16: DType = DType.bfloat16
+
+complex32: DType = DType.complex32
+
+complex64: DType = DType.complex64
+
+complex128: DType = DType.complex128
+
+bcomplex32: DType = DType.bcomplex32
+
 bool: DType = DType.bool
 
 undefined: DType = DType.undefined
+
+half: DType = DType.float16
+
+float: DType = DType.float32
+
+double: DType = DType.float64
+
+short: DType = DType.int16
+
+int: DType = DType.int32
+
+long: DType = DType.int64
+
+cfloat: DType = DType.complex64
+
+cdouble: DType = DType.complex128
+
+chalf: DType = DType.complex32
 
 class DeviceType(enum.Enum):
     _new_member_ = __new__
@@ -293,6 +347,9 @@ class TensorBase:
     def is_leaf(self) -> bool: ...
 
     @property
+    def retains_grad(self) -> bool: ...
+
+    @property
     def grad_fn(self) -> Node: ...
 
     def _set_grad_fn(self, node: Node, output_nr: int = 0) -> None: ...
@@ -303,6 +360,8 @@ class TensorBase:
     def pin_memory(self) -> TensorBase: ...
 
     def is_pinned(self) -> bool: ...
+
+    def record_stream(self, stream: _cuda._CudaStream | object) -> None: ...
 
     @property
     def grad(self) -> TensorBase | None: ...
@@ -355,10 +414,10 @@ class TensorBase:
     def slice(self, dim: int, start: int, end: int, step: int = 1) -> TensorBase: ...
 
     @overload
-    def copy_(self, src: TensorBase) -> object: ...
+    def copy_(self, src: TensorBase, non_blocking: bool = False) -> object: ...
 
     @overload
-    def copy_(self, src: TensorBase) -> TensorBase: ...
+    def copy_(self, src: TensorBase, non_blocking: bool = False) -> TensorBase: ...
 
     @overload
     def fill_(self, value: Scalar) -> object: ...
@@ -1180,13 +1239,13 @@ class Node:
     @property
     def variable(self) -> TensorBase | None: ...
 
-def tensor(data: object, *, dtype: DType | None = None, device: Device | None = None, requires_grad: bool = False) -> TensorBase:
+def tensor(data: object, *, dtype: DType | None = None, device: Device | None = None, pin_memory: bool = False, requires_grad: bool = False) -> TensorBase:
     """
     tensor(data, *, dtype: Optional[DType] = None, device: Optional[Device] = None, requires_grad: bool = False) -> Tensor
     """
 
 @overload
-def zeros(size: Sequence[int], *, dtype: DType | None = None, device: Device | None = None, requires_grad: bool = False) -> TensorBase:
+def zeros(size: Sequence[int], *, dtype: DType | None = None, device: Device | None = None, pin_memory: bool = False, requires_grad: bool = False) -> TensorBase:
     """
     zeros(size: Sequence[int], *, dtype: Optional[DType] = None, device: Optional[Device] = None, requires_grad: bool = False) -> Tensor
     """
@@ -1198,10 +1257,10 @@ def zeros(*args, **kwargs) -> TensorBase:
     """
 
 @overload
-def zeros(size: Sequence[int], dtype: DType = DType.float32, device: Device = ..., requires_grad: bool = False) -> TensorBase: ...
+def zeros(size: Sequence[int], dtype: DType = DType.float32, device: Device = ..., pin_memory: bool = False, requires_grad: bool = False) -> TensorBase: ...
 
 @overload
-def ones(size: Sequence[int], *, dtype: DType | None = None, device: Device | None = None, requires_grad: bool = False) -> TensorBase:
+def ones(size: Sequence[int], *, dtype: DType | None = None, device: Device | None = None, pin_memory: bool = False, requires_grad: bool = False) -> TensorBase:
     """
     ones(size: Sequence[int], *, dtype: Optional[DType] = None, device: Optional[Device] = None, requires_grad: bool = False) -> Tensor
     """
@@ -1213,7 +1272,7 @@ def ones(*args, **kwargs) -> TensorBase:
     """
 
 @overload
-def ones(size: Sequence[int], dtype: DType = DType.float32, device: Device = ..., requires_grad: bool = False) -> TensorBase: ...
+def ones(size: Sequence[int], dtype: DType = DType.float32, device: Device = ..., pin_memory: bool = False, requires_grad: bool = False) -> TensorBase: ...
 
 @overload
 def eye(n: int, m: int = -1, *, dtype: DType = DType.float32, device: Device = ..., requires_grad: bool = False) -> TensorBase:
@@ -1225,7 +1284,7 @@ def eye(n: int, m: int = -1, *, dtype: DType = DType.float32, device: Device = .
 def eye(n: int, m: int = -1, dtype: DType = DType.float32, device: Device = ..., requires_grad: bool = False) -> TensorBase: ...
 
 @overload
-def empty(size: Sequence[int], *, dtype: DType | None = None, device: Device | None = None, requires_grad: bool = False) -> TensorBase:
+def empty(size: Sequence[int], *, dtype: DType | None = None, device: Device | None = None, pin_memory: bool = False, requires_grad: bool = False) -> TensorBase:
     """
     empty(size: Sequence[int], *, dtype: Optional[DType] = None, device: Optional[Device] = None, requires_grad: bool = False) -> Tensor
     """
@@ -1237,7 +1296,7 @@ def empty(*args, **kwargs) -> TensorBase:
     """
 
 @overload
-def empty(size: Sequence[int], dtype: DType = DType.float32, device: Device = ..., requires_grad: bool = False) -> TensorBase: ...
+def empty(size: Sequence[int], dtype: DType = DType.float32, device: Device = ..., pin_memory: bool = False, requires_grad: bool = False) -> TensorBase: ...
 
 @overload
 def rand(size: Sequence[int], *, dtype: DType | None = None, device: Device | None = None, requires_grad: bool = False) -> TensorBase:
@@ -1288,13 +1347,13 @@ def randperm(n: int, *, dtype: DType = DType.int64, device: Device = ..., requir
 def randperm(n: int, dtype: DType = DType.int64, device: Device = ..., requires_grad: bool = False) -> TensorBase: ...
 
 @overload
-def full(shape: Sequence[int], fill_value: Scalar, *, dtype: DType = DType.float32, device: Device = ..., requires_grad: bool = False) -> TensorBase:
+def full(shape: Sequence[int], fill_value: Scalar, *, dtype: DType = DType.float32, device: Device = ..., pin_memory: bool = False, requires_grad: bool = False) -> TensorBase:
     """
     full(shape: Sequence[int], fill_value: Union[float, int], *, dtype: Optional[DType] = None, device: Optional[Device] = None, requires_grad: bool = False) -> Tensor
     """
 
 @overload
-def full(size: Sequence[int], fill_value: Scalar, dtype: DType = DType.undefined, device: Device = ..., requires_grad: bool = False) -> TensorBase: ...
+def full(size: Sequence[int], fill_value: Scalar, dtype: DType = DType.undefined, device: Device = ..., pin_memory: bool = False, requires_grad: bool = False) -> TensorBase: ...
 
 def embedding(weight: TensorBase, indices: TensorBase, padding_idx: int = -1, scale_grad_by_freq: bool = False, sparse: bool = False) -> TensorBase: ...
 
