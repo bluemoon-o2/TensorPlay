@@ -9,6 +9,7 @@ never asked to discover Python control flow; it only receives a captured
 from __future__ import annotations
 
 import functools
+import inspect
 import threading
 import weakref
 from contextlib import contextmanager
@@ -16,11 +17,15 @@ from contextvars import ContextVar
 from typing import Any, Callable, Iterable
 from weakref import WeakSet
 
-from .graph import GraphCaptureError, GraphModule, Tracer, dead_code_elimination
+from .graph import GraphCaptureError, GraphModule, Tracer
+from .passes import ConstFold, DeadCodeElimination, PassManager, ShapeProp
 from .registry import CompilerFn, get_default_backend, lookup_backend
 
 
 _compiling: ContextVar[bool] = ContextVar("tensorplay_compiling", default=False)
+_capture_disabled: ContextVar[bool] = ContextVar(
+    "tensorplay_capture_disabled", default=False
+)
 _compiled_wrappers: WeakSet[Any] = WeakSet()
 _DEFAULT_RECOMPILE_LIMIT = 8
 
@@ -28,7 +33,24 @@ _DEFAULT_RECOMPILE_LIMIT = 8
 def is_compiling() -> bool:
     """Return whether Python is currently being captured by the compiler."""
 
-    return _compiling.get()
+    return _compiling.get() and not _capture_disabled.get()
+
+
+@contextmanager
+def _disable_capture() -> Iterable[None]:
+    """Temporarily execute a region outside the active Stax capture.
+
+    This is the TensorPlay counterpart of the capture boundary used by
+    ``torch._disable_dynamo``.  The public compiler owns the capture state;
+    optimizers only use this narrow internal context when Torch marks a
+    stateful Python region as uncapturable.
+    """
+
+    token = _capture_disabled.set(True)
+    try:
+        yield
+    finally:
+        _capture_disabled.reset(token)
 
 
 @contextmanager
@@ -278,10 +300,32 @@ def compile(
     last_quick_key: Any = object()
     last_compiled_fn: Callable[..., Any] | None = None
     last_arg_refs: tuple[weakref.ReferenceType[Any], ...] | None = None
+    guard_param_names: tuple[str, ...] = ()
+
+    def _guard_component(
+        args_: tuple[Any, ...],
+        kwargs_: dict[str, Any],
+        builder: Callable[..., Any],
+    ) -> tuple[Any, ...]:
+        if not guard_param_names:
+            return ()
+        target = model.forward if _is_module_like(model) else model
+        try:
+            bound = inspect.signature(target).bind_partial(*args_, **kwargs_)
+            bound.apply_defaults()
+        except (TypeError, ValueError):
+            return ("shape-guards", "unbound")
+        return (
+            "shape-guards",
+            tuple(
+                builder(bound.arguments.get(name), dynamic=False)
+                for name in guard_param_names
+            ),
+        )
 
     @functools.wraps(model)
     def optimized(*args: Any, **kwargs: Any) -> Any:
-        nonlocal last_quick_key, last_compiled_fn, last_arg_refs
+        nonlocal last_quick_key, last_compiled_fn, last_arg_refs, guard_param_names
         same_last_args = (
             not kwargs
             and last_arg_refs is not None
@@ -291,15 +335,21 @@ def compile(
         quick_key = (
             last_quick_key
             if same_last_args
-            else _quick_input_signature(
-                args, kwargs, dynamic=specialization_dynamic
+            else (
+                _quick_input_signature(
+                    args, kwargs, dynamic=specialization_dynamic
+                ),
+                _guard_component(args, kwargs, _quick_value_signature),
             )
         )
         with lock:
             if cache and last_compiled_fn is not None and quick_key == last_quick_key:
                 compiled_fn = last_compiled_fn
             else:
-                key = _input_signature(args, kwargs, dynamic=specialization_dynamic)
+                key = (
+                    _input_signature(args, kwargs, dynamic=specialization_dynamic),
+                    _guard_component(args, kwargs, _value_signature),
+                )
                 compiled_fn = cache.get(key)
             if compiled_fn is None:
                 if len(cache) >= specialization_limit:
@@ -310,13 +360,28 @@ def compile(
                     compiled_fn = model
                     cache[key] = compiled_fn
                 else:
-                    compiled_fn = _compile_region(
+                    compiled_fn, captured_gm = _compile_region(
                         model,
                         compiler_fn,
                         args,
                         kwargs,
                         fullgraph=fullgraph,
                         backend_kwargs=backend_kwargs,
+                    )
+                    promoted = _extract_shape_guard_params(captured_gm)
+                    if promoted - set(guard_param_names):
+                        # Keys gain a guard component once shape reads exist;
+                        # invalidate so every entry is stored uniformly.
+                        guard_param_names = tuple(
+                            sorted({*guard_param_names, *promoted})
+                        )
+                        cache.clear()
+                        last_compiled_fn = None
+                    key = (
+                        _input_signature(
+                            args, kwargs, dynamic=specialization_dynamic
+                        ),
+                        _guard_component(args, kwargs, _value_signature),
                     )
                     cache[key] = compiled_fn
             last_quick_key = quick_key
@@ -341,6 +406,34 @@ def compile(
     return optimized
 
 
+def _bind_sample_arguments(
+    model: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Bind example call arguments to parameter names for the tracer.
+
+    Metadata reads on placeholders (``x.shape[0] > 2``, ``range(x.ndim)``)
+    then specialize statically during capture; the compile signature already
+    keys on these fields, so no additional recompile conditions appear.
+    """
+
+    target = model.forward if _is_module_like(model) else model
+    try:
+        signature = inspect.signature(target)
+        bound = signature.bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+    except (TypeError, ValueError):
+        return None
+    return dict(bound.arguments)
+
+
+def _is_module_like(value: Any) -> bool:
+    return hasattr(value, "named_modules") and callable(
+        getattr(value, "forward", None)
+    )
+
+
 def _compile_region(
     model: Callable[..., Any],
     compiler_fn: CompilerFn,
@@ -352,8 +445,16 @@ def _compile_region(
 ) -> Callable[..., Any]:
     try:
         with _compiler_context():
-            graph_module = Tracer().trace(model)
-            dead_code_elimination(graph_module.graph)
+            graph_module = Tracer().trace(
+                model,
+                sample_inputs=_bind_sample_arguments(
+                    model, example_inputs, example_kwargs
+                ),
+            )
+            # Default capture pipeline: constant folding first, then dead
+            # code elimination.  Backends always receive a folded, linted
+            # graph; ShapeProp below additionally annotates tensor shapes.
+            PassManager([ConstFold(), DeadCodeElimination()])(graph_module)
     except GraphCaptureError:
         if fullgraph:
             raise
@@ -370,6 +471,13 @@ def _compile_region(
     bound.apply_defaults()
     backend_inputs = [bound.arguments[node.name] for node in graph_module.graph.placeholders]
 
+    # Advisory shape/value metadata for backends and visualization; never a
+    # reason to reject an otherwise compilable region.
+    try:
+        ShapeProp(backend_inputs)(graph_module)
+    except (GraphCaptureError, RuntimeError):
+        pass
+
     with _compiler_context():
         compiled = compiler_fn(graph_module, backend_inputs, **backend_kwargs)
 
@@ -377,7 +485,28 @@ def _compile_region(
         raise TypeError(
             f"compiler backend returned {type(compiled)!r}; expected a callable"
         )
-    return compiled
+    return compiled, graph_module
+
+
+_SHAPE_GUARD_ATTRS = frozenset({"shape", "len", "ndim"})
+
+
+def _extract_shape_guard_params(graph_module: GraphModule) -> frozenset[str]:
+    """Parameters whose captured metadata reads require exact-shape guards.
+
+    Branching on ``x.shape[0]`` bakes one side of the branch into the graph,
+    so a dynamic-mode cache entry may only be reused while that placeholder's
+    shape stays identical.  dtype/device/reads need no extra guards: they are
+    already part of every specialization signature.
+    """
+
+    touches = getattr(graph_module, "meta", {}).get("metadata_touches") or ()
+    names = {name for name, attr in touches if attr in _SHAPE_GUARD_ATTRS}
+    if not names or graph_module.signature is None:
+        return frozenset()
+    return frozenset(
+        name for name in graph_module.signature.parameters if name in names
+    )
 
 
 def reset() -> None:

@@ -67,6 +67,15 @@ register_experimental_backend = functools.partial(
 )
 
 
+def unregister_backend(name: str) -> None:
+    """Remove a previously registered backend (tests and tooling)."""
+
+    with _lock:
+        _backends.pop(name, None)
+        _compiler_fns.pop(name, None)
+        _backend_tags.pop(name, None)
+
+
 def _load_builtins() -> None:
     global _builtins_loaded
     with _lock:

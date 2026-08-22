@@ -1,8 +1,8 @@
 #include "Tensor.h"
 #include "Dispatcher.h"
 #include "Generator.h"
+#include "DistributionsHelper.h"
 #include "Exception.h"
-#include <random>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -19,13 +19,28 @@ namespace cpu {
 
 namespace {
 
+// Discrete sampling via inverse-CDF with a single double uniform per draw,
+// matching the consumption pattern of torch's multinomial.
+template <typename It>
+int64_t sample_discrete(Generator& gen, It begin, It end) {
+  using T = typename std::iterator_traits<It>::value_type;
+  T total = 0;
+  for (It it = begin; it != end; ++it) total += *it;
+  if (!(total > 0)) return 0;
+  uniform_real_distribution<double> uniform(0.0, 1.0);
+  double r = uniform(&gen) * static_cast<double>(total);
+  double cum = 0.0;
+  int64_t idx = 0;
+  for (It it = begin; it != end; ++it, ++idx) {
+    cum += static_cast<double>(*it);
+    if (r < cum) return idx;
+  }
+  return static_cast<int64_t>(end - begin) - 1;
+}
+
 // Discrete sampling from a row of (unnormalized) weights in [0, cols).
 int64_t sample_from_weights(const float* row, int64_t cols) {
-  double total = 0.0;
-  for (int64_t c = 0; c < cols; ++c) total += row[c];
-  if (total <= 0.0) return 0;
-  std::discrete_distribution<int64_t> dist(row, row + cols);
-  return dist(default_generator().engine());
+  return sample_discrete(default_generator(), row, row + cols);
 }
 
 } // namespace
@@ -61,13 +76,12 @@ Tensor multinomial_kernel_cpu(const Tensor& self, int64_t num_samples, bool repl
   int64_t* rdata = result.data_ptr<int64_t>();
   if (num_samples == 0) return result;
 
-  auto& gen = default_generator().engine();
+  auto& gen = default_generator();
   for (int64_t r = 0; r < rows; ++r) {
     const float* row = pdata + r * cols;
     if (replacement) {
-      std::discrete_distribution<int64_t> dist(row, row + cols);
       for (int64_t s = 0; s < num_samples; ++s) {
-        rdata[is_1d ? s : r * num_samples + s] = dist(gen);
+        rdata[is_1d ? s : r * num_samples + s] = sample_discrete(gen, row, row + cols);
       }
     } else {
       // Without replacement: repeatedly sample from the remaining mass,
@@ -75,8 +89,7 @@ Tensor multinomial_kernel_cpu(const Tensor& self, int64_t num_samples, bool repl
       std::vector<double> remaining(cols);
       for (int64_t c = 0; c < cols; ++c) remaining[c] = row[c];
       for (int64_t s = 0; s < num_samples; ++s) {
-        std::discrete_distribution<int64_t> dist(remaining.begin(), remaining.end());
-        int64_t pick = dist(gen);
+        int64_t pick = sample_discrete(gen, remaining.begin(), remaining.end());
         rdata[is_1d ? s : r * num_samples + s] = pick;
         remaining[pick] = 0.0;
       }
@@ -150,7 +163,7 @@ Tensor sample_kernel_cpu(const Tensor& logits, double temperature, int64_t top_k
   Tensor result = Tensor::empty({rows}, DType::Int64, input.device());
   const float* idata = input.data_ptr<float>();
   int64_t* rdata = result.data_ptr<int64_t>();
-  auto& gen = default_generator().engine();
+  auto& gen = default_generator();
 
   std::vector<float> probs(cols);
   std::vector<int64_t> order(cols);
@@ -197,8 +210,7 @@ Tensor sample_kernel_cpu(const Tensor& logits, double temperature, int64_t top_k
         if (!keep[c]) probs[c] = 0.f;
     }
 
-    std::discrete_distribution<int64_t> dist(probs.begin(), probs.end());
-    rdata[r] = dist(gen);
+    rdata[r] = sample_discrete(gen, probs.begin(), probs.end());
   }
   return result;
 }

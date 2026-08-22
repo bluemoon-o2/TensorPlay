@@ -351,6 +351,30 @@ src/Dispatcher.cpp.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/Dispatcher.cpp.s
 .PHONY : src/Dispatcher.cpp.s
 
+src/Einsum.o: src/Einsum.cpp.o
+.PHONY : src/Einsum.o
+
+# target to build an object file
+src/Einsum.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/Einsum.cpp.o
+.PHONY : src/Einsum.cpp.o
+
+src/Einsum.i: src/Einsum.cpp.i
+.PHONY : src/Einsum.i
+
+# target to preprocess a source file
+src/Einsum.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/Einsum.cpp.i
+.PHONY : src/Einsum.cpp.i
+
+src/Einsum.s: src/Einsum.cpp.s
+.PHONY : src/Einsum.s
+
+# target to generate assembly for a file
+src/Einsum.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/Einsum.cpp.s
+.PHONY : src/Einsum.cpp.s
+
 src/Exception.o: src/Exception.cpp.o
 .PHONY : src/Exception.o
 
@@ -663,6 +687,54 @@ src/TensorIteratorReduce.cpp.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/TensorIteratorReduce.cpp.s
 .PHONY : src/TensorIteratorReduce.cpp.s
 
+src/autocast_mode.o: src/autocast_mode.cpp.o
+.PHONY : src/autocast_mode.o
+
+# target to build an object file
+src/autocast_mode.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/autocast_mode.cpp.o
+.PHONY : src/autocast_mode.cpp.o
+
+src/autocast_mode.i: src/autocast_mode.cpp.i
+.PHONY : src/autocast_mode.i
+
+# target to preprocess a source file
+src/autocast_mode.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/autocast_mode.cpp.i
+.PHONY : src/autocast_mode.cpp.i
+
+src/autocast_mode.s: src/autocast_mode.cpp.s
+.PHONY : src/autocast_mode.s
+
+# target to generate assembly for a file
+src/autocast_mode.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/autocast_mode.cpp.s
+.PHONY : src/autocast_mode.cpp.s
+
+src/backend/cpu/AmpKernels.o: src/backend/cpu/AmpKernels.cpp.o
+.PHONY : src/backend/cpu/AmpKernels.o
+
+# target to build an object file
+src/backend/cpu/AmpKernels.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/AmpKernels.cpp.o
+.PHONY : src/backend/cpu/AmpKernels.cpp.o
+
+src/backend/cpu/AmpKernels.i: src/backend/cpu/AmpKernels.cpp.i
+.PHONY : src/backend/cpu/AmpKernels.i
+
+# target to preprocess a source file
+src/backend/cpu/AmpKernels.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/AmpKernels.cpp.i
+.PHONY : src/backend/cpu/AmpKernels.cpp.i
+
+src/backend/cpu/AmpKernels.s: src/backend/cpu/AmpKernels.cpp.s
+.PHONY : src/backend/cpu/AmpKernels.s
+
+# target to generate assembly for a file
+src/backend/cpu/AmpKernels.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/AmpKernels.cpp.s
+.PHONY : src/backend/cpu/AmpKernels.cpp.s
+
 src/backend/cpu/ArithmeticKernels.o: src/backend/cpu/ArithmeticKernels.cpp.o
 .PHONY : src/backend/cpu/ArithmeticKernels.o
 
@@ -807,6 +879,30 @@ src/backend/cpu/ForeachKernels.cpp.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/ForeachKernels.cpp.s
 .PHONY : src/backend/cpu/ForeachKernels.cpp.s
 
+src/backend/cpu/IndexingKernels.o: src/backend/cpu/IndexingKernels.cpp.o
+.PHONY : src/backend/cpu/IndexingKernels.o
+
+# target to build an object file
+src/backend/cpu/IndexingKernels.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/IndexingKernels.cpp.o
+.PHONY : src/backend/cpu/IndexingKernels.cpp.o
+
+src/backend/cpu/IndexingKernels.i: src/backend/cpu/IndexingKernels.cpp.i
+.PHONY : src/backend/cpu/IndexingKernels.i
+
+# target to preprocess a source file
+src/backend/cpu/IndexingKernels.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/IndexingKernels.cpp.i
+.PHONY : src/backend/cpu/IndexingKernels.cpp.i
+
+src/backend/cpu/IndexingKernels.s: src/backend/cpu/IndexingKernels.cpp.s
+.PHONY : src/backend/cpu/IndexingKernels.s
+
+# target to generate assembly for a file
+src/backend/cpu/IndexingKernels.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/IndexingKernels.cpp.s
+.PHONY : src/backend/cpu/IndexingKernels.cpp.s
+
 src/backend/cpu/LinearAlgebraKernels.o: src/backend/cpu/LinearAlgebraKernels.cpp.o
 .PHONY : src/backend/cpu/LinearAlgebraKernels.o
 
@@ -878,6 +974,30 @@ src/backend/cpu/LossKernels.s: src/backend/cpu/LossKernels.cpp.s
 src/backend/cpu/LossKernels.cpp.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/LossKernels.cpp.s
 .PHONY : src/backend/cpu/LossKernels.cpp.s
+
+src/backend/cpu/MiscKernels.o: src/backend/cpu/MiscKernels.cpp.o
+.PHONY : src/backend/cpu/MiscKernels.o
+
+# target to build an object file
+src/backend/cpu/MiscKernels.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/MiscKernels.cpp.o
+.PHONY : src/backend/cpu/MiscKernels.cpp.o
+
+src/backend/cpu/MiscKernels.i: src/backend/cpu/MiscKernels.cpp.i
+.PHONY : src/backend/cpu/MiscKernels.i
+
+# target to preprocess a source file
+src/backend/cpu/MiscKernels.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/MiscKernels.cpp.i
+.PHONY : src/backend/cpu/MiscKernels.cpp.i
+
+src/backend/cpu/MiscKernels.s: src/backend/cpu/MiscKernels.cpp.s
+.PHONY : src/backend/cpu/MiscKernels.s
+
+# target to generate assembly for a file
+src/backend/cpu/MiscKernels.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/MiscKernels.cpp.s
+.PHONY : src/backend/cpu/MiscKernels.cpp.s
 
 src/backend/cpu/NormalizationKernels.o: src/backend/cpu/NormalizationKernels.cpp.o
 .PHONY : src/backend/cpu/NormalizationKernels.o
@@ -1074,6 +1194,54 @@ src/backend/cpu/ReductionKernelsImpl.cpp.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10_kernel_avx2_ReductionKernelsImpl.dir/build.make p10/CMakeFiles/p10_kernel_avx2_ReductionKernelsImpl.dir/src/backend/cpu/ReductionKernelsImpl.cpp.s
 .PHONY : src/backend/cpu/ReductionKernelsImpl.cpp.s
 
+src/backend/cpu/SparseKernels.o: src/backend/cpu/SparseKernels.cpp.o
+.PHONY : src/backend/cpu/SparseKernels.o
+
+# target to build an object file
+src/backend/cpu/SparseKernels.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/SparseKernels.cpp.o
+.PHONY : src/backend/cpu/SparseKernels.cpp.o
+
+src/backend/cpu/SparseKernels.i: src/backend/cpu/SparseKernels.cpp.i
+.PHONY : src/backend/cpu/SparseKernels.i
+
+# target to preprocess a source file
+src/backend/cpu/SparseKernels.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/SparseKernels.cpp.i
+.PHONY : src/backend/cpu/SparseKernels.cpp.i
+
+src/backend/cpu/SparseKernels.s: src/backend/cpu/SparseKernels.cpp.s
+.PHONY : src/backend/cpu/SparseKernels.s
+
+# target to generate assembly for a file
+src/backend/cpu/SparseKernels.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/SparseKernels.cpp.s
+.PHONY : src/backend/cpu/SparseKernels.cpp.s
+
+src/backend/cpu/SpectralKernels.o: src/backend/cpu/SpectralKernels.cpp.o
+.PHONY : src/backend/cpu/SpectralKernels.o
+
+# target to build an object file
+src/backend/cpu/SpectralKernels.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/SpectralKernels.cpp.o
+.PHONY : src/backend/cpu/SpectralKernels.cpp.o
+
+src/backend/cpu/SpectralKernels.i: src/backend/cpu/SpectralKernels.cpp.i
+.PHONY : src/backend/cpu/SpectralKernels.i
+
+# target to preprocess a source file
+src/backend/cpu/SpectralKernels.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/SpectralKernels.cpp.i
+.PHONY : src/backend/cpu/SpectralKernels.cpp.i
+
+src/backend/cpu/SpectralKernels.s: src/backend/cpu/SpectralKernels.cpp.s
+.PHONY : src/backend/cpu/SpectralKernels.s
+
+# target to generate assembly for a file
+src/backend/cpu/SpectralKernels.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/SpectralKernels.cpp.s
+.PHONY : src/backend/cpu/SpectralKernels.cpp.s
+
 src/backend/cpu/StaxPointwiseKernels.o: src/backend/cpu/StaxPointwiseKernels.cpp.o
 .PHONY : src/backend/cpu/StaxPointwiseKernels.o
 
@@ -1100,6 +1268,78 @@ src/backend/cpu/StaxPointwiseKernels.cpp.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10_kernel_default_StaxPointwiseKernels.dir/build.make p10/CMakeFiles/p10_kernel_default_StaxPointwiseKernels.dir/src/backend/cpu/StaxPointwiseKernels.cpp.s
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10_kernel_avx2_StaxPointwiseKernels.dir/build.make p10/CMakeFiles/p10_kernel_avx2_StaxPointwiseKernels.dir/src/backend/cpu/StaxPointwiseKernels.cpp.s
 .PHONY : src/backend/cpu/StaxPointwiseKernels.cpp.s
+
+src/backend/cpu/Tier5OpsKernels.o: src/backend/cpu/Tier5OpsKernels.cpp.o
+.PHONY : src/backend/cpu/Tier5OpsKernels.o
+
+# target to build an object file
+src/backend/cpu/Tier5OpsKernels.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/Tier5OpsKernels.cpp.o
+.PHONY : src/backend/cpu/Tier5OpsKernels.cpp.o
+
+src/backend/cpu/Tier5OpsKernels.i: src/backend/cpu/Tier5OpsKernels.cpp.i
+.PHONY : src/backend/cpu/Tier5OpsKernels.i
+
+# target to preprocess a source file
+src/backend/cpu/Tier5OpsKernels.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/Tier5OpsKernels.cpp.i
+.PHONY : src/backend/cpu/Tier5OpsKernels.cpp.i
+
+src/backend/cpu/Tier5OpsKernels.s: src/backend/cpu/Tier5OpsKernels.cpp.s
+.PHONY : src/backend/cpu/Tier5OpsKernels.s
+
+# target to generate assembly for a file
+src/backend/cpu/Tier5OpsKernels.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/Tier5OpsKernels.cpp.s
+.PHONY : src/backend/cpu/Tier5OpsKernels.cpp.s
+
+src/backend/cpu/TierOpsKernels.o: src/backend/cpu/TierOpsKernels.cpp.o
+.PHONY : src/backend/cpu/TierOpsKernels.o
+
+# target to build an object file
+src/backend/cpu/TierOpsKernels.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/TierOpsKernels.cpp.o
+.PHONY : src/backend/cpu/TierOpsKernels.cpp.o
+
+src/backend/cpu/TierOpsKernels.i: src/backend/cpu/TierOpsKernels.cpp.i
+.PHONY : src/backend/cpu/TierOpsKernels.i
+
+# target to preprocess a source file
+src/backend/cpu/TierOpsKernels.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/TierOpsKernels.cpp.i
+.PHONY : src/backend/cpu/TierOpsKernels.cpp.i
+
+src/backend/cpu/TierOpsKernels.s: src/backend/cpu/TierOpsKernels.cpp.s
+.PHONY : src/backend/cpu/TierOpsKernels.s
+
+# target to generate assembly for a file
+src/backend/cpu/TierOpsKernels.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/TierOpsKernels.cpp.s
+.PHONY : src/backend/cpu/TierOpsKernels.cpp.s
+
+src/backend/cpu/UpsampleKernels.o: src/backend/cpu/UpsampleKernels.cpp.o
+.PHONY : src/backend/cpu/UpsampleKernels.o
+
+# target to build an object file
+src/backend/cpu/UpsampleKernels.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/UpsampleKernels.cpp.o
+.PHONY : src/backend/cpu/UpsampleKernels.cpp.o
+
+src/backend/cpu/UpsampleKernels.i: src/backend/cpu/UpsampleKernels.cpp.i
+.PHONY : src/backend/cpu/UpsampleKernels.i
+
+# target to preprocess a source file
+src/backend/cpu/UpsampleKernels.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/UpsampleKernels.cpp.i
+.PHONY : src/backend/cpu/UpsampleKernels.cpp.i
+
+src/backend/cpu/UpsampleKernels.s: src/backend/cpu/UpsampleKernels.cpp.s
+.PHONY : src/backend/cpu/UpsampleKernels.s
+
+# target to generate assembly for a file
+src/backend/cpu/UpsampleKernels.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/UpsampleKernels.cpp.s
+.PHONY : src/backend/cpu/UpsampleKernels.cpp.s
 
 src/backend/cpu/ViewKernels.o: src/backend/cpu/ViewKernels.cpp.o
 .PHONY : src/backend/cpu/ViewKernels.o
@@ -1148,6 +1388,30 @@ src/backend/cuda/ActivationKernels.s: src/backend/cuda/ActivationKernels.cu.s
 src/backend/cuda/ActivationKernels.cu.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/ActivationKernels.cu.s
 .PHONY : src/backend/cuda/ActivationKernels.cu.s
+
+src/backend/cuda/AmpKernels.o: src/backend/cuda/AmpKernels.cu.o
+.PHONY : src/backend/cuda/AmpKernels.o
+
+# target to build an object file
+src/backend/cuda/AmpKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/AmpKernels.cu.o
+.PHONY : src/backend/cuda/AmpKernels.cu.o
+
+src/backend/cuda/AmpKernels.i: src/backend/cuda/AmpKernels.cu.i
+.PHONY : src/backend/cuda/AmpKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/AmpKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/AmpKernels.cu.i
+.PHONY : src/backend/cuda/AmpKernels.cu.i
+
+src/backend/cuda/AmpKernels.s: src/backend/cuda/AmpKernels.cu.s
+.PHONY : src/backend/cuda/AmpKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/AmpKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/AmpKernels.cu.s
+.PHONY : src/backend/cuda/AmpKernels.cu.s
 
 src/backend/cuda/ArithmeticKernels.o: src/backend/cuda/ArithmeticKernels.cu.o
 .PHONY : src/backend/cuda/ArithmeticKernels.o
@@ -1245,6 +1509,30 @@ src/backend/cuda/CUDAContext.cpp.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/CUDAContext.cpp.s
 .PHONY : src/backend/cuda/CUDAContext.cpp.s
 
+src/backend/cuda/CUDAGenerator.o: src/backend/cuda/CUDAGenerator.cpp.o
+.PHONY : src/backend/cuda/CUDAGenerator.o
+
+# target to build an object file
+src/backend/cuda/CUDAGenerator.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/CUDAGenerator.cpp.o
+.PHONY : src/backend/cuda/CUDAGenerator.cpp.o
+
+src/backend/cuda/CUDAGenerator.i: src/backend/cuda/CUDAGenerator.cpp.i
+.PHONY : src/backend/cuda/CUDAGenerator.i
+
+# target to preprocess a source file
+src/backend/cuda/CUDAGenerator.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/CUDAGenerator.cpp.i
+.PHONY : src/backend/cuda/CUDAGenerator.cpp.i
+
+src/backend/cuda/CUDAGenerator.s: src/backend/cuda/CUDAGenerator.cpp.s
+.PHONY : src/backend/cuda/CUDAGenerator.s
+
+# target to generate assembly for a file
+src/backend/cuda/CUDAGenerator.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/CUDAGenerator.cpp.s
+.PHONY : src/backend/cuda/CUDAGenerator.cpp.s
+
 src/backend/cuda/CUDARuntime.o: src/backend/cuda/CUDARuntime.cpp.o
 .PHONY : src/backend/cuda/CUDARuntime.o
 
@@ -1341,6 +1629,30 @@ src/backend/cuda/CopyKernels.cu.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/CopyKernels.cu.s
 .PHONY : src/backend/cuda/CopyKernels.cu.s
 
+src/backend/cuda/CudaBlasGemm.o: src/backend/cuda/CudaBlasGemm.cpp.o
+.PHONY : src/backend/cuda/CudaBlasGemm.o
+
+# target to build an object file
+src/backend/cuda/CudaBlasGemm.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/CudaBlasGemm.cpp.o
+.PHONY : src/backend/cuda/CudaBlasGemm.cpp.o
+
+src/backend/cuda/CudaBlasGemm.i: src/backend/cuda/CudaBlasGemm.cpp.i
+.PHONY : src/backend/cuda/CudaBlasGemm.i
+
+# target to preprocess a source file
+src/backend/cuda/CudaBlasGemm.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/CudaBlasGemm.cpp.i
+.PHONY : src/backend/cuda/CudaBlasGemm.cpp.i
+
+src/backend/cuda/CudaBlasGemm.s: src/backend/cuda/CudaBlasGemm.cpp.s
+.PHONY : src/backend/cuda/CudaBlasGemm.s
+
+# target to generate assembly for a file
+src/backend/cuda/CudaBlasGemm.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/CudaBlasGemm.cpp.s
+.PHONY : src/backend/cuda/CudaBlasGemm.cpp.s
+
 src/backend/cuda/EmbeddingKernels.o: src/backend/cuda/EmbeddingKernels.cu.o
 .PHONY : src/backend/cuda/EmbeddingKernels.o
 
@@ -1389,6 +1701,30 @@ src/backend/cuda/FactoryKernels.cu.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/FactoryKernels.cu.s
 .PHONY : src/backend/cuda/FactoryKernels.cu.s
 
+src/backend/cuda/IndexingKernels.o: src/backend/cuda/IndexingKernels.cu.o
+.PHONY : src/backend/cuda/IndexingKernels.o
+
+# target to build an object file
+src/backend/cuda/IndexingKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/IndexingKernels.cu.o
+.PHONY : src/backend/cuda/IndexingKernels.cu.o
+
+src/backend/cuda/IndexingKernels.i: src/backend/cuda/IndexingKernels.cu.i
+.PHONY : src/backend/cuda/IndexingKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/IndexingKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/IndexingKernels.cu.i
+.PHONY : src/backend/cuda/IndexingKernels.cu.i
+
+src/backend/cuda/IndexingKernels.s: src/backend/cuda/IndexingKernels.cu.s
+.PHONY : src/backend/cuda/IndexingKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/IndexingKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/IndexingKernels.cu.s
+.PHONY : src/backend/cuda/IndexingKernels.cu.s
+
 src/backend/cuda/LinearAlgebraKernels.o: src/backend/cuda/LinearAlgebraKernels.cu.o
 .PHONY : src/backend/cuda/LinearAlgebraKernels.o
 
@@ -1436,6 +1772,30 @@ src/backend/cuda/LossKernels.s: src/backend/cuda/LossKernels.cu.s
 src/backend/cuda/LossKernels.cu.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/LossKernels.cu.s
 .PHONY : src/backend/cuda/LossKernels.cu.s
+
+src/backend/cuda/MiscKernels.o: src/backend/cuda/MiscKernels.cu.o
+.PHONY : src/backend/cuda/MiscKernels.o
+
+# target to build an object file
+src/backend/cuda/MiscKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/MiscKernels.cu.o
+.PHONY : src/backend/cuda/MiscKernels.cu.o
+
+src/backend/cuda/MiscKernels.i: src/backend/cuda/MiscKernels.cu.i
+.PHONY : src/backend/cuda/MiscKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/MiscKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/MiscKernels.cu.i
+.PHONY : src/backend/cuda/MiscKernels.cu.i
+
+src/backend/cuda/MiscKernels.s: src/backend/cuda/MiscKernels.cu.s
+.PHONY : src/backend/cuda/MiscKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/MiscKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/MiscKernels.cu.s
+.PHONY : src/backend/cuda/MiscKernels.cu.s
 
 src/backend/cuda/NCCLContext.o: src/backend/cuda/NCCLContext.cpp.o
 .PHONY : src/backend/cuda/NCCLContext.o
@@ -1508,6 +1868,30 @@ src/backend/cuda/OptimizerKernels.s: src/backend/cuda/OptimizerKernels.cu.s
 src/backend/cuda/OptimizerKernels.cu.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/OptimizerKernels.cu.s
 .PHONY : src/backend/cuda/OptimizerKernels.cu.s
+
+src/backend/cuda/PadKernels.o: src/backend/cuda/PadKernels.cu.o
+.PHONY : src/backend/cuda/PadKernels.o
+
+# target to build an object file
+src/backend/cuda/PadKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/PadKernels.cu.o
+.PHONY : src/backend/cuda/PadKernels.cu.o
+
+src/backend/cuda/PadKernels.i: src/backend/cuda/PadKernels.cu.i
+.PHONY : src/backend/cuda/PadKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/PadKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/PadKernels.cu.i
+.PHONY : src/backend/cuda/PadKernels.cu.i
+
+src/backend/cuda/PadKernels.s: src/backend/cuda/PadKernels.cu.s
+.PHONY : src/backend/cuda/PadKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/PadKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/PadKernels.cu.s
+.PHONY : src/backend/cuda/PadKernels.cu.s
 
 src/backend/cuda/PointwiseKernels.o: src/backend/cuda/PointwiseKernels.cu.o
 .PHONY : src/backend/cuda/PointwiseKernels.o
@@ -1629,6 +2013,174 @@ src/backend/cuda/SamplingKernels.cu.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/SamplingKernels.cu.s
 .PHONY : src/backend/cuda/SamplingKernels.cu.s
 
+src/backend/cuda/SparseKernels.o: src/backend/cuda/SparseKernels.cu.o
+.PHONY : src/backend/cuda/SparseKernels.o
+
+# target to build an object file
+src/backend/cuda/SparseKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/SparseKernels.cu.o
+.PHONY : src/backend/cuda/SparseKernels.cu.o
+
+src/backend/cuda/SparseKernels.i: src/backend/cuda/SparseKernels.cu.i
+.PHONY : src/backend/cuda/SparseKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/SparseKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/SparseKernels.cu.i
+.PHONY : src/backend/cuda/SparseKernels.cu.i
+
+src/backend/cuda/SparseKernels.s: src/backend/cuda/SparseKernels.cu.s
+.PHONY : src/backend/cuda/SparseKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/SparseKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/SparseKernels.cu.s
+.PHONY : src/backend/cuda/SparseKernels.cu.s
+
+src/backend/cuda/SpectralKernels.o: src/backend/cuda/SpectralKernels.cu.o
+.PHONY : src/backend/cuda/SpectralKernels.o
+
+# target to build an object file
+src/backend/cuda/SpectralKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/SpectralKernels.cu.o
+.PHONY : src/backend/cuda/SpectralKernels.cu.o
+
+src/backend/cuda/SpectralKernels.i: src/backend/cuda/SpectralKernels.cu.i
+.PHONY : src/backend/cuda/SpectralKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/SpectralKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/SpectralKernels.cu.i
+.PHONY : src/backend/cuda/SpectralKernels.cu.i
+
+src/backend/cuda/SpectralKernels.s: src/backend/cuda/SpectralKernels.cu.s
+.PHONY : src/backend/cuda/SpectralKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/SpectralKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/SpectralKernels.cu.s
+.PHONY : src/backend/cuda/SpectralKernels.cu.s
+
+src/backend/cuda/Tier5LossesKernels.o: src/backend/cuda/Tier5LossesKernels.cu.o
+.PHONY : src/backend/cuda/Tier5LossesKernels.o
+
+# target to build an object file
+src/backend/cuda/Tier5LossesKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/Tier5LossesKernels.cu.o
+.PHONY : src/backend/cuda/Tier5LossesKernels.cu.o
+
+src/backend/cuda/Tier5LossesKernels.i: src/backend/cuda/Tier5LossesKernels.cu.i
+.PHONY : src/backend/cuda/Tier5LossesKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/Tier5LossesKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/Tier5LossesKernels.cu.i
+.PHONY : src/backend/cuda/Tier5LossesKernels.cu.i
+
+src/backend/cuda/Tier5LossesKernels.s: src/backend/cuda/Tier5LossesKernels.cu.s
+.PHONY : src/backend/cuda/Tier5LossesKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/Tier5LossesKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/Tier5LossesKernels.cu.s
+.PHONY : src/backend/cuda/Tier5LossesKernels.cu.s
+
+src/backend/cuda/Tier5OpsKernels.o: src/backend/cuda/Tier5OpsKernels.cu.o
+.PHONY : src/backend/cuda/Tier5OpsKernels.o
+
+# target to build an object file
+src/backend/cuda/Tier5OpsKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/Tier5OpsKernels.cu.o
+.PHONY : src/backend/cuda/Tier5OpsKernels.cu.o
+
+src/backend/cuda/Tier5OpsKernels.i: src/backend/cuda/Tier5OpsKernels.cu.i
+.PHONY : src/backend/cuda/Tier5OpsKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/Tier5OpsKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/Tier5OpsKernels.cu.i
+.PHONY : src/backend/cuda/Tier5OpsKernels.cu.i
+
+src/backend/cuda/Tier5OpsKernels.s: src/backend/cuda/Tier5OpsKernels.cu.s
+.PHONY : src/backend/cuda/Tier5OpsKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/Tier5OpsKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/Tier5OpsKernels.cu.s
+.PHONY : src/backend/cuda/Tier5OpsKernels.cu.s
+
+src/backend/cuda/TierOpsKernels.o: src/backend/cuda/TierOpsKernels.cu.o
+.PHONY : src/backend/cuda/TierOpsKernels.o
+
+# target to build an object file
+src/backend/cuda/TierOpsKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/TierOpsKernels.cu.o
+.PHONY : src/backend/cuda/TierOpsKernels.cu.o
+
+src/backend/cuda/TierOpsKernels.i: src/backend/cuda/TierOpsKernels.cu.i
+.PHONY : src/backend/cuda/TierOpsKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/TierOpsKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/TierOpsKernels.cu.i
+.PHONY : src/backend/cuda/TierOpsKernels.cu.i
+
+src/backend/cuda/TierOpsKernels.s: src/backend/cuda/TierOpsKernels.cu.s
+.PHONY : src/backend/cuda/TierOpsKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/TierOpsKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/TierOpsKernels.cu.s
+.PHONY : src/backend/cuda/TierOpsKernels.cu.s
+
+src/backend/cuda/TierOpsReduceKernels.o: src/backend/cuda/TierOpsReduceKernels.cu.o
+.PHONY : src/backend/cuda/TierOpsReduceKernels.o
+
+# target to build an object file
+src/backend/cuda/TierOpsReduceKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/TierOpsReduceKernels.cu.o
+.PHONY : src/backend/cuda/TierOpsReduceKernels.cu.o
+
+src/backend/cuda/TierOpsReduceKernels.i: src/backend/cuda/TierOpsReduceKernels.cu.i
+.PHONY : src/backend/cuda/TierOpsReduceKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/TierOpsReduceKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/TierOpsReduceKernels.cu.i
+.PHONY : src/backend/cuda/TierOpsReduceKernels.cu.i
+
+src/backend/cuda/TierOpsReduceKernels.s: src/backend/cuda/TierOpsReduceKernels.cu.s
+.PHONY : src/backend/cuda/TierOpsReduceKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/TierOpsReduceKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/TierOpsReduceKernels.cu.s
+.PHONY : src/backend/cuda/TierOpsReduceKernels.cu.s
+
+src/backend/cuda/UpsampleKernels.o: src/backend/cuda/UpsampleKernels.cu.o
+.PHONY : src/backend/cuda/UpsampleKernels.o
+
+# target to build an object file
+src/backend/cuda/UpsampleKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/UpsampleKernels.cu.o
+.PHONY : src/backend/cuda/UpsampleKernels.cu.o
+
+src/backend/cuda/UpsampleKernels.i: src/backend/cuda/UpsampleKernels.cu.i
+.PHONY : src/backend/cuda/UpsampleKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/UpsampleKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/UpsampleKernels.cu.i
+.PHONY : src/backend/cuda/UpsampleKernels.cu.i
+
+src/backend/cuda/UpsampleKernels.s: src/backend/cuda/UpsampleKernels.cu.s
+.PHONY : src/backend/cuda/UpsampleKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/UpsampleKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/UpsampleKernels.cu.s
+.PHONY : src/backend/cuda/UpsampleKernels.cu.s
+
 src/backend/cuda/ViewKernels.o: src/backend/cuda/ViewKernels.cu.o
 .PHONY : src/backend/cuda/ViewKernels.o
 
@@ -1685,6 +2237,9 @@ help:
 	@echo "... src/Dispatcher.o"
 	@echo "... src/Dispatcher.i"
 	@echo "... src/Dispatcher.s"
+	@echo "... src/Einsum.o"
+	@echo "... src/Einsum.i"
+	@echo "... src/Einsum.s"
 	@echo "... src/Exception.o"
 	@echo "... src/Exception.i"
 	@echo "... src/Exception.s"
@@ -1724,6 +2279,12 @@ help:
 	@echo "... src/TensorIteratorReduce.o"
 	@echo "... src/TensorIteratorReduce.i"
 	@echo "... src/TensorIteratorReduce.s"
+	@echo "... src/autocast_mode.o"
+	@echo "... src/autocast_mode.i"
+	@echo "... src/autocast_mode.s"
+	@echo "... src/backend/cpu/AmpKernels.o"
+	@echo "... src/backend/cpu/AmpKernels.i"
+	@echo "... src/backend/cpu/AmpKernels.s"
 	@echo "... src/backend/cpu/ArithmeticKernels.o"
 	@echo "... src/backend/cpu/ArithmeticKernels.i"
 	@echo "... src/backend/cpu/ArithmeticKernels.s"
@@ -1742,6 +2303,9 @@ help:
 	@echo "... src/backend/cpu/ForeachKernels.o"
 	@echo "... src/backend/cpu/ForeachKernels.i"
 	@echo "... src/backend/cpu/ForeachKernels.s"
+	@echo "... src/backend/cpu/IndexingKernels.o"
+	@echo "... src/backend/cpu/IndexingKernels.i"
+	@echo "... src/backend/cpu/IndexingKernels.s"
 	@echo "... src/backend/cpu/LinearAlgebraKernels.o"
 	@echo "... src/backend/cpu/LinearAlgebraKernels.i"
 	@echo "... src/backend/cpu/LinearAlgebraKernels.s"
@@ -1751,6 +2315,9 @@ help:
 	@echo "... src/backend/cpu/LossKernels.o"
 	@echo "... src/backend/cpu/LossKernels.i"
 	@echo "... src/backend/cpu/LossKernels.s"
+	@echo "... src/backend/cpu/MiscKernels.o"
+	@echo "... src/backend/cpu/MiscKernels.i"
+	@echo "... src/backend/cpu/MiscKernels.s"
 	@echo "... src/backend/cpu/NormalizationKernels.o"
 	@echo "... src/backend/cpu/NormalizationKernels.i"
 	@echo "... src/backend/cpu/NormalizationKernels.s"
@@ -1775,15 +2342,33 @@ help:
 	@echo "... src/backend/cpu/ReductionKernelsImpl.o"
 	@echo "... src/backend/cpu/ReductionKernelsImpl.i"
 	@echo "... src/backend/cpu/ReductionKernelsImpl.s"
+	@echo "... src/backend/cpu/SparseKernels.o"
+	@echo "... src/backend/cpu/SparseKernels.i"
+	@echo "... src/backend/cpu/SparseKernels.s"
+	@echo "... src/backend/cpu/SpectralKernels.o"
+	@echo "... src/backend/cpu/SpectralKernels.i"
+	@echo "... src/backend/cpu/SpectralKernels.s"
 	@echo "... src/backend/cpu/StaxPointwiseKernels.o"
 	@echo "... src/backend/cpu/StaxPointwiseKernels.i"
 	@echo "... src/backend/cpu/StaxPointwiseKernels.s"
+	@echo "... src/backend/cpu/Tier5OpsKernels.o"
+	@echo "... src/backend/cpu/Tier5OpsKernels.i"
+	@echo "... src/backend/cpu/Tier5OpsKernels.s"
+	@echo "... src/backend/cpu/TierOpsKernels.o"
+	@echo "... src/backend/cpu/TierOpsKernels.i"
+	@echo "... src/backend/cpu/TierOpsKernels.s"
+	@echo "... src/backend/cpu/UpsampleKernels.o"
+	@echo "... src/backend/cpu/UpsampleKernels.i"
+	@echo "... src/backend/cpu/UpsampleKernels.s"
 	@echo "... src/backend/cpu/ViewKernels.o"
 	@echo "... src/backend/cpu/ViewKernels.i"
 	@echo "... src/backend/cpu/ViewKernels.s"
 	@echo "... src/backend/cuda/ActivationKernels.o"
 	@echo "... src/backend/cuda/ActivationKernels.i"
 	@echo "... src/backend/cuda/ActivationKernels.s"
+	@echo "... src/backend/cuda/AmpKernels.o"
+	@echo "... src/backend/cuda/AmpKernels.i"
+	@echo "... src/backend/cuda/AmpKernels.s"
 	@echo "... src/backend/cuda/ArithmeticKernels.o"
 	@echo "... src/backend/cuda/ArithmeticKernels.i"
 	@echo "... src/backend/cuda/ArithmeticKernels.s"
@@ -1796,6 +2381,9 @@ help:
 	@echo "... src/backend/cuda/CUDAContext.o"
 	@echo "... src/backend/cuda/CUDAContext.i"
 	@echo "... src/backend/cuda/CUDAContext.s"
+	@echo "... src/backend/cuda/CUDAGenerator.o"
+	@echo "... src/backend/cuda/CUDAGenerator.i"
+	@echo "... src/backend/cuda/CUDAGenerator.s"
 	@echo "... src/backend/cuda/CUDARuntime.o"
 	@echo "... src/backend/cuda/CUDARuntime.i"
 	@echo "... src/backend/cuda/CUDARuntime.s"
@@ -1808,18 +2396,27 @@ help:
 	@echo "... src/backend/cuda/CopyKernels.o"
 	@echo "... src/backend/cuda/CopyKernels.i"
 	@echo "... src/backend/cuda/CopyKernels.s"
+	@echo "... src/backend/cuda/CudaBlasGemm.o"
+	@echo "... src/backend/cuda/CudaBlasGemm.i"
+	@echo "... src/backend/cuda/CudaBlasGemm.s"
 	@echo "... src/backend/cuda/EmbeddingKernels.o"
 	@echo "... src/backend/cuda/EmbeddingKernels.i"
 	@echo "... src/backend/cuda/EmbeddingKernels.s"
 	@echo "... src/backend/cuda/FactoryKernels.o"
 	@echo "... src/backend/cuda/FactoryKernels.i"
 	@echo "... src/backend/cuda/FactoryKernels.s"
+	@echo "... src/backend/cuda/IndexingKernels.o"
+	@echo "... src/backend/cuda/IndexingKernels.i"
+	@echo "... src/backend/cuda/IndexingKernels.s"
 	@echo "... src/backend/cuda/LinearAlgebraKernels.o"
 	@echo "... src/backend/cuda/LinearAlgebraKernels.i"
 	@echo "... src/backend/cuda/LinearAlgebraKernels.s"
 	@echo "... src/backend/cuda/LossKernels.o"
 	@echo "... src/backend/cuda/LossKernels.i"
 	@echo "... src/backend/cuda/LossKernels.s"
+	@echo "... src/backend/cuda/MiscKernels.o"
+	@echo "... src/backend/cuda/MiscKernels.i"
+	@echo "... src/backend/cuda/MiscKernels.s"
 	@echo "... src/backend/cuda/NCCLContext.o"
 	@echo "... src/backend/cuda/NCCLContext.i"
 	@echo "... src/backend/cuda/NCCLContext.s"
@@ -1829,6 +2426,9 @@ help:
 	@echo "... src/backend/cuda/OptimizerKernels.o"
 	@echo "... src/backend/cuda/OptimizerKernels.i"
 	@echo "... src/backend/cuda/OptimizerKernels.s"
+	@echo "... src/backend/cuda/PadKernels.o"
+	@echo "... src/backend/cuda/PadKernels.i"
+	@echo "... src/backend/cuda/PadKernels.s"
 	@echo "... src/backend/cuda/PointwiseKernels.o"
 	@echo "... src/backend/cuda/PointwiseKernels.i"
 	@echo "... src/backend/cuda/PointwiseKernels.s"
@@ -1844,6 +2444,27 @@ help:
 	@echo "... src/backend/cuda/SamplingKernels.o"
 	@echo "... src/backend/cuda/SamplingKernels.i"
 	@echo "... src/backend/cuda/SamplingKernels.s"
+	@echo "... src/backend/cuda/SparseKernels.o"
+	@echo "... src/backend/cuda/SparseKernels.i"
+	@echo "... src/backend/cuda/SparseKernels.s"
+	@echo "... src/backend/cuda/SpectralKernels.o"
+	@echo "... src/backend/cuda/SpectralKernels.i"
+	@echo "... src/backend/cuda/SpectralKernels.s"
+	@echo "... src/backend/cuda/Tier5LossesKernels.o"
+	@echo "... src/backend/cuda/Tier5LossesKernels.i"
+	@echo "... src/backend/cuda/Tier5LossesKernels.s"
+	@echo "... src/backend/cuda/Tier5OpsKernels.o"
+	@echo "... src/backend/cuda/Tier5OpsKernels.i"
+	@echo "... src/backend/cuda/Tier5OpsKernels.s"
+	@echo "... src/backend/cuda/TierOpsKernels.o"
+	@echo "... src/backend/cuda/TierOpsKernels.i"
+	@echo "... src/backend/cuda/TierOpsKernels.s"
+	@echo "... src/backend/cuda/TierOpsReduceKernels.o"
+	@echo "... src/backend/cuda/TierOpsReduceKernels.i"
+	@echo "... src/backend/cuda/TierOpsReduceKernels.s"
+	@echo "... src/backend/cuda/UpsampleKernels.o"
+	@echo "... src/backend/cuda/UpsampleKernels.i"
+	@echo "... src/backend/cuda/UpsampleKernels.s"
 	@echo "... src/backend/cuda/ViewKernels.o"
 	@echo "... src/backend/cuda/ViewKernels.i"
 	@echo "... src/backend/cuda/ViewKernels.s"

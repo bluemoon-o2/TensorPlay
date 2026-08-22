@@ -4,6 +4,9 @@
 #include "/home/bluemoon/projects/TensorPlay/tpx/src/Autograd.cpp"
 
 /* NOLINTNEXTLINE(bugprone-suspicious-include) */
+#include "/home/bluemoon/projects/TensorPlay/tpx/src/autocast_mode.cpp"
+
+/* NOLINTNEXTLINE(bugprone-suspicious-include) */
 #include "/home/bluemoon/projects/TensorPlay/tpx/src/Engine.cpp"
 
 /* NOLINTNEXTLINE(bugprone-suspicious-include) */
@@ -11,4 +14,7 @@
 
 /* NOLINTNEXTLINE(bugprone-suspicious-include) */
 #include "/home/bluemoon/projects/TensorPlay/build/generated/tensorplay/ops/TPXAutogradRegistration.cpp"
+
+/* NOLINTNEXTLINE(bugprone-suspicious-include) */
+#include "/home/bluemoon/projects/TensorPlay/build/generated/tensorplay/ops/AutocastGenerated.cpp"
 

@@ -9,7 +9,9 @@ backend such as Inductor.
 from __future__ import annotations
 
 import inspect
+import keyword
 import operator
+import re
 import types
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
@@ -94,6 +96,49 @@ def _iter_nodes(value: Any) -> Iterable["Node"]:
         yield from _iter_nodes(value.step)
 
 
+def _snake_case(name: str) -> str:
+    """Port of torch.fx.Graph._snake_case for semantic node naming."""
+
+    s1 = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", name)
+    return re.sub("([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+
+
+def _sanitize_name(name: str) -> str:
+    """Reduce a candidate name to a valid Python identifier."""
+
+    sanitized = re.sub(r"[^0-9a-zA-Z_]", "_", name)
+    if not sanitized or sanitized[0].isdigit() or keyword.iskeyword(sanitized):
+        sanitized = f"_{sanitized}"
+    return sanitized
+
+
+def _target_to_str(target: Any) -> str:
+    """Derive a readable base name from a node target (fx-style)."""
+
+    if isinstance(target, str):
+        return _snake_case(target.split(".")[-1])
+    if callable(target):
+        atom = getattr(target, "__name__", None) or type(target).__name__
+        return _snake_case(str(atom))
+    return type(target).__name__
+
+
+def _format_target(target: Any) -> str:
+    """Human-readable rendering of a node target for visualization."""
+
+    name = getattr(target, "__name__", None)
+    if isinstance(target, str):
+        return target
+    if callable(target) and name:
+        module = getattr(target, "__module__", "") or ""
+        if module and module != "builtins":
+            return f"{module}.{name}"
+        return str(name)
+    if name:
+        return str(name)
+    return repr(target)
+
+
 class Node:
     """A single operation in the canonical compiler graph."""
 
@@ -129,13 +174,61 @@ class Node:
     def __repr__(self) -> str:
         return f"{self.name} = {self.op}[{self.target!r}]"
 
+    def replace_all_uses_with(self, replace_with: "Node") -> int:
+        """Rewrite every consumer of this node to consume ``replace_with``.
+
+        Returns the number of uses rewritten.  The replacement must already
+        be topologically ordered before this node, otherwise the graph would
+        become invalid.
+        """
+
+        if replace_with is self:
+            raise GraphCaptureError("cannot replace uses of a node with itself")
+        positions = {node: index for index, node in enumerate(self.graph.nodes)}
+        users = list(self.users)
+        for user in users:
+            if positions[replace_with] > positions[user]:
+                raise GraphCaptureError(
+                    f"cannot use {replace_with.name} to replace {self.name} "
+                    f"in {user.name}: it appears later in the graph"
+                )
+
+        def substitute(value: Any) -> Any:
+            return replace_with if value is self else value
+
+        for user in users:
+            user.args = _map_arg(user.args, substitute)
+            user.kwargs = _map_arg(user.kwargs, substitute)
+            self.users.discard(user)
+            replace_with.users.add(user)
+        return len(users)
+
+    def erase_node(self) -> None:
+        """Remove this node from its graph.
+
+        The node must have no remaining users; call
+        :meth:`replace_all_uses_with` or dead code elimination first.
+        Its name becomes reusable once no live node holds it.
+        """
+
+        if self.graph is None:
+            raise GraphCaptureError(f"{self.name} has already been erased")
+        if self.users:
+            raise GraphCaptureError(
+                f"cannot erase {self.name} because it still has "
+                f"{len(self.users)} user(s); run dead code elimination first"
+            )
+        for input_node in (*_iter_nodes(self.args), *_iter_nodes(self.kwargs)):
+            input_node.users.discard(self)
+        self.graph.nodes.remove(self)
+        self.graph = None
+
 
 class Graph:
     """A mutable, topologically ordered operation graph."""
 
     def __init__(self) -> None:
         self.nodes: list[Node] = []
-        self._counter = 0
 
     @property
     def placeholders(self) -> list[Node]:
@@ -144,6 +237,35 @@ class Graph:
     @property
     def outputs(self) -> list[Node]:
         return [node for node in self.nodes if node.op == "output"]
+
+    @property
+    def output_node(self) -> Node:
+        """The single output node of this graph.
+
+        :meth:`output` enforces the single-output invariant by replacing any
+        previous output node, mirroring torch.fx.
+        """
+
+        outputs = self.outputs
+        if not outputs:
+            raise GraphCaptureError("graph has no output node")
+        return outputs[0]
+
+    def _create_unique_name(self, candidate: str) -> str:
+        """Uniquify ``candidate`` against the currently live nodes.
+
+        Names of erased nodes may be reused safely: uniqueness only matters
+        between live nodes (generated executors emit one variable per node).
+        """
+
+        base = _sanitize_name(candidate)
+        taken = {node.name for node in self.nodes}
+        name = base
+        suffix = 0
+        while name in taken:
+            name = f"{base}_{suffix}"
+            suffix += 1
+        return name
 
     def create_node(
         self,
@@ -161,8 +283,9 @@ class Graph:
 
         normalized_args = _map_arg(args, normalize)
         normalized_kwargs = _map_arg(kwargs or {}, normalize)
-        node_name = name or f"_{self._counter}"
-        self._counter += 1
+        node_name = self._create_unique_name(
+            name if name is not None else _target_to_str(target)
+        )
         node = Node(
             self,
             node_name,
@@ -184,8 +307,30 @@ class Graph:
             node.meta["default"] = default
         return node
 
+    def get_attr(self, qualified_name: str) -> Node:
+        return self.create_node("get_attr", qualified_name)
+
+    def call_module(self, qualified_name: str, args: Tuple[Any, ...], kwargs: Optional[Dict[str, Any]] = None) -> Node:
+        return self.create_node("call_module", qualified_name, args, kwargs)
+
+    def call_function(self, target: Callable[..., Any], args: Tuple[Any, ...], kwargs: Optional[Dict[str, Any]] = None) -> Node:
+        return self.create_node("call_function", target, args, kwargs)
+
+    def call_method(self, method_name: str, args: Tuple[Any, ...], kwargs: Optional[Dict[str, Any]] = None) -> Node:
+        return self.create_node("call_method", method_name, args, kwargs)
+
     def output(self, value: Any) -> Node:
-        return self.create_node("output", "output", (value,))
+        """Declare the graph result.
+
+        The graph keeps exactly one output node: creating a new one replaces
+        the previous output instead of appending a second node.  This keeps
+        the interpreter and the generated executor in agreement about which
+        value the graph returns.
+        """
+
+        for old_output in list(self.outputs):
+            old_output.erase_node()
+        return self.create_node("output", "output", (value,), name="output")
 
     def lint(self) -> None:
         positions = {node: index for index, node in enumerate(self.nodes)}
@@ -195,6 +340,129 @@ class Graph:
                     raise GraphCaptureError(
                         f"Graph is not topologically ordered: {input_node} -> {node}"
                     )
+                if input_node.graph is not self:
+                    raise GraphCaptureError(
+                        f"Node {node.name} references {input_node.name} "
+                        "from another graph"
+                    )
+        if len(self.outputs) > 1:
+            raise GraphCaptureError(
+                f"Graph must have a single output node; found {len(self.outputs)}"
+            )
+
+    def eliminate_dead_code(self) -> bool:
+        """Remove pure nodes that cannot reach the graph output."""
+
+        return dead_code_elimination(self)
+
+    def to_dot(
+        self,
+        *,
+        graph_name: str = "TensorPlayGraph",
+        rankdir: str = "TB",
+        show_shapes: bool = True,
+    ) -> str:
+        """Render this graph as a Graphviz DOT source string.
+
+        The output is plain text and requires no third-party packages; feed it
+        to ``dot -Tpng`` or :meth:`draw` to produce an image.  Styling follows
+        the conventions popularized by torchviz/torchview: inputs are blue
+        ellipses, operations yellow boxes, submodule calls green components,
+        attributes orange diamonds, and the result a pale-green ellipse.
+        """
+
+        styles: Dict[str, Tuple[str, str]] = {
+            "placeholder": ("ellipse", "#aec7e8"),
+            "get_attr": ("diamond", "#ffbb78"),
+            "call_function": ("box", "#ffffb3"),
+            "call_method": ("box", "#ffffb3"),
+            "call_module": ("component", "#98df8a"),
+            "output": ("ellipse", "#c7e9c0"),
+        }
+
+        def esc(text: Any) -> str:
+            return (
+                str(text)
+                .replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\n", "\\n")
+            )
+
+        lines = [
+            "digraph {graph_name} {{".format(graph_name=esc(graph_name)),
+            f"    rankdir={rankdir};",
+            '    graph [fontname="monospace"];',
+            '    node [fontname="monospace" fontsize=10 style=filled];',
+            '    edge [fontsize=9];',
+        ]
+        for node in self.nodes:
+            shape, color = styles.get(node.op, ("box", "#d9d9d9"))
+            attrs = [f"label=\"{esc(node.name)}\\n{esc(node.op)}[{esc(_format_target(node.target))}]\""]
+            if show_shapes and node.meta.get("tensor_shape") is not None:
+                attrs.append(f"tooltip=\"{esc(node.meta['tensor_shape'])}\"")
+            lines.append(
+                f'    "{esc(node.name)}" [shape={shape}, fillcolor="{color}", {", ".join(attrs)}];'
+            )
+        for node in self.nodes:
+            for input_node in _iter_nodes(node.args):
+                lines.append(f'    "{esc(input_node.name)}" -> "{esc(node.name)}";')
+            for key, value in node.kwargs.items():
+                for input_node in _iter_nodes(value):
+                    lines.append(
+                        f'    "{esc(input_node.name)}" -> "{esc(node.name)}" '
+                        f'[label="{esc(key)}"];'
+                    )
+        lines.append("}")
+        return "\n".join(lines)
+
+    def draw(
+        self,
+        filename: str,
+        format: Optional[str] = None,
+        *,
+        rankdir: str = "TB",
+    ) -> str:
+        """Export this graph as an image (PNG/SVG/PDF) via Graphviz.
+
+        Writes the DOT source next to ``filename`` and, when the ``dot``
+        binary from Graphviz is available, renders it into an image file.
+        Without Graphviz installed only the ``.gv`` source is produced so the
+        caller can render it elsewhere (for example on
+        https://dreampuf.github.io/GraphvizOnline).
+
+        Args:
+            filename: Output image path, e.g. ``"model.png"``.
+            format: Image format inferred from the filename suffix by
+                default (``png``, ``svg``, ``pdf``, ...).
+
+        Returns:
+            Path of the rendered image, or of the emitted ``.gv`` source when
+            Graphviz is unavailable.
+        """
+
+        import shutil
+        import subprocess
+        import os
+        from pathlib import Path
+
+        stem = Path(filename).with_suffix("")
+        fmt = format or Path(filename).suffix.lstrip(".") or "png"
+        gv_path = Path(str(stem) + ".gv")
+        gv_path.write_text(self.to_dot(rankdir=rankdir))
+
+        dot_binary = shutil.which("dot")
+        if dot_binary is None:
+            raise RuntimeError(
+                f"Graphviz executable 'dot' not found; wrote DOT source to "
+                f"{gv_path}. Install graphviz (https://graphviz.org/download/) "
+                f"and rerun draw(), or render {gv_path} with any DOT viewer."
+            )
+        output_path = f"{stem}.{fmt}"
+        subprocess.run(
+            [dot_binary, "-T" + fmt, str(gv_path), "-o", output_path],
+            check=True,
+        )
+        return output_path
 
     def python_code(self) -> str:
         lines = ["def forward(*args, **kwargs):"]
@@ -296,11 +564,27 @@ class Proxy:
     def __getitem__(self, key: Any) -> "Proxy":
         return self.tracer.create_proxy("call_function", operator.getitem, (self, key), {})
 
-    def _property(self, name: str) -> "Proxy":
+    def _sample(self) -> Any:
+        """Example value bound to this placeholder, if the tracer got one."""
+
+        return self.tracer._samples.get(self.node.name)
+
+    def _property(self, name: str) -> Any:
+        """Resolve tensor metadata: concretely when a sample is available.
+
+        Metadata (shape/dtype/device/...) is part of the compile signature,
+        so specializing on it adds no new recompile conditions; data reads
+        stay symbolic or raise.
+        """
+
+        sample = self._sample()
+        self.tracer.metadata_touches.add((self.node.name, name))
+        if sample is not None:
+            return getattr(sample, name)
         return self.tracer.create_proxy("call_function", getattr, (self, name), {})
 
     @property
-    def shape(self) -> "Proxy":
+    def shape(self) -> Any:
         return self._property("shape")
 
     @property
@@ -351,7 +635,24 @@ class Proxy:
         )
 
     def __len__(self) -> int:
-        raise GraphCaptureError("len(Proxy) is not supported during graph capture")
+        sample = self._sample()
+        self.tracer.metadata_touches.add((self.node.name, "len"))
+        if sample is not None:
+            if hasattr(sample, "__len__"):
+                return len(sample)
+            shape = getattr(sample, "shape", None)
+            if callable(shape):
+                shape = shape()
+            try:
+                dims = list(shape)
+            except TypeError:
+                dims = None
+            if dims:
+                return int(dims[0])
+        raise GraphCaptureError(
+            "len(Proxy) is not supported during graph capture; provide "
+            "sample inputs to specialize on tensor shapes"
+        )
 
     def __index__(self) -> int:
         raise GraphCaptureError("using a Proxy as an integer is not supported during graph capture")
@@ -381,12 +682,58 @@ class Tracer:
     This is intentionally a frontend primitive.  It is not part of the Stax
     backend and may later be replaced by a frame-evaluation frontend without
     changing the backend contract.
+
+    Args:
+        concrete_args: Optional mapping of argument name to a concrete value.
+            Listed arguments are specialized away during capture: they do not
+            become placeholders of the resulting graph.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, concrete_args: Optional[Dict[str, Any]] = None) -> None:
         self.graph = Graph()
         self.root: Any = None
         self.signature: Optional[inspect.Signature] = None
+        self.concrete_args: Dict[str, Any] = dict(concrete_args or {})
+        # Example values bound to placeholders during capture.  Metadata reads
+        # (shape/dtype/device/...) resolve against them so Python control flow
+        # can specialize statically; tensor DATA stays symbolic.
+        self.sample_inputs: Dict[str, Any] = {}
+        self._samples: Dict[str, Any] = {}
+        # Placeholder-name -> attribute reads performed during capture
+        # ({"shape", "len", "dtype", ...}).  Feeds dynamic-mode shape guards.
+        self.metadata_touches: set[Tuple[str, str]] = set()
+        # Qualified module path recorded per ``call_module`` node.  Modules
+        # executed twice produce distinct ``path_0``/``path_1`` style entries,
+        # mirroring torchvision's NodePathTracer.
+        self.node_to_qualname: Dict[Node, str] = {}
+        self._recorded_qualnames: set[str] = set()
+
+    def is_leaf_module(self, module: Any, qualified_name: str) -> bool:
+        """Return whether ``module`` should be traced as a single unit.
+
+        The compiler frontend defaults to Dynamo-style behavior: every child
+        module is inlined so backends receive primitive operations.  Frontends
+        that need submodule boundaries in the graph (feature extraction)
+        override this hook; returning ``True`` makes the tracer emit a
+        ``call_module`` node targeting the module's qualified name instead of
+        descending into ``forward``.
+        """
+
+        del module, qualified_name
+        return False
+
+    def _record_call_module(self, node: Node, qualified_name: str) -> None:
+        if qualified_name not in self._recorded_qualnames:
+            self._recorded_qualnames.add(qualified_name)
+            self.node_to_qualname[node] = qualified_name
+            return
+        suffix = 0
+        candidate = f"{qualified_name}_{suffix}"
+        while candidate in self._recorded_qualnames:
+            suffix += 1
+            candidate = f"{qualified_name}_{suffix}"
+        self._recorded_qualnames.add(candidate)
+        self.node_to_qualname[node] = candidate
 
     def create_proxy(
         self,
@@ -397,8 +744,11 @@ class Tracer:
     ) -> Proxy:
         return Proxy(self.graph.create_node(kind, target, args, kwargs), self)
 
-    def trace(self, root: Any) -> "GraphModule":
+    def trace(
+        self, root: Any, sample_inputs: Optional[Dict[str, Any]] = None
+    ) -> "GraphModule":
         self.root = root
+        self.sample_inputs = dict(sample_inputs or {})
         if _is_module(root):
             function = root.forward
         elif callable(root):
@@ -417,25 +767,55 @@ class Tracer:
                 "varargs and varkw arguments are not supported by this compiler frontend"
             )
 
-        proxies = [
-            Proxy(self.graph.placeholder(parameter.name, parameter.default), self)
-            for parameter in parameters
-        ]
+        unknown_concrete = set(self.concrete_args) - {
+            parameter.name for parameter in parameters
+        }
+        if unknown_concrete:
+            raise GraphCaptureError(
+                f"concrete arguments {sorted(unknown_concrete)} are not "
+                "parameters of the traced callable"
+            )
+
+        values: Dict[str, Any] = {}
+        for parameter in parameters:
+            if parameter.name in self.concrete_args:
+                # Specialized arguments never reach the graph.
+                values[parameter.name] = self.concrete_args[parameter.name]
+            else:
+                placeholder_node = self.graph.placeholder(
+                    parameter.name, parameter.default
+                )
+                sample = self.sample_inputs.get(parameter.name)
+                if sample is not None:
+                    self._samples[parameter.name] = sample
+                values[parameter.name] = Proxy(placeholder_node, self)
 
         if _is_module(root):
-            output = self._trace_module(root, function, proxies)
+            output = self._trace_module(root, function, parameters, values)
         else:
-            output = self._invoke(function, parameters, proxies)
+            output = self._invoke(function, parameters, values)
 
         self.graph.output(output)
         self.graph.lint()
-        return GraphModule(root, self.graph, self.signature)
+        # Specialized (concrete) parameters disappear from the graph contract
+        # together with their placeholders; every other parameter keeps its
+        # kind and default so ``bind_partial().apply_defaults()`` keeps working.
+        symbolic_parameters = [
+            parameter for parameter in parameters if parameter.name not in self.concrete_args
+        ]
+        specialized_signature = inspect.Signature(symbolic_parameters)
+        graph_module = GraphModule(root, self.graph, specialized_signature)
+        if self._samples:
+            graph_module.meta["sample_inputs"] = dict(self._samples)
+        if self.metadata_touches:
+            graph_module.meta["metadata_touches"] = sorted(self.metadata_touches)
+        return graph_module
 
     @staticmethod
     def _invoke(
         function: Callable[..., Any],
         parameters: list[inspect.Parameter],
-        proxies: list[Proxy],
+        values: Dict[str, Any],
     ) -> Any:
         """Call a traced function while preserving Python parameter kinds.
 
@@ -443,19 +823,21 @@ class Tracer:
         arguments and changes the call contract before the backend ever sees
         the graph.  Dynamo/FX preserve the signature at this boundary; the
         small explicit dispatcher gives the same behavior for the canonical
-        TensorPlay graph.
+        TensorPlay graph.  ``values`` may contain plain Python objects for
+        arguments specialized through ``concrete_args`` alongside proxies.
         """
 
-        positional: list[Proxy] = []
-        keyword: dict[str, Proxy] = {}
-        for parameter, proxy in zip(parameters, proxies):
+        positional: list[Any] = []
+        keyword: dict[str, Any] = {}
+        for parameter in parameters:
+            value = values[parameter.name]
             if parameter.kind in (
                 inspect.Parameter.POSITIONAL_ONLY,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
             ):
-                positional.append(proxy)
+                positional.append(value)
             elif parameter.kind is inspect.Parameter.KEYWORD_ONLY:
-                keyword[parameter.name] = proxy
+                keyword[parameter.name] = value
             else:
                 raise GraphCaptureError(
                     "varargs and varkw arguments are not supported by this compiler frontend"
@@ -463,7 +845,11 @@ class Tracer:
         return function(*positional, **keyword)
 
     def _trace_module(
-        self, root: Any, function: Callable[..., Any], proxies: list[Proxy]
+        self,
+        root: Any,
+        function: Callable[..., Any],
+        parameters: list[inspect.Parameter],
+        values: Dict[str, Any],
     ) -> Any:
         missing = object()
         patches: list[tuple[Any, str, Any]] = []
@@ -477,22 +863,54 @@ class Tracer:
             return f"{module_name}.{attribute}" if module_name else attribute
 
         try:
-            # Inline child forwards so the backend receives the operations in
-            # the module, matching Dynamo's FX graph rather than a Python
-            # ``call_module`` escape hatch.
+            # Child modules are inlined so the backend receives the operations
+            # inside them, matching Dynamo's FX graph.  ``is_leaf_module`` may
+            # opt a child out of inlining; such children become a single
+            # ``call_module`` node targeting their qualified path, which is
+            # what feature extraction needs to locate submodule outputs.
+            leaf_qualnames: set[str] = set()
             for module_name, module in root.named_modules(remove_duplicate=True):
                 for child_name, child in module.named_children():
-                    def inline_child(
-                        *args: Any, _child: Any = child, **kwargs: Any
-                    ) -> Any:
-                        return _child.forward(*args, **kwargs)
+                    qualname = qualified(module_name, child_name)
 
-                    patch_attribute(module, child_name, inline_child)
+                    if self.is_leaf_module(child, qualname):
+                        leaf_qualnames.add(qualname)
+
+                        def call_module_child(
+                            *args: Any,
+                            _qualname: str = qualname,
+                            **kwargs: Any,
+                        ) -> Any:
+                            proxy = self.create_proxy(
+                                "call_module", _qualname, args, kwargs
+                            )
+                            self._record_call_module(proxy.node, _qualname)
+                            return proxy
+
+                        patch_attribute(module, child_name, call_module_child)
+                    else:
+                        def inline_child(
+                            *args: Any, _child: Any = child, **kwargs: Any
+                        ) -> Any:
+                            return _child.forward(*args, **kwargs)
+
+                        patch_attribute(module, child_name, inline_child)
+
+            def under_leaf(module_qualname: str) -> bool:
+                parts = module_qualname.split(".")
+                return any(
+                    ".".join(parts[: index + 1]) in leaf_qualnames
+                    for index in range(len(parts))
+                )
 
             # Parameters and buffers are graph attributes, not frozen Python
             # constants.  This keeps the compiled graph tied to the live
-            # module state and preserves parameter autograd edges.
+            # module state and preserves parameter autograd edges.  Parameters
+            # below a leaf module stay untouched: the leaf is invoked as a
+            # whole and its state must not appear as dangling graph inputs.
             for module_name, module in root.named_modules(remove_duplicate=True):
+                if under_leaf(module_name):
+                    continue
                 for attribute_name, value in (
                     *getattr(module, "_parameters", {}).items(),
                     *getattr(module, "_buffers", {}).items(),
@@ -512,11 +930,7 @@ class Tracer:
                         ),
                     )
 
-            return self._invoke(
-                function,
-                list(self.signature.parameters.values()),
-                proxies,
-            )
+            return self._invoke(function, parameters, values)
         finally:
             for module, name, previous in reversed(patches):
                 if previous is missing:
@@ -535,6 +949,7 @@ class GraphModule:
         self.graph = graph
         self.signature = signature
         self.code = graph.python_code()
+        self.meta: dict[str, Any] = {}
         self._compiled_forward: Optional[Callable[..., Any]] = None
         self._compiled_targets: dict[str, Any] = {}
         self._compiled_constants: list[Any] = []
@@ -656,40 +1071,55 @@ class GraphModule:
             f"{key!r}: {self._expr(value)}" for key, value in kwargs.items()
         ) + "}"
 
-    def _interpret(self, *args: Any, **kwargs: Any) -> Any:
+    def _interpret(self, *args: Any, _record_meta: bool = False, **kwargs: Any) -> Any:
         try:
             bound = self.signature.bind_partial(*args, **kwargs)
             bound.apply_defaults()
         except TypeError:
             raise
 
+        def keep(node: Node, value: Any) -> Any:
+            env[node] = value
+            if _record_meta:
+                node.meta["val"] = value
+                shape = getattr(value, "shape", None)
+                if shape is not None:
+                    try:
+                        node.meta["tensor_shape"] = tuple(int(d) for d in shape())
+                    except (TypeError, ValueError):
+                        try:
+                            node.meta["tensor_shape"] = tuple(int(d) for d in shape)
+                        except (TypeError, ValueError):
+                            pass
+            return value
+
         env: dict[Node, Any] = {}
         for node in self.graph.placeholders:
             if node.name not in bound.arguments:
                 raise TypeError(f"missing required compiler input: {node.name}")
-            env[node] = bound.arguments[node.name]
+            keep(node, bound.arguments[node.name])
 
         for node in self.graph.nodes:
             if node.op == "placeholder":
                 continue
             if node.op == "call_function":
                 target = self._resolve_target(node.target)
-                env[node] = target(
+                keep(node, target(
                     *self._resolve(node.args, env),
                     **self._resolve(node.kwargs, env),
-                )
+                ))
             elif node.op == "call_method":
                 resolved_args = self._resolve(node.args, env)
                 receiver, *method_args = resolved_args
-                env[node] = getattr(receiver, node.target)(*method_args, **self._resolve(node.kwargs, env))
+                keep(node, getattr(receiver, node.target)(*method_args, **self._resolve(node.kwargs, env)))
             elif node.op == "call_module":
                 module = self._get_attr(node.target)
-                env[node] = module(
+                keep(node, module(
                     *self._resolve(node.args, env),
                     **self._resolve(node.kwargs, env),
-                )
+                ))
             elif node.op == "get_attr":
-                env[node] = self._get_attr(node.target)
+                keep(node, self._get_attr(node.target))
             elif node.op == "output":
                 return self._resolve(node.args[0], env)
             else:
@@ -728,8 +1158,12 @@ class GraphModule:
         return target
 
 
-def dead_code_elimination(graph: Graph) -> bool:
-    """Remove pure nodes that cannot reach the graph output."""
+def dead_code_elimination(graph: Graph) -> int:
+    """Remove pure nodes that cannot reach the graph output.
+
+    Returns the number of removed nodes.  Placeholders are always kept so the
+    calling contract of the graph stays intact.
+    """
 
     live: set[Node] = set()
     worklist = list(graph.outputs)
@@ -747,12 +1181,16 @@ def dead_code_elimination(graph: Graph) -> bool:
         for node in old_nodes
         if node in live or node.op == "placeholder"
     ]
-    if len(old_nodes) == len(graph.nodes):
-        return False
+    removed_count = len(old_nodes) - len(graph.nodes)
+    if removed_count == 0:
+        return 0
 
+    for node in old_nodes:
+        if node not in live and node.op != "placeholder":
+            node.graph = None
     for node in graph.nodes:
         node.users.clear()
     for node in graph.nodes:
         for input_node in (*_iter_nodes(node.args), *_iter_nodes(node.kwargs)):
             input_node.users.add(node)
-    return True
+    return removed_count

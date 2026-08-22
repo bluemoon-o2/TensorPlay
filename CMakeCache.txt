@@ -1378,9 +1378,9 @@ FIND_PACKAGE_MESSAGE_DETAILS_OpenMP_C:INTERNAL=[-fopenmp][/usr/lib/gcc/x86_64-li
 //Details about finding OpenMP_CXX
 FIND_PACKAGE_MESSAGE_DETAILS_OpenMP_CXX:INTERNAL=[-fopenmp][/usr/lib/gcc/x86_64-linux-gnu/13/libgomp.so][/usr/lib/x86_64-linux-gnu/libpthread.a][/usr/lib/gcc/x86_64-linux-gnu/13/libgomp.so][/usr/lib/x86_64-linux-gnu/libpthread.a][v4.5()]
 //Details about finding Python
-FIND_PACKAGE_MESSAGE_DETAILS_Python:INTERNAL=[/home/bluemoon/miniconda3/bin/python3][/home/bluemoon/miniconda3/include/python3.13][/home/bluemoon/miniconda3/lib/libpython3.13.so][cfound components: Interpreter Development Development.Module Development.Embed ][v3.13.14()]
+FIND_PACKAGE_MESSAGE_DETAILS_Python:INTERNAL=[/home/bluemoon/miniconda3/bin/python3][/home/bluemoon/miniconda3/include/python3.13][/home/bluemoon/miniconda3/lib/libpython3.13.so][cfound components: Interpreter Development Development.Module Development.Embed ][v3.13.13()]
 //Details about finding PythonInterp
-FIND_PACKAGE_MESSAGE_DETAILS_PythonInterp:INTERNAL=[/home/bluemoon/miniconda3/bin/python][v3.13.14(2.7)]
+FIND_PACKAGE_MESSAGE_DETAILS_PythonInterp:INTERNAL=[/home/bluemoon/miniconda3/bin/python][v3.13.13(2.7)]
 //Details about finding Threads
 FIND_PACKAGE_MESSAGE_DETAILS_Threads:INTERNAL=[TRUE][v()]
 //ADVANCED property for variable: GIT_EXECUTABLE
