@@ -257,3 +257,14 @@ fw 图与 default 相同:输出 user+saved(saved 变少即收益)。
 
 impure(rng)/多输出/get_attr 参与 min-cut 时归入必存,不参与优化;
 sym/meta-only 节点沿用 default 直通。
+
+### partition_min_cut 实现记录
+
+- 已按 P3-L4b 设计实现于主树 `aot.py`:Edmonds-Karp(自研,4 例单测含中段
+  可达性全过)、容量模型、fusible 链内部强制必存(ban_fusible_chains)、
+  backward 重算闭包递归克隆(memo 化 ensure)替代自动占位;
+- build_aot 新增 `partitioner="default"|"min_cut"` 分发参数;
+- 关键语义修正:残量图**不可达**侧候选 = saved(可达侧保存边已被割);
+- ⚠️ 数值级验证仍被原生阻塞(构建因 Tier5OpsKernels.cu L251 语法错中断,
+  对方文件未提交、mtime 06:22 后无动静)。下会话:等/修 L251 → 构建 →
+  test_aot 以 partition 参数化跑双实现对拍(验收标准 1/2 条)。

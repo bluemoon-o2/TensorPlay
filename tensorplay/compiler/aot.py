@@ -329,6 +329,7 @@ def _mincut_maxflow(
 ) -> Tuple[float, set]:
     """Edmonds-Karp max flow; returns (flow, residual-reachable set)."""
 
+    total_flow = 0.0
     while True:
         parent: Dict[str, Optional[str]] = {source: None}
         queue = deque([source])
@@ -351,6 +352,7 @@ def _mincut_maxflow(
             capacity[u][v] -= aug
             capacity.setdefault(v, {}).setdefault(u, 0.0)
             capacity[v][u] += aug
+        total_flow += aug
     reachable = {source}
     queue = deque([source])
     while queue:
@@ -359,7 +361,7 @@ def _mincut_maxflow(
             if c > 0 and v not in reachable:
                 reachable.add(v)
                 queue.append(v)
-    return sum(capacity[source].values()), reachable
+    return total_flow, reachable
 
 
 def partition_min_cut(
@@ -447,9 +449,11 @@ def partition_min_cut(
             _edge(key, sink, _INF if n in must_save else _weight(n))
 
     _, reachable = _mincut_maxflow(capacity, source, sink)
+    # Sink-side candidates (unreachable in the residual graph) keep their
+    # intact save edges -> saved; reachable ones were cut -> recomputed.
     saved_set = {
         n for n in candidates
-        if f"n_{n.name}" in reachable or n in must_save
+        if f"n_{n.name}" not in reachable or n in must_save
     }
     if not saved_set:
         raise AOTError("min-cut produced an empty save set")
