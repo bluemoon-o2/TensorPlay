@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022]
+        os: [ubuntu-22.04, ubuntu-24.04-arm, windows-2022]
         python: ['3.11']
         cuda: [cpu]
         include:

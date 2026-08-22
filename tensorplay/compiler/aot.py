@@ -424,9 +424,23 @@ def partition_min_cut(
                 chain_interior.add(n)
 
     candidates = [n for n in fwd_nodes if n.op not in _LEAF_OPS and has_bw_user(n)]
+
+    # Must-save: get_attr (params), fusible-chain interiors, and any node
+    # consumed by BOTH the forward-output subtree and backward (dual-use).
+    user_set = {o for o in user_outputs if isinstance(o, Node)}
+    fw_needed = set()
+    stack = list(user_set)
+    while stack:
+        n = stack.pop()
+        if n in fw_needed or n.op in _LEAF_OPS:
+            continue
+        fw_needed.add(n)
+        stack.extend(a for a in n.args if isinstance(a, Node))
     must_save = {
         n for n in candidates
-        if n.op == "get_attr" or n in chain_interior
+        if n.op == "get_attr"
+        or n in chain_interior
+        or n in fw_needed
     }
 
     source, sink = "__S__", "__T__"
