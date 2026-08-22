@@ -903,6 +903,54 @@ src/backend/cpu/IndexingKernels.cpp.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/IndexingKernels.cpp.s
 .PHONY : src/backend/cpu/IndexingKernels.cpp.s
 
+src/backend/cpu/Lapack.o: src/backend/cpu/Lapack.cpp.o
+.PHONY : src/backend/cpu/Lapack.o
+
+# target to build an object file
+src/backend/cpu/Lapack.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/Lapack.cpp.o
+.PHONY : src/backend/cpu/Lapack.cpp.o
+
+src/backend/cpu/Lapack.i: src/backend/cpu/Lapack.cpp.i
+.PHONY : src/backend/cpu/Lapack.i
+
+# target to preprocess a source file
+src/backend/cpu/Lapack.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/Lapack.cpp.i
+.PHONY : src/backend/cpu/Lapack.cpp.i
+
+src/backend/cpu/Lapack.s: src/backend/cpu/Lapack.cpp.s
+.PHONY : src/backend/cpu/Lapack.s
+
+# target to generate assembly for a file
+src/backend/cpu/Lapack.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/Lapack.cpp.s
+.PHONY : src/backend/cpu/Lapack.cpp.s
+
+src/backend/cpu/LinalgKernels.o: src/backend/cpu/LinalgKernels.cpp.o
+.PHONY : src/backend/cpu/LinalgKernels.o
+
+# target to build an object file
+src/backend/cpu/LinalgKernels.cpp.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/LinalgKernels.cpp.o
+.PHONY : src/backend/cpu/LinalgKernels.cpp.o
+
+src/backend/cpu/LinalgKernels.i: src/backend/cpu/LinalgKernels.cpp.i
+.PHONY : src/backend/cpu/LinalgKernels.i
+
+# target to preprocess a source file
+src/backend/cpu/LinalgKernels.cpp.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/LinalgKernels.cpp.i
+.PHONY : src/backend/cpu/LinalgKernels.cpp.i
+
+src/backend/cpu/LinalgKernels.s: src/backend/cpu/LinalgKernels.cpp.s
+.PHONY : src/backend/cpu/LinalgKernels.s
+
+# target to generate assembly for a file
+src/backend/cpu/LinalgKernels.cpp.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cpu/LinalgKernels.cpp.s
+.PHONY : src/backend/cpu/LinalgKernels.cpp.s
+
 src/backend/cpu/LinearAlgebraKernels.o: src/backend/cpu/LinearAlgebraKernels.cpp.o
 .PHONY : src/backend/cpu/LinearAlgebraKernels.o
 
@@ -1725,6 +1773,30 @@ src/backend/cuda/IndexingKernels.cu.s:
 	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/IndexingKernels.cu.s
 .PHONY : src/backend/cuda/IndexingKernels.cu.s
 
+src/backend/cuda/LinalgKernels.o: src/backend/cuda/LinalgKernels.cu.o
+.PHONY : src/backend/cuda/LinalgKernels.o
+
+# target to build an object file
+src/backend/cuda/LinalgKernels.cu.o:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/LinalgKernels.cu.o
+.PHONY : src/backend/cuda/LinalgKernels.cu.o
+
+src/backend/cuda/LinalgKernels.i: src/backend/cuda/LinalgKernels.cu.i
+.PHONY : src/backend/cuda/LinalgKernels.i
+
+# target to preprocess a source file
+src/backend/cuda/LinalgKernels.cu.i:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/LinalgKernels.cu.i
+.PHONY : src/backend/cuda/LinalgKernels.cu.i
+
+src/backend/cuda/LinalgKernels.s: src/backend/cuda/LinalgKernels.cu.s
+.PHONY : src/backend/cuda/LinalgKernels.s
+
+# target to generate assembly for a file
+src/backend/cuda/LinalgKernels.cu.s:
+	cd /home/bluemoon/projects/TensorPlay && $(MAKE) $(MAKESILENT) -f p10/CMakeFiles/p10.dir/build.make p10/CMakeFiles/p10.dir/src/backend/cuda/LinalgKernels.cu.s
+.PHONY : src/backend/cuda/LinalgKernels.cu.s
+
 src/backend/cuda/LinearAlgebraKernels.o: src/backend/cuda/LinearAlgebraKernels.cu.o
 .PHONY : src/backend/cuda/LinearAlgebraKernels.o
 
@@ -2306,6 +2378,12 @@ help:
 	@echo "... src/backend/cpu/IndexingKernels.o"
 	@echo "... src/backend/cpu/IndexingKernels.i"
 	@echo "... src/backend/cpu/IndexingKernels.s"
+	@echo "... src/backend/cpu/Lapack.o"
+	@echo "... src/backend/cpu/Lapack.i"
+	@echo "... src/backend/cpu/Lapack.s"
+	@echo "... src/backend/cpu/LinalgKernels.o"
+	@echo "... src/backend/cpu/LinalgKernels.i"
+	@echo "... src/backend/cpu/LinalgKernels.s"
 	@echo "... src/backend/cpu/LinearAlgebraKernels.o"
 	@echo "... src/backend/cpu/LinearAlgebraKernels.i"
 	@echo "... src/backend/cpu/LinearAlgebraKernels.s"
@@ -2408,6 +2486,9 @@ help:
 	@echo "... src/backend/cuda/IndexingKernels.o"
 	@echo "... src/backend/cuda/IndexingKernels.i"
 	@echo "... src/backend/cuda/IndexingKernels.s"
+	@echo "... src/backend/cuda/LinalgKernels.o"
+	@echo "... src/backend/cuda/LinalgKernels.i"
+	@echo "... src/backend/cuda/LinalgKernels.s"
 	@echo "... src/backend/cuda/LinearAlgebraKernels.o"
 	@echo "... src/backend/cuda/LinearAlgebraKernels.i"
 	@echo "... src/backend/cuda/LinearAlgebraKernels.s"

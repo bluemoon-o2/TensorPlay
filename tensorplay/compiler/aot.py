@@ -79,6 +79,8 @@ class _JointBuilder:
     def __init__(self, fwd_gm: GraphModule) -> None:
         self.fwd = fwd_gm
         self.graph = fwd_gm.graph
+        self.tangent = self.graph.placeholder("tangent")
+        self.tangent.meta["is_backward"] = True
 
     def bwd(self, op: str, target: Any, args: Tuple[Any, ...], kwargs: Optional[Dict[str, Any]] = None) -> Node:
         node = _emit(self.graph, op, target, args, kwargs)
@@ -129,7 +131,8 @@ def _rule_sub(b: _JointBuilder, node: Node, go: Node) -> Dict[Any, Node]:
 
 def _rule_truediv(b: _JointBuilder, node: Node, go: Node) -> Dict[Any, Node]:
     a_node, b_node = node.args[0], node.args[1]
-    num = b.bwd("call_function", operator.mul, (-go, a_node))
+    neg_go = b.bwd("call_function", operator.neg, (go,))
+    num = b.bwd("call_function", operator.mul, (neg_go, a_node))
     denom = b.bwd("call_function", operator.mul, (b_node, b_node))
     db = b.bwd("call_function", operator.truediv, (num, denom))
     da = b.bwd("call_function", operator.truediv, (go, b_node))
@@ -335,7 +338,7 @@ def _mincut_maxflow(
         queue = deque([source])
         while queue and sink not in parent:
             u = queue.popleft()
-            for v, c in capacity[u].items():
+            for v, c in capacity.get(u, {}).items():
                 if c > 0 and v not in parent:
                     parent[v] = u
                     queue.append(v)
@@ -357,7 +360,7 @@ def _mincut_maxflow(
     queue = deque([source])
     while queue:
         u = queue.popleft()
-        for v, c in capacity[u].items():
+        for v, c in capacity.get(u, {}).items():
             if c > 0 and v not in reachable:
                 reachable.add(v)
                 queue.append(v)
@@ -597,6 +600,7 @@ def build_aot(
     required_grads: Optional[Sequence[str]] = None,
     policy: str = "save_needed",
     partitioner: str = "default",
+    memory_budget: Optional[int] = None,
 ) -> AotResult:
     """Differentiate a captured region into an AOT forward/backward pair.
 
@@ -649,6 +653,16 @@ def build_aot(
 
     if not grad_outputs:
         raise AOTError("no leaf gradients were computed")
+    # Tag every node appended after the original output as backward. Rules
+    # emit through several helpers (some via untagged _emit), so a positional
+    # sweep is the only reliable way to close the tag set.
+    seen_output = False
+    for n in graph_module.graph.nodes:
+        if n.op == "output":
+            seen_output = True
+            continue
+        if seen_output:
+            n.meta["is_backward"] = True
     # torch contract: joint output = (fwd..., bwd...), split at num_fwd_outputs.
     graph_module.graph.output((out_arg, *[g for _, g in grad_outputs]))
 
@@ -659,7 +673,7 @@ def build_aot(
             input_kinds,
             input_keys,
             saved_names_list,
-        ) = partition_min_cut(graph_module)
+        ) = partition_min_cut(graph_module, memory_budget=memory_budget)
     else:
         (
             forward_gm,

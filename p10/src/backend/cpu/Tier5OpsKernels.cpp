@@ -693,30 +693,6 @@ namespace {
 // Window / complex factories
 // ---------------------------------------------------------------------------
 
-Tensor hann_window_cpu(int64_t window_length, bool periodic, std::optional<DType> dtype) {
-    if (window_length < 0) TP_THROW(RuntimeError, "hann_window: window_length must be >= 0");
-    DType dt = dtype.value_or(DType::Float32);
-    if (!isFloatingType(dt)) dt = DType::Float32;
-    Tensor out = Tensor::empty({window_length}, dt, Device(DeviceType::CPU));
-    int64_t denom = periodic ? window_length : window_length - 1;
-    if (denom <= 0) denom = 1;
-#define TP_HW(ctype, name_) \
-    case DType::name_: { \
-        ctype* dp = out.data_ptr<ctype>(); \
-        for (int64_t i = 0; i < window_length; ++i) { \
-            double x = 2.0 * M_PI * i / static_cast<double>(denom); \
-            dp[i] = static_cast<ctype>(0.5 * (1.0 - std::cos(x))); \
-        } \
-        break; }
-    switch (dt) {
-        TP_HW(float, Float32)
-        TP_HW(double, Float64)
-        default: TP_THROW(TypeError, "hann_window: unsupported dtype");
-    }
-#undef TP_HW
-    return out;
-}
-
 Tensor real_cpu(const Tensor& self) {
     if (!is_cplx(self.dtype())) return self.clone();
     Tensor out = Tensor::empty(shape_of(self),
@@ -1266,7 +1242,6 @@ TENSORPLAY_LIBRARY_IMPL(CPU, Tier5OpsKernels) {
 }
 
 TENSORPLAY_LIBRARY_IMPL(CPU, Tier5OpsKernelsB) {
-    m.impl("hann_window", hann_window_cpu);
     m.impl("real", real_cpu);
     m.impl("imag", imag_cpu);
     m.impl("conj", conj_cpu);

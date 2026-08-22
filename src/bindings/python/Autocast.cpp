@@ -21,7 +21,7 @@ DeviceType device_type_from_string(const std::string& device_type) {
 
 void init_autocast(py::module_& m) {
     using namespace tensorplay;
-    using autocast = tensorplay::autocast;
+    namespace autocast = tensorplay::autocast;
 
     m.def("_is_autocast_available", [](const std::string& device_type) {
         return autocast::is_autocast_available(device_type_from_string(device_type));

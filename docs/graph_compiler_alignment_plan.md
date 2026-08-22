@@ -268,3 +268,39 @@ sym/meta-only 节点沿用 default 直通。
 - ⚠️ 数值级验证仍被原生阻塞(构建因 Tier5OpsKernels.cu L251 语法错中断,
   对方文件未提交、mtime 06:22 后无动静)。下会话:等/修 L251 → 构建 →
   test_aot 以 partition 参数化跑双实现对拍(验收标准 1/2 条)。
+
+### L4 最终验证(独立结构级,免原生)
+
+`/tmp/opencode/final_verify.py`:standalone 加载 graph.py+aot.py,手工建图驱动
+sweep+双 partitioner,**12/12 全过**(role 对齐/单调性/链内必存/budget/AOTError/
+单叶梯度)。并抓出三个运行时必然崩溃的真缺陷已修:
+1. `_JointBuilder.tangent` 未创建(v2 晋升版 build_aot 对任何输入都会崩);
+2. 规则辅助发射(`_ones_like`)未打 backward 标签 → 节点误入前向侧污染保存集
+   ——改为 sweep 后按 output 位置统一补标记;
+3. maxflow 对仅入边节点 KeyError(capacity.get)。
+语义澄清:min_cut 下被保存节点背后的叶子不再进入 backward 占位符(优化点,
+非缺陷);default 保持全外部引用占位。剩余验收(数值等价/内存曲线)待原生层。
+
+## L5-M4 分解表(已实现+独立验证)
+
+- `compiler/decompositions.py`:`DecomposePass`(PassBase 体系)+ 方法注册表
+  sigmoid/silu/reciprocal/square → 全部展开为已有导数规则的原语
+  (neg/exp/add/truediv/mul),分解后图天然可微;
+- 关键实现点:create_node 只能尾插,而 replace_all_uses_with 强制拓扑序——
+  pass 内捕获规则新建节点并整体移到原节点之前(nodes 为普通 list,原地重排);
+- 独立验证(verify_m4.py):重写正确(sigmoid→exp/sum 残留)+ 分解图直通
+  build_aot(role 一致)✅;
+- 附带修复:`_rule_truediv` 对 Node 使用一元 `-`(任何含除法模型必崩的潜伏缺陷);
+- test_decompositions.py 三用例待原生层就绪后随批跑。
+
+## L5-M3 CUDA graphs 编排层(已实现+假绑定全逻辑验证)
+
+- `compiler/cudagraphs.py`:CudaGraphManager(capture-once/replay 静态缓冲),
+  原生面契约六符号(cuda_stream/graph_begin/end/instantiate/launch)惰性探测,
+  缺失时 NotImplementedError 列出缺口——系统层落地后零改动点亮;
+- 契约守卫:nested capture 拒绝、key+签名捕获唯一、replay 前置校验
+  (arity/shape-dtype 签名)、max_entries 上限;
+- 可注入 native → 全部逻辑现可测:verify_m3.py 五组全过(暂存/计数/契约/
+  capture-once/nested/缺绑定向导);test_cudagraphs.py 四用例待批跑;
+- 抽象边界澄清:输出值刷新属原生图重放职责,编排层保证暂存+launch+
+  输出对象稳定;side-stream warmup 为 v0 简化点(文档已注)。

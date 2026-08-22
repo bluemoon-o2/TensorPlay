@@ -11,6 +11,9 @@
 #include "Scalar.h"
 #include "Exception.h"
 #include "CUDARuntime.h"
+#include "RNNCudaKernels.h"
+#include "TypePromotion.h"
+#include "Utils.h"
 
 #include <cuda_runtime.h>
 
@@ -22,6 +25,7 @@
 
 namespace tensorplay {
 namespace cuda {
+
 
 #define CUDA_CHECK(condition) \
   do { \
@@ -46,18 +50,6 @@ Tensor pairwise_distance_cpu(const Tensor&, const Tensor&, double, double, bool)
 Tensor pdist_cpu(const Tensor&, double);
 Tensor hinge_embedding_loss_cpu(const Tensor&, const Tensor&, Scalar);
 Tensor margin_ranking_loss_cpu(const Tensor&, const Tensor&, const Tensor&, Scalar);
-std::tuple<Tensor, Tensor, Tensor> lstm_cpu(const Tensor&, const std::vector<Tensor>&,
-                                            const std::vector<Tensor>&, bool, int64_t,
-                                            float, bool, bool, bool);
-std::tuple<Tensor, Tensor> gru_cpu(const Tensor&, const std::vector<Tensor>&,
-                                   const std::vector<Tensor>&, bool, int64_t,
-                                   float, bool, bool, bool);
-std::tuple<Tensor, Tensor> rnn_relu_cpu(const Tensor&, const std::vector<Tensor>&,
-                                        const std::vector<Tensor>&, bool, int64_t,
-                                        float, bool, bool, bool);
-std::tuple<Tensor, Tensor> rnn_tanh_cpu(const Tensor&, const std::vector<Tensor>&,
-                                        const std::vector<Tensor>&, bool, int64_t,
-                                        float, bool, bool, bool);
 } // namespace cpu
 
 namespace {
@@ -128,7 +120,7 @@ template <typename CT, typename RT>
 __global__ void polar_kernel(int64_t n, const RT* ab, const RT* ang, CT* dst) {
     int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
-    for (; i < n; i += stride) dst[i] = std::polar(ab[i], ang[i]);
+    for (; i < n; i += stride) dst[i] = CT(ab[i] * std::cos(ang[i]), ab[i] * std::sin(ang[i]));
 }
 
 } // anonymous namespace
@@ -196,65 +188,140 @@ Tensor pdist_cuda(const Tensor& self, double p) {
     Device dev = self.device();
     return to_device(cpu::pdist_cpu(to_host(self), p), dev);
 }
+// ---------------------------------------------------------------------------
+// Native CUDA RNN forward — port of ATen RNN.cpp templated cell structure
+// (LSTMCell / GRUCell / SimpleCell<tanh_f|relu_f>) running the fused-cell
+// kernels ported into RNNKernels.cu (ATen RNN.cu _thnn_fused_*_cell_cuda).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+inline Tensor rnn_row_gates(const Tensor& x2d, const Tensor& w,
+                            const Tensor& b, int64_t t, int64_t N) {
+    // Gates for timestep t: mm(x[t], w^T) + b  ((N,G)).
+    Tensor g = x2d.narrow(0, t * N, N).mm(w.t());
+    if (b.numel() > 0) g = g + b;
+    return g;
+}
+
+static std::tuple<Tensor, Tensor, Tensor> rnn_cuda_impl(
+    int kind,  // 0=lstm, 1=gru, 2=tanh, 3=relu
+    const Tensor& input, const std::vector<Tensor>& hx,
+    const std::vector<Tensor>& params, bool has_biases, int64_t num_layers,
+    bool bidirectional, bool batch_first) {
+    using tensorplay::cuda::rnn::fused_gru_cell;
+    using tensorplay::cuda::rnn::fused_lstm_cell;
+
+    Tensor x = batch_first ? input.transpose(0, 1).contiguous() : input.contiguous();
+    const int64_t T = x.size(0), N = x.size(1);
+    if (hx.empty()) TP_THROW(RuntimeError, "rnn: hx required");
+    const int64_t L = num_layers;
+    const int64_t dirs = bidirectional ? 2 : 1;
+    const int64_t H = hx[0].size(-1);
+    const DType dt = x.dtype();
+
+    Tensor hn_out = Tensor::zeros({L * dirs, N, H}, hx[0].dtype(), x.device());
+    Tensor cn_out = kind == 0
+        ? Tensor::zeros({L * dirs, N, H}, hx[0].dtype(), x.device())
+        : Tensor();
+
+    size_t ppi = 0;  // params cursor: per layer/direction w_ih, w_hh[, b_ih, b_hh]
+    auto param_at = [&](void) -> const Tensor& {
+        return params.at(ppi++);
+    };
+
+    for (int64_t layer = 0; layer < L; ++layer) {
+        Tensor layer_out = Tensor::zeros({T, N, dirs * H}, dt, x.device());
+        for (int64_t dir = 0; dir < dirs; ++dir) {
+            const int64_t state_idx = layer * dirs + dir;
+            Tensor h = hx[0].select(0, state_idx).contiguous();
+            Tensor c = kind == 0 ? hx[1].select(0, state_idx).contiguous() : h;
+
+            const Tensor& w_ih = param_at();
+            const Tensor& w_hh = param_at();
+            Tensor b_ih, b_hh;
+            if (has_biases) {
+                b_ih = param_at();
+                b_hh = param_at();
+                if (!(b_ih.numel() > 0)) b_ih = Tensor();
+                if (!(b_hh.numel() > 0)) b_hh = Tensor();
+            }
+
+            // Input-side gates for the whole sequence in one GEMM:
+            // (T*N, feat) @ (feat, G)^T -> (T*N, G).
+            Tensor x2d = x.reshape({T * N, x.size(2)});
+            Tensor in_gates = x2d.mm(w_ih.t());
+            if (b_ih.numel() > 0) in_gates = in_gates + b_ih;
+            const int64_t G = in_gates.size(1);
+
+            for (int64_t t = 0; t < T; ++t) {
+                const int64_t tt = dir == 0 ? t : (T - 1 - t);
+                Tensor ig_row = in_gates.narrow(0, tt * N, N);
+                Tensor hg_row = h.mm(w_hh.t());
+                if (b_hh.numel() > 0) hg_row = hg_row + b_hh;
+
+                if (kind == 0) {
+                    auto r = fused_lstm_cell(ig_row, hg_row, c, Tensor(), Tensor());
+                    h = std::get<0>(r);
+                    c = std::get<1>(r);
+                } else if (kind == 1) {
+                    auto r = fused_gru_cell(ig_row, hg_row, h, Tensor(), Tensor());
+                    h = std::get<0>(r);
+                } else {
+                    Tensor gates = ig_row + hg_row;
+                    h = (kind == 2) ? gates.tanh() : gates.relu();
+                }
+
+                layer_out.narrow(0, tt, 1).narrow(2, dir * H, H)
+                    .copy_(h.reshape({1, N, H}));
+                hn_out.select(0, state_idx).copy_(h);
+                if (kind == 0) cn_out.select(0, state_idx).copy_(c);
+            }
+        }
+        x = layer_out;
+    }
+    Tensor y = batch_first ? x.transpose(0, 1).contiguous() : x;
+    return {y, hn_out, cn_out};
+}
+
+} // namespace
+
 std::tuple<Tensor, Tensor, Tensor> lstm_cuda(const Tensor& input,
                                              const std::vector<Tensor>& hx,
                                              const std::vector<Tensor>& params,
                                              bool has_biases, int64_t num_layers,
                                              float dropout_p, bool training,
                                              bool bidirectional, bool batch_first) {
-    Device dev = input.device();
-    auto r = cpu::lstm_cpu(to_host(input), hx, params, has_biases, num_layers, dropout_p,
-                           training, bidirectional, batch_first);
-    return {to_device(std::get<0>(r), dev), to_device(std::get<1>(r), dev),
-            to_device(std::get<2>(r), dev)};
+    (void)dropout_p; (void)training;
+    return rnn_cuda_impl(0, input, hx, params, has_biases, num_layers,
+                         bidirectional, batch_first);
 }
 std::tuple<Tensor, Tensor> gru_cuda(const Tensor& input, const std::vector<Tensor>& hx,
                                     const std::vector<Tensor>& params, bool has_biases,
                                     int64_t num_layers, float dropout_p, bool training,
                                     bool bidirectional, bool batch_first) {
-    Device dev = input.device();
-    auto r = cpu::gru_cpu(to_host(input), hx, params, has_biases, num_layers, dropout_p,
-                          training, bidirectional, batch_first);
-    return {to_device(std::get<0>(r), dev), to_device(std::get<1>(r), dev)};
+    (void)dropout_p; (void)training;
+    auto r = rnn_cuda_impl(1, input, hx, params, has_biases, num_layers,
+                           bidirectional, batch_first);
+    return {std::get<0>(r), std::get<1>(r)};
 }
 std::tuple<Tensor, Tensor> rnn_relu_cuda(const Tensor& input, const std::vector<Tensor>& hx,
                                          const std::vector<Tensor>& params, bool has_biases,
                                          int64_t num_layers, float dropout_p, bool training,
                                          bool bidirectional, bool batch_first) {
-    Device dev = input.device();
-    auto r = cpu::rnn_relu_cpu(to_host(input), hx, params, has_biases, num_layers,
-                               dropout_p, training, bidirectional, batch_first);
-    return {to_device(std::get<0>(r), dev), to_device(std::get<1>(r), dev)};
+    (void)dropout_p; (void)training;
+    auto r = rnn_cuda_impl(3, input, hx, params, has_biases, num_layers,
+                           bidirectional, batch_first);
+    return {std::get<0>(r), std::get<1>(r)};
 }
 std::tuple<Tensor, Tensor> rnn_tanh_cuda(const Tensor& input, const std::vector<Tensor>& hx,
                                          const std::vector<Tensor>& params, bool has_biases,
                                          int64_t num_layers, float dropout_p, bool training,
                                          bool bidirectional, bool batch_first) {
-    Device dev = input.device();
-    auto r = cpu::rnn_tanh_cpu(to_host(input), hx, params, has_biases, num_layers,
-                               dropout_p, training, bidirectional, batch_first);
-    return {to_device(std::get<0>(r), dev), to_device(std::get<1>(r), dev)};
-}
-
-Tensor hann_window_cuda(int64_t window_length, bool periodic, std::optional<DType> dtype) {
-    DType dt = dtype.value_or(DType::Float32);
-    if (!isFloatingType(dt)) dt = DType::Float32;
-    Tensor out = Tensor::empty({window_length}, dt, Device(DeviceType::CUDA));
-    int64_t n = window_length;
-    if (n == 0) return out;
-    int64_t denom = periodic ? window_length : window_length - 1;
-    if (denom <= 0) denom = 1;
-    auto stream = getCurrentCUDAStream();
-    dim3 grid = make_grid(n), block(kThreads);
-    if (dt == DType::Float32) {
-        hann_window_kernel<<<grid, block, 0, stream.stream()>>>
-            n, denom, 2.0 * M_PI, out.data_ptr<float>(), nullptr);
-    } else {
-        hann_window_kernel<<<grid, block, 0, stream.stream()>>>
-            n, denom, 2.0 * M_PI, nullptr, out.data_ptr<double>());
-    }
-    CUDA_CHECK(cudaGetLastError());
-    return out;
+    (void)dropout_p; (void)training;
+    auto r = rnn_cuda_impl(2, input, hx, params, has_biases, num_layers,
+                           bidirectional, batch_first);
+    return {std::get<0>(r), std::get<1>(r)};
 }
 
 namespace {
@@ -272,10 +339,10 @@ Tensor real_cuda(const Tensor& self) {
     auto stream = getCurrentCUDAStream();
     dim3 grid = make_grid(n), block(kThreads);
     if (self.dtype() == DType::ComplexFloat)
-        cplx_real_kernel<std::complex<float>, float><<<grid, block, 0, stream.stream()>>>
+        cplx_real_kernel<std::complex<float>, float><<<grid, block, 0, stream.stream()>>>(
             n, sc.data_ptr<std::complex<float>>(), out.data_ptr<float>());
     else
-        cplx_real_kernel<std::complex<double>, double><<<grid, block, 0, stream.stream()>>>
+        cplx_real_kernel<std::complex<double>, double><<<grid, block, 0, stream.stream()>>>(
             n, sc.data_ptr<std::complex<double>>(), out.data_ptr<double>());
     CUDA_CHECK(cudaGetLastError());
     return out;
@@ -292,10 +359,10 @@ Tensor imag_cuda(const Tensor& self) {
     auto stream = getCurrentCUDAStream();
     dim3 grid = make_grid(n), block(kThreads);
     if (self.dtype() == DType::ComplexFloat)
-        cplx_imag_kernel<std::complex<float>, float><<<grid, block, 0, stream.stream()>>>
+        cplx_imag_kernel<std::complex<float>, float><<<grid, block, 0, stream.stream()>>>(
             n, sc.data_ptr<std::complex<float>>(), out.data_ptr<float>());
     else
-        cplx_imag_kernel<std::complex<double>, double><<<grid, block, 0, stream.stream()>>>
+        cplx_imag_kernel<std::complex<double>, double><<<grid, block, 0, stream.stream()>>>(
             n, sc.data_ptr<std::complex<double>>(), out.data_ptr<double>());
     CUDA_CHECK(cudaGetLastError());
     return out;
@@ -309,10 +376,10 @@ Tensor conj_cuda(const Tensor& self) {
     auto stream = getCurrentCUDAStream();
     dim3 grid = make_grid(n), block(kThreads);
     if (self.dtype() == DType::ComplexFloat)
-        cplx_conj_kernel<std::complex<float>><<<grid, block, 0, stream.stream()>>>
+        cplx_conj_kernel<std::complex<float>><<<grid, block, 0, stream.stream()>>>(
             n, out.data_ptr<std::complex<float>>());
     else
-        cplx_conj_kernel<std::complex<double>><<<grid, block, 0, stream.stream()>>>
+        cplx_conj_kernel<std::complex<double>><<<grid, block, 0, stream.stream()>>>(
             n, out.data_ptr<std::complex<double>>());
     CUDA_CHECK(cudaGetLastError());
     return out;
@@ -331,11 +398,11 @@ Tensor complex_cuda(const Tensor& re, const Tensor& im) {
     auto stream = getCurrentCUDAStream();
     dim3 grid = make_grid(n), block(kThreads);
     if (cdt == DType::ComplexFloat)
-        cplx_pack_kernel<std::complex<float>, float><<<grid, block, 0, stream.stream()>>>
+        cplx_pack_kernel<std::complex<float>, float><<<grid, block, 0, stream.stream()>>>(
             n, rc.data_ptr<float>(), ic.data_ptr<float>(),
             out.data_ptr<std::complex<float>>());
     else
-        cplx_pack_kernel<std::complex<double>, double><<<grid, block, 0, stream.stream()>>>
+        cplx_pack_kernel<std::complex<double>, double><<<grid, block, 0, stream.stream()>>>(
             n, rc.data_ptr<double>(), ic.data_ptr<double>(),
             out.data_ptr<std::complex<double>>());
     CUDA_CHECK(cudaGetLastError());
@@ -355,11 +422,11 @@ Tensor polar_cuda(const Tensor& abs_, const Tensor& angle_) {
     auto stream = getCurrentCUDAStream();
     dim3 grid = make_grid(n), block(kThreads);
     if (fdt == DType::Float64)
-        polar_kernel<std::complex<double>, double><<<grid, block, 0, stream.stream()>>>
+        polar_kernel<std::complex<double>, double><<<grid, block, 0, stream.stream()>>>(
             n, a.data_ptr<double>(), th.data_ptr<double>(),
             out.data_ptr<std::complex<double>>());
     else
-        polar_kernel<std::complex<float>, float><<<grid, block, 0, stream.stream()>>>
+        polar_kernel<std::complex<float>, float><<<grid, block, 0, stream.stream()>>>(
             n, a.data_ptr<float>(), th.data_ptr<float>(),
             out.data_ptr<std::complex<float>>());
     CUDA_CHECK(cudaGetLastError());
@@ -383,7 +450,6 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, Tier5OpsKernels) {
     m.impl("gru", gru_cuda);
     m.impl("rnn_relu", rnn_relu_cuda);
     m.impl("rnn_tanh", rnn_tanh_cuda);
-    m.impl("hann_window", hann_window_cuda);
     m.impl("real", real_cuda);
     m.impl("imag", imag_cuda);
     m.impl("conj", conj_cuda);
