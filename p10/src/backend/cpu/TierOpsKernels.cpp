@@ -19,6 +19,7 @@
 #include "Exception.h"
 #include "Parallel.h"
 #include "TypePromotion.h"
+#include "SpecialMath.h"
 
 #include <vector>
 #include <algorithm>
@@ -29,11 +30,6 @@
 #include <cstring>
 #include <utility>
 #include <type_traits>
-
-#if defined(__GLIBC__)
-extern "C" double erfinv(double) __THROW __attribute_const__;
-extern "C" float erfinvf(float) __THROW __attribute_const__;
-#endif
 
 namespace tensorplay {
 namespace cpu {
@@ -622,15 +618,9 @@ Tensor fix_cpu(const Tensor& self) {
     }, "fix");
 }
 Tensor erfinv_cpu(const Tensor& self) {
-#if defined(__GLIBC__)
     return float_math_kernel(self, [](double x) {
-        if constexpr (false) { (void)x; }
-        return erfinv(x);
+        return special_math::calc_erfinv(x);
     }, "erfinv");
-#else
-    (void)0;
-    TP_THROW(NotImplementedError, "erfinv requires a C library providing erfinv");
-#endif
 }
 Tensor logit_cpu(const Tensor& self, std::optional<Scalar> eps) {
     double e = eps.has_value() ? eps->toDouble() : 0.0;

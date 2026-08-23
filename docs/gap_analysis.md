@@ -287,3 +287,159 @@ overload 后缀,impl 为 `unfold.Tensor`)、`view`(Tensor.cpp 直连)。
 未移植(依赖 tp 不存在的 DTensor/ShardedTensor):分片 resaving、load_sharded_optimizer_state_dict、
 HF/量化后端(由 MEGA 后端替代)。验证:py_compile 全过、包内交叉引用 AST 核对通过;
 多 rank 数值冒烟待 `_C.so` 重建后进行。
+
+## 10. C++ 核心(p10)/ autograd(tpx)/ 绑定层全栈差距分析(2026-08-23)
+
+方法:三路并行源码走读(C++ 核心 / Python 门面 / autograd+绑定),对照
+`third_party/pytorch`。Python 门面部分与本文件 §1–§8 有重叠,此处只记录增量结论。
+
+### 总量对比
+
+| 维度 | TensorPlay | PyTorch |
+|---|---|---|
+| C++ 核心规模 | p10+tpx+stax+bindings ≈ 7.5 万行 | ATen/c10 数十万行级 |
+| 算子 | impl 去重 673 名(CPU 671/CUDA 587),yaml 618 schema | ~2000+ op |
+| DispatchKey | 6 个 | 20+(两轴 BackendComponent) |
+| 反向节点 | 148 个生成节点 / derivatives.yaml 187 条 | 数千 + SavedVariable 体系 |
+| 顶层导出符号 | ~644 | 约 1.5–3 倍 |
+| Python 层 | 354 文件 ≈ 13.3 万行 | torch/ ≈ 20 万行级 |
+
+一句话:**骨架高度仿真、血肉按需裁剪**——对象模型/dispatcher 分层/TensorIterator/
+autograd 引擎逐文件对照移植,数量级差距在 op 覆盖、分发深度与 dtype×op 组合完整性。
+
+### 10.1 p10 vs ATen/c10
+
+对象模型(`include/{Tensor,TensorImpl,SizesAndStrides,StorageImpl,DataPtr,VariableVersion}.h`):
+- 已复刻:SizesAndStrides(5 维内联)、DataPtr 三件套、StorageImpl 经 shared_ptr<SharedState>
+  共享、VariableVersion(原子计数 + view 经 share_version_counter 别名)、AutogradMetaBase
+  虚接口解耦 tpx、SparseState(COO 最小集)。
+- 差距:单一 Tensor 类持 `shared_ptr<TensorImpl>`,无 TensorBase/Tensor 分离,全库无
+  intrusive_ptr;key_set 非存储字段而是按 device 现算;memory_format 仅 `is_channels_last_`
+  bool(无 MemoryFormat 枚举与传播);无 conjugate/neg 位(conj 是物化拷贝);无 named tensor。
+
+Dispatcher(`include/{Dispatcher,DispatchKey,DispatchStub}.h/.cpp`):
+- DispatchKey 仅 CPU/CUDA/AutogradCPU/AutogradCUDA/AutocastCPU/AutocastCUDA 六个,
+  EndOfKeys 编译期定死,无第三方注册机制、无 Meta 后端(即无 shape-only 推理)。
+- yaml 驱动 codegen + 运行时 `unordered_map<string, DispatchTable>` 按 (op,key) 单函数槽;
+  调用侧生成代码直接查表,类型 `void*` 强转,**无 boxing/kernel 栈/fallthrough**,非 key_set
+  驱动。autograd 接线靠生成代码里 `GradMode::is_enabled()` 分支。
+- DispatchStub 是 ATen CPU capability stub 的独立移植(DEFAULT/AVX2/AVX512),仅 reduction
+  与 StaxPointwise 在用。autocast 真实现(76 op 路由)。
+
+算子覆盖(673 vs ~2000+):
+- 齐:pointwise/比较/reduction/matmul-BLAS/conv+pool(24 conv op)/linalg 26 个 linalg_* /
+  index-scatter 主干/norm 族/loss(tp_*)/embedding/SDPA(含 bwd)/RNN fused/upsample 全套
+  (16)/foreach≈100 + fused optimizer/FFT(pocketfft)/pad 系列/window/特殊数学。
+- 缺:**dropout 全系(0 处)**、**resize_/resize_as_(0 处)**、cross_entropy/ctc_loss、
+  max_pool1d/3d 与 max_unpool、rms_norm、scatter_reduce/index_reduce/take_along_dim/
+  segment_reduce、量化全部、稀疏高级算子、nestedtensor 及长尾。
+
+TensorIterator(`src/TensorIterator.cpp` 1069 行,自述 port of ATen):
+- 有:broadcast infer_size、维度重排、common dtype(compute_types/promoteTypes)、
+  fast setup、内存重叠检查、is_cpu_scalar、reduction 双 pass + parallel_reduce;
+  自研线程池(GRAIN_SIZE=32768,非 OpenMP)。
+- 缺:MemoryFormat/channels-last 输出布局、meta function、can_cast 被简化成"非 Undefined
+  即可转"(丢安全规则)、CUDA 无对应 iterator(各 .cu 手写索引)、vectorized loop 未与 TI 集成。
+
+view/inplace:view 语义正确(as_strided/select/slice/expand/view 共享 storage + 版本号别名,
+ViewKernels 22 个 view/shape op);inplace bump_version 由生成层统一做(TensorGenerated.cpp
+123 处),p10 库内只有 sparse/optimizer 内核显式 bump。`view()` 只接受 contiguous 输入。
+
+CUDA/oneDNN:32 个 .cu 与 CPU 大体对称;SDPA 有 flash-v1 风格 online softmax 简化版;
+CUDAAllocator 是真 caching allocator(按流分块/合并/recordStream);cuBLASLt bias epilogue +
+strided batched GEMM;ForeachMultiTensor.cuh 复刻 MTA。oneDNN 仅 engine/stream 单例 +
+CPU 四个内核的选择性加速,非成体系 mkldnn 后端;cuDNN 集成浅(USE_CUDNN 开关 + 67 行 CHECK 封装)。
+complex dtype 定义齐全(含 ComplexHalf/BComplex32),但 vec256 无 complex 向量核。
+
+### 10.2 tpx autograd vs torch autograd
+
+已有且质量尚可:每设备 ReadyQueue(max-heap by sequence_nr)+ 惰性常驻 worker、依赖计数
++ InputBuffer 合并(GraphTask::mutex_)、grad() 的 init_to_execute capture、reentrant 嵌套
+本地队列、anomaly mode(NaN probe + AnomalyMetadata 栈回溯 + Python 调用点捕获,完成度高)、
+create_graph 高阶导、Python 侧 vjp/jvp/jacobian/hessian/vhp/hvp 全套(functional.py 863 行)、
+gradcheck 968 行、Function 双风格(setup_context/legacy)带 save_for_backward 版本检查。
+
+结构性缺口(按危害排序):
+1. **无 SavedVariable**:148 个生成反向节点(AutogradNodesGenerated.h)直接按值持有前向
+   `Tensor`,unpack 零校验 → 前向后原地改输入会**静默算错梯度**(torch 抛 RuntimeError)。
+   saved_tensors_hooks、`_saved_*` 属性同样缺失。版本检查仅覆盖 Python Function 路径。
+2. **`_InferenceMode` 未绑定**:grad_mode.py:284 引用 `_autograd._InferenceMode`,但
+   bindings Autograd.cpp 未注册 → `inference_mode()` 必然 AttributeError;底层亦无
+   InferenceMode TLS/禁记录语义。
+3. 无 forward-mode AD(jvp 为 double-backward trick;Function.jvp/vmap 明确 raise);
+   worker 无 DeviceGuard/stream 处理,混合设备路由不精确;无 validate_outputs 元数据校验;
+   `retain_graph=False` 仅清 next_edges 不释放节点持有的张量副本,显存回收弱于 torch;
+   无单节点 fast path、优雅关停、compiled-autograd 钩子;c10d 分布式 autograd 无关。
+
+### 10.3 绑定层(src/bindings/python)vs THPVariable
+
+- 双层结构:pybind11 手写 412 `.def` + codegen METH_FASTCALL 快路径(324 模块函数 +
+  226 张量方法,gen_python_c.py 从 618 schema 生成,setattr 覆盖同名 pybind 绑定),
+  合计约 550 个 C 入口;`_C/__init__.pyi` 573 def。backward/grad 执行期 gil_scoped_release。
+- 互操作:numpy 零拷贝入向快路径、DLPack 双向齐全(capsule destructor/内存池)、
+  pickle(getstate/setstate + 显式 `__reduce__`,CPU-only,支持 SharedMemory 通道)、
+  dynamic_attr 支持 weakref;异常映射 IndexError/ValueError/TypeError/NotImplementedError/
+  RuntimeError 完整,可选暴露 C++ 栈。
+- 缺:`__torch_function__`/`__torch_dispatch__` 协议、Tensor 子类/_make_subclass、
+  python dispatcher key、`__deepcopy__`(靠 __reduce__ 兜底)、`__cuda_array_interface__`、
+  out-of-band pickle(protocol 5)、完整索引方言(python_variable_indexing.cpp 对应物)。
+  `tensorplay.Tensor = _C.TensorBase` 直别名,monkey-patch 是唯一扩展途径(_tensor.py 补了
+  flatten/unflatten/unfold/t/register_hook 等 14 个)。缺 `__floordiv__/__mod__`、位运算 dunder。
+
+### 10.4 stax/compiler 定性
+
+静态 IR + 微型 pass 框架 + 解释执行器:FusionPass 只识别 mul→add 一种 pattern + pointwise
+表达式程序(CPU 向量化);Graph::execute 顺序解释,有存储生命周期回收与 channels_last
+布局变换。tensorplay/compiler/(3263 行)是 FX 式 Tracer + DCE/ConstFold/ShapeProp +
+AOT 式 joint-graph 切分 + codecache/cudagraphs。**概念演示层**:无 codegen 到循环/CUDA、
+无 buffer 规划/自动调优,非 Inductor。
+
+### 10.5 高价值补齐项(2026-08-23 处理)
+
+1. ~~`_InferenceMode` 绑定缺失(inference_mode 必崩)~~ **已修复**:
+   - 新增 `p10/include/InferenceMode.h` + `src/InferenceMode.cpp`(thread_local TLS +
+     RAII guard,镜像 GradMode 模式),tpx/Autograd.h 再导出;
+   - 绑定层注册 `_InferenceMode`(init 存 prev、`__enter__/__exit__` 恢复,支持嵌套)
+     与 `_autograd.is_inference_mode_enabled`;
+   - codegen 两处接线:gen_tpx.py 的梯度记录门改为
+     `GradMode::is_enabled() && !InferenceMode::is_enabled() && ...`(164 处),
+     in-place 版本号自增加 inference 保护(TPXOpsGenerated.cpp 35 处 +
+     TensorGenerated.cpp 41 处,含 gen_api.py 的 skip_implementation 路径)。
+   - 已知收窄:inference tensor 无独立版本计数器/禁止后续参与 autograd 的完整语义
+     未做(需 TensorImpl 位标志),当前覆盖"不记录图 + 不 bump 版本"。
+2. ~~生成反向节点无版本校验(SavedVariable 缺失)~~ **已修复**:
+   - 新增 `tpx/include/SavedVariable.h` + `src/SavedVariable.cpp`:save 记录版本,
+     unpack 时版本不符抛 RuntimeError(消息对齐 torch "modified by an inplace
+     operation: [saved version: X; current version: Y]");
+   - gen_autograd.py:Tensor 型成员改存 SavedVariable,apply() 顶部生成
+     `{m}_.unpack()` 局部变量(公式引用 `{m}_sv`),节点新增 release_variables()
+     override 释放保存的张量;Node::release_variables 改虚函数;
+   - ManualNodes.h 手写节点(SDPA/Mean/Cat/Stack)同步迁移;
+   - Python Function 路径原本就有版本检查,不变。
+3. resize_/dropout 缺失 **已部分落地**:
+   - `resize_`:yaml 条目(method 变体,CPU/CUDA)+ TensorImpl::set_sizes_contiguous
+     + 双后端内核(storage 原地扩容保数据、缩容只改逻辑形状、非 resizable storage 抛错);
+   - dropout 走 torch 同构架构:新增融合 `native_dropout(Tensor,float)->(Tensor,Tensor)`
+     (CPU 标量循环 / CUDA philox grid-stride 单内核同时产 output+bool mask),
+     derivatives.yaml 公式 `grad * mask / (1 - p)`(首个 tuple 返回 op);
+     F.dropout 训练路径改调 `_C.native_dropout`,p==1 返回全零,inplace 暂走组合回退;
+   - memory_format **已补**(2026-08-23 深夜):新增 `p10/include/MemoryFormat.h`
+     (Contiguous/Preserve/ChannelsLast/ChannelsLast3d 枚举 + NHWC/NDHWC stride
+     数学,对齐 c10);TensorImpl 的 `is_channels_last_` bool 升级为
+     `memory_format_` 字段(原 bool 无任何读取方,零风险迁移);
+     Tensor 新增 `memory_format()/is_contiguous(mf)/is_channels_last{,_2d,_3d}/
+     contiguous(mf)`(材质化走 fresh-storage + strided copy_ + 格式标签);
+     绑定层暴露上述方法(接受 int 枚举);Python 顶层导出
+     `MemoryFormat/contiguous_format/preserve_format/channels_last/channels_last_3d`。
+     收窄:工厂族(empty_like/clone)的 memory_format 参数、TI 的 channels-last
+     输出布局传播、conv/oneDNN 的 NHWC 加速路径未动——枚举与语义地基已就位。
+
+验证状态(2026-08-23 深夜):`ninja -C build _C` 全量通过(p10/tpx/stax/_C,
+产物 mtime 新于全部改动源);冒烟测试全绿——inference_mode(记录抑制/嵌套恢复/
+装饰器/查询 API)、版本校验(原地修改已保存张量抛 "[saved version: X;
+current version: Y]"、未修改路径梯度数值正确、create_graph 双反向可用)、
+resize_(扩容保前缀/缩容仅逻辑/版本号自增)、dropout(梯度比例=1/(1-p)、
+被丢弃位梯度为零、p==0 恒等、p==1 全零)、memory_format(NHWC/NDHWC stride
+数学、值保持往返、同 storage no-op、channels-last 张量参与 autograd)。
+注:晚间 PointwiseKernels.cpp/VecUnary.h 的并行 AVX2 WIP 已由其作者完成,
+与本节改动共同编译通过。

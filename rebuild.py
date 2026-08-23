@@ -92,16 +92,10 @@ def main():
         sys.exit(1)
     
     print("\nGenerating stubs..")
-    # Generate stubs (produces _C/ directory in current cwd because of -O .)
-    # Note: nanobind stubgen uses module name for directory if -P is used
-    try:
-        env = os.environ.copy()
-        env["TENSORPLAY_BUILDING_STUBS"] = "1"
-        subprocess.check_call([sys.executable, "-m", "nanobind.stubgen", "-m", "tensorplay._C", "-r", "-O", ".", "-P"], cwd=cwd, env=env)
-    except subprocess.CalledProcessError as e:
-        print(f"Stub generation failed: {e}")
-        # Not fatal, but good to know
-    
+    # Typing stubs (.pyi) for tensorplay/_C are produced by the CMake codegen
+    # (tools/codegen/gen_pyi.py) and installed into the package, so no extra
+    # stub-generation step is needed here.
+
     # Optional: Build wheel if requested
     if len(sys.argv) > 1 and "--wheel" in sys.argv:
         print("\nBuilding wheel...")

@@ -7,7 +7,7 @@
   Tensor? x=None);非空列表默认值迁至条目级 `python_defaults`。
 - types 层 = p10 以 torchgen.api.types CType 代数注册(`StdOptionalCType/StdVectorCType` 适配 std 命名)。
 - 编排层 = `main.py::run_gen()` + `@register_generator`,支持 `--targets`;双入口(包/脚本)可用。
-- `tensorplaygen.py`:自定义算子生成器(TORCH_LIBRARY_IMPL 风格注册到 p10 Dispatcher + nanobind)。
+- `tensorplaygen.py`:自定义算子生成器(TORCH_LIBRARY_IMPL 风格注册到 p10 Dispatcher + 纯 CPython `METH_FASTCALL|KEYWORDS` 绑定,经 `python_c` 桥接面,无 pybind11;对齐 torch 的 torch_python 布局)。
 - Float8_e4m3fn/e5m2:DType 枚举 + `TENSORPLAY_FORALL_FP8_TYPES` 分层宏 + copy/item 接入 + float 桥接运算符。
 - conv 系 bias / nll_loss_backward.total_weight 的 optional→`const Tensor&` 解包边界(`UNWRAP_OPT_TENSOR`)。
 
