@@ -10,15 +10,23 @@ Required native surface (probed lazily on ``tensorplay._C``):
 ===============================  ==========================================
 symbol                           semantics
 ===============================  ==========================================
-``cuda_stream_create()``         new side stream handle
-``cuda_stream_destroy(h)``       release it
-``cuda_graph_begin_capture()``   start capture on the calling thread's stream
-``cuda_graph_end_capture()``     stop -> opaque graph object
+``cuda_graph_begin_capture()``   start capture on the dedicated side stream
+                                 (it becomes the thread's current stream)
+``cuda_graph_end_capture()``     stop -> opaque graph handle
 ``cuda_graph_instantiate(g)``    compile to executable
 ``cuda_graph_launch(e)``         enqueue executable on current stream
 ===============================  ==========================================
 
-Until these land, :meth:`CudaGraphManager.capture` raises
+Optional symbols used when present (all shipped by ``tensorplay._C`` builds
+with CUDA): ``cuda_graph_capture_stream()`` exposes the dedicated capture
+side stream so warmup runs on the same stream as capture (lazy per-stream
+state such as cuBLAS workspaces must see both equally);
+``cuda_stream_get_current()/cuda_stream_set_current(s)`` save and restore the
+caller's stream around the whole sequence.  Allocations issued during
+capture are routed into a graph-private allocator pool natively, keeping
+replay-baked addresses exclusive until the entry is dropped.
+
+Until the required symbols land, :meth:`CudaGraphManager.capture` raises
 :class:`NotImplementedError` naming the missing symbols. Tests may inject a
 fake via ``CudaGraphManager(native=...)``.
 """
@@ -70,6 +78,25 @@ def _clone_static(tensor: Any) -> Any:
 
     clone = tensor.clone()
     return clone
+
+
+def _switch_to_capture_stream(native: Any) -> Any:
+    """Move the calling thread onto the native capture side stream.
+
+    Returns the caller's previous stream when the switch happened (the
+    caller must restore it), or ``None`` when the native surface lacks the
+    optional stream symbols and capture will run on whatever is current.
+    """
+
+    get_capture_stream = getattr(native, "cuda_graph_capture_stream", None)
+    set_current = getattr(native, "cuda_stream_set_current", None)
+    if get_capture_stream is None or set_current is None:
+        return None
+    side_stream = get_capture_stream()
+    get_current = getattr(native, "cuda_stream_get_current", None)
+    previous = get_current() if get_current is not None else None
+    set_current(side_stream)
+    return previous
 
 
 def _copy_into(dst: Any, src: Any) -> None:
@@ -132,10 +159,17 @@ class CudaGraphManager:
             )
 
         native = self.native
-        # Warmup executes lazy initialisations outside capture.
-        fn(*sample_args)
-        self.capturing = key
+        # Warmup must run on the same stream capture uses (lazy per-stream
+        # state such as cuBLAS workspaces would otherwise land mid-capture),
+        # so switch to the dedicated capture side stream when the native
+        # surface exposes it.  begin/end capture manage the current stream
+        # themselves for the captured window; we restore the caller's stream
+        # afterwards so replays enqueue where the user expects.
+        restore_stream = _switch_to_capture_stream(native)
         try:
+            # Warmup executes lazy initialisations outside capture.
+            fn(*sample_args)
+            self.capturing = key
             native.cuda_graph_begin_capture()
             static_inputs = [_clone_static(a) for a in sample_args]
             outputs = fn(*static_inputs)
@@ -143,6 +177,8 @@ class CudaGraphManager:
             executable = native.cuda_graph_instantiate(graph)
         finally:
             self.capturing = None
+            if restore_stream is not None:
+                native.cuda_stream_set_current(restore_stream)
         out_list = list(outputs) if isinstance(outputs, (list, tuple)) else [outputs]
         entry = _GraphEntry(key, signature, executable, static_inputs, out_list)
         self._entries[key] = entry

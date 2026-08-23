@@ -99,13 +99,65 @@ template <typename F>  // double(double,double)
 __global__ void fm_binary_f32_kernel(int64_t n, const float* a, const float* b, float* out, F f) {
     int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
-    for (; i < n; i += stride) out[i] = static_cast<float>(f(static_cast<double>(a[i])),
-                                                            static_cast<double>(b[i]));
+    for (; i < n; i += stride) out[i] = static_cast<float>(f(static_cast<double>(a[i]),
+                                                             static_cast<double>(b[i])));
 }
 
 void launch_ew(dim3& grid, dim3& block, int64_t n) {
     block = dim3(kThreads);
     grid = dim3(static_cast<unsigned>((n + kThreads - 1) / kThreads));
+}
+
+// Host-stage fallback for reference-math chains that cannot be annotated
+// __device__ (same strategy as Tier5OpsKernels.cu's linear-algebra family):
+// pull to CPU, run the double-precision scalar loops, ship back. Dtype
+// semantics mirror float_math_cuda / binary_float_cuda.
+template <typename F>
+Tensor host_staged_unary(const Tensor& self, F fn) {
+    DType in = self.dtype();
+    DType out_dt = isFloatingType(in) ? in : DType::Float32;
+    DType compute_dt = (in == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor w = self.contiguous().to(compute_dt).to(Device(DeviceType::CPU));
+    Tensor t = Tensor::empty(shape_of(w), compute_dt, Device(DeviceType::CPU));
+    int64_t n = w.numel();
+    if (compute_dt == DType::Float64) {
+        const double* sp = w.data_ptr<double>();
+        double* dp = t.data_ptr<double>();
+        for (int64_t i = 0; i < n; ++i) dp[i] = static_cast<double>(fn(sp[i]));
+    } else {
+        const float* sp = w.data_ptr<float>();
+        float* dp = t.data_ptr<float>();
+        for (int64_t i = 0; i < n; ++i)
+            dp[i] = static_cast<float>(fn(static_cast<double>(sp[i])));
+    }
+    Tensor r = t.to(self.device());
+    return (out_dt == compute_dt) ? r : r.to(out_dt);
+}
+
+template <typename F>
+Tensor host_staged_binary(const Tensor& a_in, const Tensor& b_in, F fn) {
+    DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
+    if (!isFloatingType(dt)) dt = DType::Float32;
+    Tensor ac = a_in.to(dt).expand(broadcast_shapes(shape_of(a_in), shape_of(b_in)))
+                    .contiguous()
+                    .to(Device(DeviceType::CPU));
+    Tensor bc = b_in.to(dt).expand(shape_of(ac)).contiguous().to(Device(DeviceType::CPU));
+    Tensor t = Tensor::empty(shape_of(ac), dt, Device(DeviceType::CPU));
+    int64_t n = t.numel();
+    if (dt == DType::Float64) {
+        const double* ap = ac.data_ptr<double>();
+        const double* bp = bc.data_ptr<double>();
+        double* dp = t.data_ptr<double>();
+        for (int64_t i = 0; i < n; ++i) dp[i] = static_cast<double>(fn(ap[i], bp[i]));
+    } else {
+        const float* ap = ac.data_ptr<float>();
+        const float* bp = bc.data_ptr<float>();
+        float* dp = t.data_ptr<float>();
+        for (int64_t i = 0; i < n; ++i)
+            dp[i] = static_cast<float>(fn(static_cast<double>(ap[i]),
+                                          static_cast<double>(bp[i])));
+    }
+    return t.to(a_in.device());
 }
 
 template <typename F>
@@ -223,7 +275,9 @@ Tensor i1_cuda(const Tensor& self) {
                            "i1");
 }
 Tensor i1e_cuda(const Tensor& self) {
-    return float_math_cuda(self, [] __device__ (double x) { return calc_i1e(x); }, "i1e");
+    // calc_i1e 的 Cephes 参考链无法整体标注 __device__（nvcc 拒绝
+    // host→device 调用），与 Tier5OpsKernels.cu 的线性代数族一样 host-stage。
+    return host_staged_unary(self, [](double x) { return calc_i1e(x); });
 }
 
 // ---------------------------------------------------------------------------
@@ -301,14 +355,10 @@ Tensor zeta_cuda(const Tensor& s, const Tensor& q) {
     }, "zeta");
 }
 Tensor gammainc_cuda(const Tensor& a, const Tensor& x) {
-    return binary_float_cuda(a, x, [] __device__ (double p, double v) {
-        return calc_igamma(p, v);
-    }, "gammainc");
+    return host_staged_binary(a, x, [](double p, double v) { return calc_igamma(p, v); });
 }
 Tensor gammaincc_cuda(const Tensor& a, const Tensor& x) {
-    return binary_float_cuda(a, x, [] __device__ (double p, double v) {
-        return calc_igammac(p, v);
-    }, "gammaincc");
+    return host_staged_binary(a, x, [](double p, double v) { return calc_igammac(p, v); });
 }
 Tensor polygamma_cuda(int64_t n, const Tensor& x) {
     return float_math_cuda(x, [n] __device__ (double v) {
@@ -354,4 +404,5 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, SpecialKernels) {
     m.impl("polygamma", polygamma_cuda);
 }
 
+}  // namespace cuda
 }  // namespace tensorplay

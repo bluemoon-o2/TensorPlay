@@ -24,18 +24,11 @@
 #include <limits>
 
 namespace tensorplay {
-namespace cuda {
 
-
-#define CUDA_CHECK(condition) \
-  do { \
-    cudaError_t error = condition; \
-    if (error != cudaSuccess) { \
-      TP_THROW(RuntimeError, std::string("CUDA Error: ") + cudaGetErrorString(error)); \
-    } \
-  } while (0)
-
-// CPU reference implementations (cpu/Tier5OpsKernels.cpp).
+// CPU reference implementations (cpu/Tier5OpsKernels.cpp). These must be
+// declared at the tensorplay::cpu level where they are defined — nesting the
+// declarations inside namespace cuda would silently create a distinct
+// tensorplay::cuda::cpu::* symbol set that never links.
 namespace cpu {
 Tensor addbmm_cpu(const Tensor&, const Tensor&, const Tensor&, Scalar, Scalar);
 Tensor addmv_cpu(const Tensor&, const Tensor&, const Tensor&, Scalar, Scalar);
@@ -51,6 +44,16 @@ Tensor pdist_cpu(const Tensor&, double);
 Tensor hinge_embedding_loss_cpu(const Tensor&, const Tensor&, Scalar);
 Tensor margin_ranking_loss_cpu(const Tensor&, const Tensor&, const Tensor&, Scalar);
 } // namespace cpu
+
+namespace cuda {
+
+#define CUDA_CHECK(condition) \
+  do { \
+    cudaError_t error = condition; \
+    if (error != cudaSuccess) { \
+      TP_THROW(RuntimeError, std::string("CUDA Error: ") + cudaGetErrorString(error)); \
+    } \
+  } while (0)
 
 namespace {
 

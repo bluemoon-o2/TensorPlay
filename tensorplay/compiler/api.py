@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterable
 from weakref import WeakSet
 
 from .graph import GraphCaptureError, GraphModule, Tracer
+from .guards import GuardChain, build_guard_chain, format_recompile_reasons
 from .passes import ConstFold, DeadCodeElimination, PassManager, ShapeProp
 from .registry import CompilerFn, get_default_backend, lookup_backend
 
@@ -215,6 +216,12 @@ def _backend_kwargs(
     return kwargs
 
 
+def _log_recompiles() -> bool:
+    import os
+
+    return os.environ.get("TP_LOG_RECOMPILES", "") not in ("", "0")
+
+
 def compile(
     model: Callable[..., Any] | None = None,
     *,
@@ -296,6 +303,7 @@ def compile(
         _DEFAULT_RECOMPILE_LIMIT if recompile_limit is None else recompile_limit
     )
     cache: dict[Any, Callable[..., Any]] = {}
+    guard_chains: dict[Any, GuardChain] = {}
     lock = threading.RLock()
     last_quick_key: Any = object()
     last_compiled_fn: Callable[..., Any] | None = None
@@ -360,6 +368,22 @@ def compile(
                     compiled_fn = model
                     cache[key] = compiled_fn
                 else:
+                    # Explain the miss against every stored specialization
+                    # (Dynamo's get_guard_fail_reason) before recompiling.
+                    reasons: list[Any] = []
+                    for chain in guard_chains.values():
+                        reasons.extend(chain.explain(args, kwargs))
+                    if reasons:
+                        optimized._tensorplay_last_recompile_reasons = tuple(reasons)
+                        if _log_recompiles():
+                            import warnings
+
+                            warnings.warn(
+                                "recompiling "
+                                f"{getattr(model, '__name__', model)!r}: "
+                                + format_recompile_reasons(reasons),
+                                stacklevel=2,
+                            )
                     compiled_fn, captured_gm = _compile_region(
                         model,
                         compiler_fn,
@@ -376,6 +400,7 @@ def compile(
                             sorted({*guard_param_names, *promoted})
                         )
                         cache.clear()
+                        guard_chains.clear()
                         last_compiled_fn = None
                     key = (
                         _input_signature(
@@ -384,6 +409,13 @@ def compile(
                         _guard_component(args, kwargs, _value_signature),
                     )
                     cache[key] = compiled_fn
+                    guard_chains[key] = build_guard_chain(
+                        key,
+                        args=args,
+                        kwargs=kwargs,
+                        dynamic=specialization_dynamic,
+                        target=model.forward if _is_module_like(model) else model,
+                    )
             last_quick_key = quick_key
             last_compiled_fn = compiled_fn
             if not kwargs:
@@ -397,6 +429,8 @@ def compile(
 
     optimized._tensorplay_backend = backend_spec  # type: ignore[attr-defined]
     optimized._tensorplay_cache = cache  # type: ignore[attr-defined]
+    optimized._tensorplay_guard_chains = guard_chains  # type: ignore[attr-defined]
+    optimized._tensorplay_last_recompile_reasons = ()  # type: ignore[attr-defined]
     optimized._tensorplay_original = model  # type: ignore[attr-defined]
     optimized._tensorplay_dynamic = dynamic  # type: ignore[attr-defined]
     optimized._tensorplay_dynamic_shapes = normalized_dynamic_shapes  # type: ignore[attr-defined]
@@ -516,3 +550,10 @@ def reset() -> None:
         cache = getattr(wrapper, "_tensorplay_cache", None)
         if cache is not None:
             cache.clear()
+        chains = getattr(wrapper, "_tensorplay_guard_chains", None)
+        if chains is not None:
+            chains.clear()
+        try:
+            wrapper._tensorplay_last_recompile_reasons = ()
+        except Exception:
+            pass

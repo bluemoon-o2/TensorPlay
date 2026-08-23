@@ -11,6 +11,7 @@
 #include "Utils.h"
 #include "TypePromotion.h"
 #include "CUDARuntime.h"
+#include "SpecialMath.h"
 
 #include <cuda_runtime.h>
 
@@ -520,7 +521,11 @@ Tensor fix_cuda(const Tensor& self) {
                             "fix");
 }
 Tensor erfinv_cuda(const Tensor& self) {
-    return float_math_cuda(self, [] __device__ (double x) { return ::erfinv(x); }, "erfinv");
+    // CUDA has no native erfinv; use the Cephes calc_erfinv from SpecialMath.h
+    // (the same implementation ATen's erfinv_kernel uses), not glibc's
+    // host-only ::erfinv — linking that from device code leaves an undefined
+    // symbol in libp10.so.
+    return float_math_cuda(self, [] __device__ (double x) { return tensorplay::special_math::calc_erfinv(x); }, "erfinv");
 }
 Tensor logit_cuda(const Tensor& self, std::optional<Scalar> eps) {
     double e = eps.has_value() ? eps->toDouble() : 0.0;
