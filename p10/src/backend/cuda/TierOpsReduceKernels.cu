@@ -499,7 +499,7 @@ Tensor transpose_copy_cuda(const Tensor& x, int64_t a2, int64_t b2) {
 // Reduction entry points
 // ===========================================================================
 
-Tensor amax_cuda2(const Tensor& self, std::vector<int64_t> dim, bool keepdim) {
+Tensor amax_cuda2(const Tensor& self, const std::vector<int64_t>& dim, bool keepdim) {
     return reduce_iterative(self, dim.empty()
                                        ? [&]{ std::vector<int64_t> a;
                                               for (int64_t i = 0; i < self.dim(); ++i) a.push_back(i);
@@ -507,7 +507,7 @@ Tensor amax_cuda2(const Tensor& self, std::vector<int64_t> dim, bool keepdim) {
                                        : dim,
                             keepdim, 0);
 }
-Tensor amin_cuda2(const Tensor& self, std::vector<int64_t> dim, bool keepdim) {
+Tensor amin_cuda2(const Tensor& self, const std::vector<int64_t>& dim, bool keepdim) {
     return reduce_iterative(self, dim.empty()
                                        ? [&]{ std::vector<int64_t> a;
                                               for (int64_t i = 0; i < self.dim(); ++i) a.push_back(i);
@@ -543,11 +543,16 @@ Tensor logsumexp_cuda2(const Tensor& self, int64_t dim, bool keepdim) {
     DType out_dt = self.dtype() == DType::Float64 ? DType::Float64 : DType::Float32;
     return accs.reshape(ns).to(out_dt);
 }
-Tensor nansum_cuda2(const Tensor& self, std::vector<int64_t> dim, bool keepdim) {
+Tensor nansum_cuda2(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
     DType out_dt = isFloatingType(self.dtype()) ? self.dtype() : DType::Int64;
+    std::vector<int64_t> dim = dim_in;
+    if (dim.empty()) {
+        // torch: dim omitted (or empty) reduces over every dimension
+        for (int64_t i = 0; i < self.dim(); ++i) dim.push_back(i);
+    }
     return reduce_iterative(self, dim, keepdim, 2, out_dt);
 }
-Tensor count_nonzero_cuda2(const Tensor& self, std::vector<int64_t> dim) {
+Tensor count_nonzero_cuda2(const Tensor& self, const std::vector<int64_t>& dim) {
     return reduce_iterative(self, dim, false, 3, DType::Int64);
 }
 
@@ -1093,7 +1098,7 @@ std::vector<Tensor> tensor_split_cuda(const Tensor& self, int64_t sections, int6
     return outs;
 }
 
-Tensor flip_cuda(const Tensor& self, std::vector<int64_t> dims) {
+Tensor flip_cuda(const Tensor& self, const std::vector<int64_t>& dims) {
     int64_t nd = self.dim();
     std::vector<int64_t> h_flips(nd, 0);
     for (auto& d : dims) h_flips[wrap_dim(d, nd)] = 1;
@@ -1119,7 +1124,7 @@ Tensor flip_cuda(const Tensor& self, std::vector<int64_t> dims) {
     return out;
 }
 
-Tensor roll_cuda(const Tensor& self, std::vector<int64_t> shifts, std::vector<int64_t> dims) {
+Tensor roll_cuda(const Tensor& self, const std::vector<int64_t>& shifts, const std::vector<int64_t>& dims) {
     int64_t nd = self.dim();
     Tensor sc = self.contiguous();
     if (dims.empty()) {
@@ -1176,7 +1181,7 @@ Tensor roll_cuda(const Tensor& self, std::vector<int64_t> shifts, std::vector<in
     return out;
 }
 
-Tensor rot90_cuda(const Tensor& self, int64_t k, std::vector<int64_t> dims) {
+Tensor rot90_cuda(const Tensor& self, int64_t k, const std::vector<int64_t>& dims) {
     // TensorTransformations.cpp:145 rot90 switch composed from flip+transpose.
     int64_t total_dims = self.dim();
     if (dims.size() != 2) TP_THROW(RuntimeError, "expected total rotation dims == 2");
@@ -1260,81 +1265,57 @@ std::vector<Tensor> meshgrid_cuda(const std::vector<Tensor>& tensors, const std:
 }
 
 std::vector<Tensor> broadcast_tensors_cuda(const std::vector<Tensor>& tensors) {
+    // CompositeImplicit mirror of broadcast_tensors_cpu: device-generic
+    // expand views; no CUDA-specific code required.
     std::vector<int64_t> shape;
     for (auto& t : tensors) shape = broadcast_shapes(shape, shape_of(t));
     std::vector<Tensor> outs;
-    int64_t nd = static_cast<int64_t>(shape.size());
-    int64_t n = 1;
-    for (int64_t s2 : shape) n *= s2;
-    auto stream = getCurrentCUDAStream().stream();
+    outs.reserve(tensors.size());
     for (auto& t : tensors) {
         std::vector<int64_t> ts = shape_of(t);
-        if (ts == shape) { outs.push_back(t); continue; }
-        std::vector<int64_t> padded(nd, 1), strides_padded(nd, 0);
-        int64_t off = nd - static_cast<int64_t>(ts.size());
-        for (int64_t i = 0; i < static_cast<int64_t>(ts.size()); ++i) padded[off + i] = ts[i];
-        {
-            int64_t s2 = 1;
-            for (int64_t i = static_cast<int64_t>(ts.size()) - 1; i >= 0; --i) {
-                strides_padded[off + i] = s2; s2 *= ts[i];
-            }
-        }
-        Tensor src = t.contiguous();
-        Tensor out = Tensor::empty(shape, t.dtype(), t.device());
-        if (n > 0) {
-            Tensor d_osz = pack_i64(shape, t.device());
-            Tensor d_isz = pack_i64(padded, t.device());
-            Tensor d_ist = pack_i64(strides_padded, t.device());
-            dim3 grid = make_grid(n), block(kThreads);
-#define TP_BC(ctype, name_) \
-    case DType::name_: \
-        broadcast_map_kernel<ctype><<<grid, block, 0, stream>>>( \
-            n, nd, src.data_ptr<ctype>(), out.data_ptr<ctype>(), \
-            d_osz.data_ptr<int64_t>(), d_isz.data_ptr<int64_t>(), \
-            d_ist.data_ptr<int64_t>()); \
-        break;
-            switch (t.dtype()) {
-                TENSORPLAY_FORALL_SCALAR_TYPES(TP_BC)
-                default: TP_THROW(TypeError, "broadcast_tensors: unsupported dtype");
-            }
-#undef TP_BC
-            CUDA_CHECK(cudaGetLastError());
-        }
-        outs.push_back(out);
+        outs.push_back(ts == shape ? t : t.expand(shape));
     }
     return outs;
 }
 
 Tensor block_diag_cuda(const std::vector<Tensor>& tensors) {
-    // Host-staged reference implementation (rare op).
-    int64_t total = 0;
-    for (auto& t : tensors) {
-        if (t.dim() != 2) TP_THROW(RuntimeError, "block_diag: expecting a list of 2D tensors");
-        if (t.size(0) != t.size(1))
-            TP_THROW(RuntimeError, "block_diag: expecting square matrices");
-        total += t.size(0);
-    }
-    Tensor out = Tensor::zeros({total, total}, tensors.at(0).dtype(), Device(DeviceType::CPU));
-    int64_t off = 0;
-    for (auto& t : tensors) {
-        Tensor sc = t.contiguous().to(Device(DeviceType::CPU));
-        int64_t m = sc.size(0);
-#define TP_BD(ctype, name_) \
-    case DType::name_: { \
-        const ctype* sp = sc.data_ptr<ctype>(); \
-        ctype* dp = out.data_ptr<ctype>(); \
-        for (int64_t r = 0; r < m; ++r) \
-            for (int64_t c = 0; c < m; ++c) \
-                dp[(off + r) * total + off + c] = sp[r * m + c]; \
-        break; }
-        switch (t.dtype()) {
-            TENSORPLAY_FORALL_SCALAR_TYPES(TP_BD)
-            default: TP_THROW(TypeError, "block_diag: unsupported dtype");
+    // CompositeImplicit mirror of block_diag_cpu (device-generic members).
+    if (tensors.empty()) return Tensor::empty({1, 0}, DType::Float32);
+    const Device& device = tensors[0].device();
+    DType out_dtype = tensors[0].dtype();
+    int64_t rows = 0, cols = 0;
+    std::vector<Tensor> blocks2d;
+    blocks2d.reserve(tensors.size());
+    for (size_t idx = 0; idx < tensors.size(); ++idx) {
+        const Tensor& t = tensors[idx];
+        if (!(t.device() == device)) {
+            TP_THROW(RuntimeError,
+                     "torch.block_diag: input tensors must all be on the same device.");
         }
-#undef TP_BD
-        off += m;
+        out_dtype = promoteTypes(out_dtype, t.dtype());
+        const int64_t nd = t.dim();
+        if (nd > 2) {
+            TP_THROW(RuntimeError,
+                     "torch.block_diag: Input tensors must have 2 or fewer dimensions. Input ",
+                     static_cast<int64_t>(idx), " has ", nd, " dimensions");
+        }
+        Tensor b2 = t;
+        if (nd == 1) b2 = t.expand({1, t.size(0)});
+        else if (nd == 0) b2 = t.expand({1, 1});
+        blocks2d.push_back(b2);
+        rows += b2.size(0);
+        cols += b2.size(1);
     }
-    return out.to(tensors.at(0).device());
+    Tensor out = Tensor::zeros({rows, cols}, out_dtype, device);
+    int64_t off0 = 0, off1 = 0;
+    for (const auto& b : blocks2d) {
+        out.slice(0, off0, off0 + b.size(0))
+           .slice(1, off1, off1 + b.size(1))
+           .copy_(b);
+        off0 += b.size(0);
+        off1 += b.size(1);
+    }
+    return out;
 }
 
 Tensor pixel_shuffle_cuda(const Tensor& self, int64_t upscale_factor) {
@@ -1481,7 +1462,8 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, TierReduceOpsKernels) {
     m.impl("diag_embed", diag_embed_cuda);
     m.impl("narrow", narrow_cuda);
     m.impl("split_with_sizes", split_with_sizes_cuda);
-    m.impl("tensor_split.sections", tensor_split_cuda);
+    // tensor_split.sections: owned by cpu/ShapeAlignKernels.cpp (torch-exact
+    // view semantics + indices/tensor overloads); duplicate removed.
     m.impl("flip", flip_cuda);
     m.impl("roll", roll_cuda);
     m.impl("rot90", rot90_cuda);

@@ -305,7 +305,7 @@ def test_adaptive_pools_3d_and_max_with_indices():
     # 1D with_indices via unsqueeze path
     x1 = _no_ties((2, 3, 15), 25)
     v1, i1 = F.adaptive_max_pool1d_with_indices(_mk(x1), 4)
-    tv1, ti1 = torch._C._nn.adaptive_max_pool1d(torch.tensor(x1), 4)
+    tv1, ti1 = torch.nn.functional.adaptive_max_pool1d(torch.tensor(x1), 4, return_indices=True)
     _assert_close(v1, tv1.numpy(), msg="adaptive_max_pool1d values")
     np.testing.assert_array_equal(_np(i1), ti1.numpy())
 

@@ -4,6 +4,21 @@
 参考基准 `third_party/pytorch`(commit `893b6406`)。每层给出:现状 → 目标语义 →
 pytorch 参考路径 → TensorPlay 落点 → 验收标准。
 
+## 量化差距（2026-08-24 实测, wc -l）
+
+| 组件 | torch (LOC) | TensorPlay (LOC) | 倍率 |
+|---|---|---|---|
+| Inductor (`torch/_inductor`) | 284,829 | backends+stax ≈ 4,400 | ~65x |
+| Dynamo (`torch/_dynamo`) | 130,241 | compiler 前端 ≈ 2,600 | ~50x |
+| FX (`torch/fx`) | 54,204 | graph+passes ≈ 2,000 | ~27x |
+| HOPs + subclasses | 31,915 | — | — |
+| 编译 C++ (`torch/csrc/{inductor,dynamo,fx}`) | 35,692 | stax C+++桥接 ≈ 1,600 | ~22x |
+| **合计** | **≈537k** | **≈10.6k** | **~51x** |
+
+差距本质是机制面而非行数:Dynamo=字节码级追踪(PEP 523)+C++ guard 树+副作用重放;
+Inductor=符号形状(sympy)+缓冲区调度器+Triton/Cpp 双代码生成+autotune 缓存体系。
+TensorPlay 当前=代理追踪+白名单原生图+点级 Triton codegen。
+
 ## 层级总览与状态
 
 | # | 层 | torch 参照 | 现役载体 | 现状 | 目标 |
@@ -281,17 +296,30 @@ sweep+双 partitioner,**12/12 全过**(role 对齐/单调性/链内必存/budget
 语义澄清:min_cut 下被保存节点背后的叶子不再进入 backward 占位符(优化点,
 非缺陷);default 保持全外部引用占位。剩余验收(数值等价/内存曲线)待原生层。
 
-## L5-M4 分解表(已实现+独立验证)
+## L5-M4 分解表(已实现+独立验证;2026-08-24 大幅扩容)
 
-- `compiler/decompositions.py`:`DecomposePass`(PassBase 体系)+ 方法注册表
-  sigmoid/silu/reciprocal/square → 全部展开为已有导数规则的原语
-  (neg/exp/add/truediv/mul),分解后图天然可微;
-- 关键实现点:create_node 只能尾插,而 replace_all_uses_with 强制拓扑序——
-  pass 内捕获规则新建节点并整体移到原节点之前(nodes 为普通 list,原地重排);
-- 独立验证(verify_m4.py):重写正确(sigmoid→exp/sum 残留)+ 分解图直通
-  build_aot(role 一致)✅;
-- 附带修复:`_rule_truediv` 对 Node 使用一元 `-`(任何含除法模型必崩的潜伏缺陷);
-- test_decompositions.py 三用例待原生层就绪后随批跑。
+- `compiler/decompositions.py`:`DecomposePass`(PassBase 体系)+ 注册表,规则按语义名
+  同时命中 `call_method` 与 `call_function` 两种捕获形态;
+- **扩容(2026-08-24)**:4 条 → 20 条,公式逐条对照 `torch/_inductor/decomposition.py`
+  与 ATen 语义:softplus/mish/tanhshrink/logit/log1p/expm1/exp2/log10/sinh/cosh/
+  asinh/acosh/atanh/sec/csc/cot/rad2deg/deg2rad/lerp/addcmul/addcdiv(+既有
+  sigmoid/silu/swish/reciprocal/square)。**每条都只落到 POINTWISE_FUSED 原语集**,
+  因此每个条目直接倍增"可原生编译算子面"(test 断言 `_stax_native_graph` 非空);
+- **接入默认管线**:api.py PassManager = Normalize → ConstFold → **Decompose** → DCE
+  → FusionHint(torch 同序:decompose 先于调度);
+- compare 族(elu/selu/hardshrink/sign 等 where+gt 型)显式缓项——需 where/gt 进入
+  原生集后再放行(文件头注释已声明);
+- **分解表暴露并修复真 bug**:`derivatives.yaml` silu 公式漏 `(1-σ)` 因子
+  (旧值 0.9239 vs 有限差分 0.7354),已按 torch derivatives.yaml 修正;同批补齐
+  sinh/cosh/asinh/acosh/atanh/logit/expm1 共 8 条缺失求导(全部 FD 验证);
+- test_decompositions.py 扩至 31 用例:数值 parity ×13、原生编译 ×11、梯度 parity ×7。
+- **形状/视图求导对齐(2026-08-24 续)**:expand/repeat 公式改为逐字对照上游
+  derivatives.yaml(`at::sum_to(grad, self.sym_sizes())` /
+  `repeat_backward(grad, repeats, self.sym_sizes())`);`ManualNodes.h` 两个
+  helper 重写为忠实移植——`sum_to`/`is_expandable_to` 对照 `ExpandUtils.h`
+  (批量 keepdim 单次求和 + 尾部对齐可扩展检查),`repeat_backward` 对照
+  `FunctionsManual.cpp`(repeat==0 零保护、unsqueezed 前导维求和、仅 repeat!=1
+  维进 reshape+单次批量求和),替换原先自行设计的逐维循环版。
 
 ## L5-M3 CUDA graphs 编排层(已实现+假绑定全逻辑验证)
 
@@ -304,3 +332,109 @@ sweep+双 partitioner,**12/12 全过**(role 对齐/单调性/链内必存/budget
   capture-once/nested/缺绑定向导);test_cudagraphs.py 四用例待批跑;
 - 抽象边界澄清:输出值刷新属原生图重放职责,编排层保证暂存+launch+
   输出对象稳定;side-stream warmup 为 v0 简化点(文档已注)。
+
+## L5-M1/M2 codecache 接线 + 编译期 autotune(2026-08-24,布局对齐 torch)
+
+**文件布局修正**(用户指正):torch 的 Triton 在 `torch/_inductor/codegen/`,
+`torch/backends/` 只放设备开关。据此重排:
+- `tensorplay/compiler/codegen/triton.py`(原 backends/triton.py)——内核
+  codegen + `_compile_program` + 归约尾声检测;
+- `tensorplay/compiler/runtime/stax_autotune.py`(新,CachingAutotuner 对标);
+- `backends/stax.py` 保持 backend 门面,延迟导入 compiler.codegen.triton。
+
+**M1(codecache 接线,PyCodeCache 对标)**:`_compile_program` 源码内容寻址
+落盘(`default_cache("triton")`,ext=py)+ 进程级 launch callable memo,
+重复 compile 不再重生成/重 exec。
+
+**M2(编译期 autotune,CachingAutotuner/do_bench 对标)**:
+- 候选 (XBLOCK,num_warps) 四配置;CUDA Event 计时 warmup+iters 取均速;
+- 决策持久化:`triton-autotune` 缓存,key=digest|xnumel 幂桶|device
+  (JSON),后续进程零 benchmark 直接固定配置发射(去 @triton.autotune
+  每次调用的开销);TP_DISABLE_STAX_AUTOTUNE 可关;
+- 任一候选失败即淘汰,全败回退装饰器路径。
+
+**归约尾声 codegen(M5 首块)**:mul/relu/sum 型图由 3 内核 → **1 内核**
+(`_split_sum_epilogue` 检测全点链+尾 sum;kernel 内 `tl.sum` 折叠,标量
+输出缓冲)。v1 仅推理态;训练走既有双程序 autograd 路径。
+stax 可融合算子集上移为单一事实源 `fx_passes.POINTWISE_FUSED_OP_NAMES`
+(stax 反向导入),消除双份常量。
+
+**P0 首批 pass 补齐(L2)**:
+- `fx_passes/normalize.py` NormalizeOperators:交换律常数右置、x+0/x-0/
+  x*1/x/1/x**1、neg(neg(x))(含 output 直连改写);x*0 刻意不折(NaN 语义);
+- `fx_passes/fusion_hint.py` PointwiseFusionHint:最大点区并查集标注
+  meta[fusion_hint/fusion_region],非点算子为边界;接入 api.compile 默认
+  管线(Normalize→ConstFold→DCE→Hint→ShapeProp);
+- 两 pass 均幂等(tests 断言二次 modified=False)。
+
+**测试**:test_stax_autotune.py(决策缓存/择优/淘汰/禁用开关/发射形态)+
+test_fx_passes.py(normalize/hint/管线集成/尾声检测)。远端 P4 双解释器
+(system + miniconda-torch-env)全绿;triton e2e 三用例以
+`runtime_available()` 功能探测门控——该机 triton3.7/torch2.10cu128 均需
+sm_70+,Pascal 上正确 skip 而非误报。本地同套全绿。
+
+### L5-M3b 原生补齐(2026-08-24,远端构建+GPU 实测通过)
+
+原生后端(953c349)落地后走读发现并处理五项:
+
+1. **instantiate 非幂等 → 第二次 replay 必崩**。`graphs.py` 的
+   `CUDAGraph.replay()` 每次都调 `cuda_graph_instantiate`,而原生端模板在
+   首次实例化后即置空、再次调用抛 "already instantiated"。修复:原生
+   instantiate 对已实例化句柄幂等返回(CUDAGraph.cpp),与 Python 契约
+   "happens automatically at replay" 对齐。
+2. **capture 期 RNG 走值模式 → 重放随机数恒同**(graphs.py 文档注明的缺口,
+   torch Note [CUDA Graph-safe RNG states] 对齐):
+   - `CUDAGenerator.h/.cpp` 新增 `PhiloxCudaState`(值模式/指针模式变体)+
+     `philox_cuda_state()`:isCapturing() 时返回图私有 [seed, offset]
+     Int64 设备缓冲指针 + 图内基础偏移,RNG kernel 执行期解引用;
+   - 图钩子四件套 rng_register_graph(beginCapture 前,默认流分配+同步,逃逸
+     graph-pool)/rng_capture_epilogue(EndCapture 后收 wholegraph_increment)
+     /rng_replay_prologue(launch 前刷新缓冲+生成器 offset 推进,data()
+     自动 recordStream 到 launch 流)/rng_unregister_graph(destroy 时);
+   - kernel 侧调用点改造:RandomKernels.cu 全族(rand/randn/normal_/randint/
+     poisson/bernoulli)+MiscKernels.cu dropout 改收 PhiloxCudaState;
+   - CUDAGraph.cpp 接线:GraphHandle 增 rng_state_id/wholegraph_increment,
+     begin/end/launch/destroy 全生命周期挂钩,失败路径同步清理。
+3. **捕获期 cudaMalloc 触发 CUDA error 900**:allocator 的段扩容在 Global
+   捕获模式下属"不安全 API"。修复:仿 torch CUDAStreamCaptureModeGuard,以
+   `cudaThreadExchangeStreamCaptureMode` 在 cudaMalloc 附近临时切 relaxed
+   (CUDAAllocator.cpp;注意本 CUDA 头无 `_t` 别名,用枚举名)。
+4. **RNG 内核裸 `<<<grid, block>>>` 启动 → 捕获图 nodes=0**(最隐蔽):无流参数
+   = 遗留默认流,Global 模式下既不报错也不入图,内核在窗口内 eager 执行、
+   图空转。修复:RandomKernels/MiscKernels 全部启动点补
+   `getCurrentCUDAStream().stream()`。⚠️ 其余 .cu 文件可能存在同类裸启动,
+   待系统层排查。
+5. **编排层静态缓冲克隆入图**:compiler/cudagraphs.py 原先在窗口内 clone,
+   克隆节点被烤进图,每次重放用样本值覆盖暂存输入。修复:clone 移到
+   begin_capture 之前(顺带使静态输入落在常规池,寿命独立于 graph destroy)。
+
+**验证(远端 P4/CUDA12.8)**:test_cudagraphs 4/4;verify_m3_native 全过
+(replay×2 数值正确/instantiate 幂等/RNG 三次重放各不相同/换种子后与同种子
+eager randn 位级一致);test_compile 除 cuDNN 环境性失败外全绿。
+
+**环境备注**:该机 cuDNN 9.19 与 miniconda torch 二进制均不含 sm_61 内核
+(torch relu 也报 NoKernelImageForDevice),所有走 cuDNN/torch vendor 库的
+用例在该机不可判定,非 TensorPlay 缺陷。
+
+### AOT SIGSEGV 精确线索(2026-08-24,远端 100% 复现)
+
+文档先前记载的非确定性崩溃在本机可稳定复现(gdb 栈):
+```
+#0 tensorplay::TensorIteratorBase::reorder_dimensions()
+#1 TensorIteratorBase::build(TensorIteratorConfig&)
+#2 TensorIterator::reduce_op(...)
+#3 cpu::sum_kernel_impl / #5 redispatch_sum → tpx::ops::sum
+#7-9 _C 绑定层 ← python eager_out.sum().backward()
+```
+触发条件:test_aot 中先 build_aot+value_and_grad 再跑 eager `.backward()`
+(test_aot.py:34)。纯 CPU 路径,与 CUDA graphs/RNG 无关。最小复现脚本
+单独跑 build_aot+value_and_grad 不崩;崩点在 eager backward 的 sum 归约
+TI build。嫌疑:AOT bw 图执行后遗留的悬垂形状/元数据被 TI 读取。
+下会话:ASAN 重编 p10 或 valgrind 抓 reorder_dimensions 的越界读。
+
+### 协作事故记录(2026-08-24)
+
+远端构建机上存在第二工作树 `/root/TensorPlay`(另一开发者)。本会话排查
+并发 ninja 时使用了全局 `pkill -f "ninja|nvcc"`,误杀了对方的构建进程
+(两树分属不同文件系统,本无文件冲突)。教训:共享机器上清理进程必须按
+cwd(/proc/PID/cwd)限定自己的树,禁止全局 pkill。

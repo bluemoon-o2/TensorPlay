@@ -110,8 +110,9 @@ std::tuple<Tensor, Tensor> topk_kernel_cpu(const Tensor& self, int64_t k, int64_
   if (k < 0 || k > cols) {
     TP_THROW(RuntimeError, "topk: k must be in [0, cols]");
   }
-  if (input.dtype() != DType::Float32) {
-    TP_THROW(NotImplementedError, "topk: only float32 is supported for now");
+  if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64) {
+    // torch topk supports all numeric types; extend alongside pooling.
+    TP_THROW(NotImplementedError, "topk: only Float32/Float64 are supported for now");
   }
 
   std::vector<int64_t> shape = static_cast<std::vector<int64_t>>(input.shape());
@@ -120,23 +121,27 @@ std::tuple<Tensor, Tensor> topk_kernel_cpu(const Tensor& self, int64_t k, int64_
   Tensor indices = Tensor::empty(shape, DType::Int64, input.device());
   if (k == 0) return {values, indices};
 
-  const float* idata = input.data_ptr<float>();
-  float* vdata = values.data_ptr<float>();
-  int64_t* idxdata = indices.data_ptr<int64_t>();
+  auto run = [&](auto st) {
+    using scalar_t = decltype(st);
+    const scalar_t* idata = input.data_ptr<scalar_t>();
+    scalar_t* vdata = values.data_ptr<scalar_t>();
+    int64_t* idxdata = indices.data_ptr<int64_t>();
 
-  std::vector<int64_t> perm(cols);
-  std::iota(perm.begin(), perm.end(), 0);
-  for (int64_t r = 0; r < rows; ++r) {
-    const float* row = idata + r * cols;
-    std::partial_sort(perm.begin(), perm.begin() + k, perm.end(),
-                      [row, largest](int64_t a, int64_t b) {
-                        return largest ? (row[a] > row[b]) : (row[a] < row[b]);
-                      });
-    for (int64_t i = 0; i < k; ++i) {
-      vdata[r * k + i] = row[perm[i]];
-      idxdata[r * k + i] = perm[i];
+    std::vector<int64_t> perm(cols);
+    std::iota(perm.begin(), perm.end(), 0);
+    for (int64_t r = 0; r < rows; ++r) {
+      const scalar_t* row = idata + r * cols;
+      std::partial_sort(perm.begin(), perm.begin() + k, perm.end(),
+                        [row, largest](int64_t a, int64_t b) {
+                          return largest ? (row[a] > row[b]) : (row[a] < row[b]);
+                        });
+      for (int64_t i = 0; i < k; ++i) {
+        vdata[r * k + i] = row[perm[i]];
+        idxdata[r * k + i] = perm[i];
+      }
     }
-  }
+  };
+  if (input.dtype() == DType::Float64) run(double{}); else run(float{});
   return {values, indices};
 }
 

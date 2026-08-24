@@ -844,6 +844,450 @@ Tensor prelu_cuda(const Tensor& self, const Tensor& weight) {
     return out32.to(self.dtype());
 }
 
+// ===========================================================================
+// Index/scatter complements + isclose/isreal (torch parity 2026-08-24)
+// Mirrors cpu/TierOpsKernels.cpp; see that file for ATen anchors.
+// ===========================================================================
+
+// Cross-TU kernels reused by the composites below.
+Tensor gather_cuda(const Tensor& self, int64_t dim, const Tensor& index);
+Tensor nansum_cuda2(const Tensor& self, const std::vector<int64_t>& dim, bool keepdim);
+Tensor sum_dim_kernel(const Tensor& self, const std::vector<int64_t>& dim, bool keepdim, DType dtype);
+Tensor isnan_cuda(const Tensor& self);
+
+namespace {
+
+__global__ void nanmean_zero_mask_kernel(int64_t n, const float* count, float* data) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    for (; i < n; i += stride) {
+        if (count[i] == 0.0f) data[i] = std::numeric_limits<float>::quiet_NaN();
+    }
+}
+
+template <typename T, typename Pred>
+__global__ void bitwise_binary_scalar_kernel(int64_t n, const T* sp, T ov, T* dp, Pred pred) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    for (; i < n; i += stride) dp[i] = pred(sp[i], ov);
+}
+
+} // anonymous namespace
+
+Tensor select_scatter_cuda(const Tensor& self, const Tensor& src, int64_t dim, int64_t index) {
+    int64_t nd = self.dim();
+    dim = wrap_dim(dim, nd);
+    if (index < 0) index += self.size(dim);
+    if (index < 0 || index >= self.size(dim)) {
+        TP_THROW(IndexError, "select_scatter: index ", index, " is out of bounds for dimension ",
+                 dim, " with size ", self.size(dim));
+    }
+    Tensor result = self.clone();
+    result.select(dim, index).copy_(src);
+    return result;
+}
+
+Tensor slice_scatter_cuda(const Tensor& self, const Tensor& src, int64_t dim,
+                          std::optional<int64_t> start, std::optional<int64_t> end, int64_t step) {
+    if (step <= 0) TP_THROW(RuntimeError, "slice_scatter: step must be positive");
+    int64_t nd = self.dim();
+    dim = wrap_dim(dim, nd);
+    int64_t length = self.size(dim);
+    int64_t s = start.has_value() ? *start : 0;
+    int64_t e = end.has_value() ? *end : length;
+    if (s < 0) s += length;
+    if (e < 0) e += length;
+    s = std::max<int64_t>(0, std::min<int64_t>(s, length));
+    e = std::max<int64_t>(0, std::min<int64_t>(e, length));
+    if (e < s) e = s;
+    Tensor result = self.clone();
+    result.slice(dim, s, e, step).copy_(src);
+    return result;
+}
+
+Tensor diagonal_scatter_cuda(const Tensor& self, const Tensor& src, int64_t offset,
+                             int64_t dim1, int64_t dim2) {
+    Tensor result = self.clone();
+    Tensor diag = result.diagonal(offset, dim1, dim2);
+    std::vector<int64_t> diag_shape(static_cast<std::vector<int64_t>>(diag.shape()));
+    result.diagonal(offset, dim1, dim2).copy_(src.reshape(diag_shape));
+    return result;
+}
+
+Tensor take_along_dim_cuda(const Tensor& self, const Tensor& indices, std::optional<int64_t> dim) {
+    if (!dim.has_value()) {
+        Tensor flat = self.reshape({-1});
+        Tensor idx = indices.to(DType::Int64).reshape({-1});
+        return gather_cuda(flat, 0, idx);
+    }
+    int64_t nd = self.dim();
+    int64_t d = wrap_dim(*dim, nd);
+    if (indices.dim() != nd) {
+        TP_THROW(RuntimeError, "take_along_dim: indices must have the same number of dimensions as input");
+    }
+    std::vector<int64_t> target(nd);
+    for (int64_t i = 0; i < nd; ++i) {
+        if (i == d) { target[i] = indices.size(i); continue; }
+        int64_t a = self.size(i), b = indices.size(i);
+        if (a != b && a != 1 && b != 1) {
+            TP_THROW(RuntimeError, "take_along_dim: input and indices must match on non-selected dimensions");
+        }
+        target[i] = std::max(a, b);
+    }
+    std::vector<int64_t> idx_target = target;
+    std::vector<int64_t> self_target = target;
+    self_target[d] = self.size(d);
+    Tensor idx_b = indices.expand(idx_target).contiguous().to(DType::Int64);
+    Tensor self_b = self.expand(self_target).contiguous();
+    return gather_cuda(self_b, d, idx_b);
+}
+
+Tensor msort_cuda(const Tensor& self) {
+    // Sorting.cu msort: values of sort along dim 0.
+    Tensor values = std::get<0>(self.sort(0, false));
+    return values;
+}
+
+Tensor nanmean_cuda(const Tensor& self, std::optional<int64_t> dim_opt, bool keepdim,
+                    std::optional<DType> dtype) {
+    DType acc_dt = dtype.value_or(DType::Undefined);
+    Tensor x = self;
+    if (!isFloatingType(x.dtype()) && !isComplexType(x.dtype())) {
+        x = x.to(acc_dt != DType::Undefined ? acc_dt : DType::Float32);
+    } else if (isReducedFloatingType(x.dtype()) && acc_dt == DType::Undefined) {
+        x = x.to(DType::Float32);   // accumulate in f32 like ATen opmath
+    }
+    std::vector<int64_t> dims;
+    if (dim_opt.has_value()) dims.push_back(*dim_opt);
+    else {
+        // global reduction over every dimension
+        for (int64_t i = 0; i < x.dim(); ++i) dims.push_back(i);
+    }
+    Tensor total = nansum_cuda2(x, dims, keepdim);
+    Tensor valid = isnan_cuda(x).logical_not();
+    Tensor count = sum_dim_kernel(valid.to(DType::Float32), dims, keepdim, DType::Float32);
+    Tensor quot = total.to(DType::Float32).div(count);
+    // All-NaN slices yield NaN (count == 0), matching ATen nanmean.
+    Tensor zero = count.eq(Scalar(0.0f));
+    Tensor result = quot.masked_fill(zero, Scalar(std::numeric_limits<double>::quiet_NaN()));
+    return result.to(acc_dt != DType::Undefined ? acc_dt : total.dtype());
+}
+
+namespace {
+__global__ void isclose_kernel(int64_t n, const double* ap, const double* bp,
+                               bool* dp, double rtol, double atol, bool equal_nan) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    for (; i < n; i += stride) {
+        double x = ap[i], y = bp[i];
+        bool close;
+        if (x != x || y != y) {
+            close = equal_nan && x != x && y != y;
+        } else if (::isinf(x) || ::isinf(y)) {
+            close = x == y;
+        } else {
+            double tol = atol + rtol * ::fabs(y);
+            close = ::fabs(x - y) <= tol;
+        }
+        dp[i] = close;
+    }
+}
+} // anonymous namespace
+
+Tensor isclose_cuda(const Tensor& self, const Tensor& other, double rtol, double atol, bool equal_nan) {
+    std::vector<int64_t> out_shape = broadcast_shapes(shape_of(self), shape_of(other));
+    Tensor a = self.to(DType::Float64).expand(out_shape).contiguous();
+    Tensor b = other.to(DType::Float64).expand(out_shape).contiguous();
+    Tensor out = Tensor::empty(out_shape, DType::Bool, self.device());
+    int64_t n = out.numel();
+    if (n == 0) return out;
+    dim3 grid, block;
+    launch_ew(grid, block, n);
+    auto stream = getCurrentCUDAStream().stream();
+    isclose_kernel<<<grid, block, 0, stream>>>(
+        n, a.data_ptr<double>(), b.data_ptr<double>(), out.data_ptr<bool>(),
+        rtol, atol, equal_nan);
+    CUDA_CHECK(cudaGetLastError());
+    return out;
+}
+
+Tensor isreal_cuda(const Tensor& self) {
+    // Real dtypes are trivially real; complex tests imag==0.
+    if (!isComplexType(self.dtype())) {
+        return Tensor::ones(shape_of(self), DType::Bool, self.device());
+    }
+    return bool_unary_cuda(self, [] __device__ (auto x) -> bool {
+        using T = decltype(x);
+        if constexpr (std::is_same_v<T, std::complex<float>>) return x.imag() == 0.0f;
+        else if constexpr (std::is_same_v<T, std::complex<double>>) return x.imag() == 0.0;
+        else return true;
+    }, "isreal");
+}
+
+// --- Bitwise family --------------------------------------------------------
+
+#define TENSORPLAY_FORALL_INT_TYPES_CUDA(_) \
+    _(uint8_t, UInt8)                       \
+    _(int8_t, Int8)                         \
+    _(int16_t, Int16)                       \
+    _(int32_t, Int32)                       \
+    _(int64_t, Int64)                       \
+    _(uint16_t, UInt16)                     \
+    _(uint32_t, UInt32)                     \
+    _(uint64_t, UInt64)
+
+inline void bitwise_check_cuda(const Tensor& t, const char* name) {
+    DType d = t.dtype();
+    if (d == DType::Bool || isIntegralType(d)) return;
+    TP_THROW(TypeError, name, ": only integral and boolean types are supported");
+}
+
+template <typename Pred>
+Tensor bitwise_binary_cuda(const Tensor& a_in, const Tensor& b_in, Pred pred, const char* name) {
+    bitwise_check_cuda(a_in, name);
+    bitwise_check_cuda(b_in, name);
+    std::vector<int64_t> out_shape = broadcast_shapes(shape_of(a_in), shape_of(b_in));
+    DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
+    if (a_in.dtype() == DType::Bool && b_in.dtype() == DType::Bool) dt = DType::Bool;
+    if (dt != DType::Bool && !isIntegralType(dt)) {
+        TP_THROW(TypeError, name, ": only integral and boolean types are supported");
+    }
+    Tensor ac = (a_in.dtype() == dt ? a_in : a_in.to(dt)).expand(out_shape).contiguous();
+    Tensor bc = (b_in.dtype() == dt ? b_in : b_in.to(dt)).expand(out_shape).contiguous();
+    Tensor out = Tensor::empty(out_shape, dt, a_in.device());
+    int64_t n = out.numel();
+    if (n == 0) return out;
+    dim3 grid, block;
+    launch_ew(grid, block, n);
+    auto stream = getCurrentCUDAStream().stream();
+#define TP_BIT_BIN(ctype, name_) \
+    case DType::name_: \
+        ew_binary_kernel<ctype><<<grid, block, 0, stream>>>( \
+            n, ac.data_ptr<ctype>(), bc.data_ptr<ctype>(), out.data_ptr<ctype>(), pred); \
+        break;
+    switch (dt) {
+        TENSORPLAY_FORALL_INT_TYPES_CUDA(TP_BIT_BIN)
+        default: TP_THROW(TypeError, name, ": unsupported dtype");
+    }
+#undef TP_BIT_BIN
+    CUDA_CHECK(cudaGetLastError());
+    return out;
+}
+
+template <typename Pred>
+Tensor bitwise_scalar_cuda(const Tensor& self_in, Scalar other, Pred pred, const char* name) {
+    bitwise_check_cuda(self_in, name);
+    Tensor sc = self_in.contiguous();
+    Tensor out = Tensor::empty(shape_of(self_in), self_in.dtype(), self_in.device());
+    int64_t n = out.numel();
+    if (n == 0) return out;
+    dim3 grid, block;
+    launch_ew(grid, block, n);
+    auto stream = getCurrentCUDAStream().stream();
+#define TP_BIT_SCALAR(ctype, name_) \
+    case DType::name_: { \
+        ctype ov = static_cast<ctype>(other.to<int64_t>()); \
+        bitwise_binary_scalar_kernel<ctype><<<grid, block, 0, stream>>>( \
+            n, sc.data_ptr<ctype>(), ov, out.data_ptr<ctype>(), pred); \
+        break; \
+    }
+    switch (self_in.dtype()) {
+        TENSORPLAY_FORALL_INT_TYPES_CUDA(TP_BIT_SCALAR)
+        default: TP_THROW(TypeError, name, ": unsupported dtype");
+    }
+#undef TP_BIT_SCALAR
+    CUDA_CHECK(cudaGetLastError());
+    return out;
+}
+
+// --- Named entry points for the dispatcher ---------------------------------
+
+namespace {
+
+Tensor bitwise_and_tensor_cuda_impl(const Tensor& a, const Tensor& b) {
+    return bitwise_binary_cuda(a, b,
+        [] __device__ (auto x, auto y) { return static_cast<decltype(x)>(x & y); },
+        "bitwise_and");
+}
+Tensor bitwise_or_tensor_cuda_impl(const Tensor& a, const Tensor& b) {
+    return bitwise_binary_cuda(a, b,
+        [] __device__ (auto x, auto y) { return static_cast<decltype(x)>(x | y); },
+        "bitwise_or");
+}
+Tensor bitwise_xor_tensor_cuda_impl(const Tensor& a, const Tensor& b) {
+    return bitwise_binary_cuda(a, b,
+        [] __device__ (auto x, auto y) { return static_cast<decltype(x)>(x ^ y); },
+        "bitwise_xor");
+}
+Tensor bitwise_and_scalar_cuda_impl(const Tensor& a, Scalar b) {
+    return bitwise_scalar_cuda(a, b,
+        [] __device__ (auto x, auto y) { return static_cast<decltype(x)>(x & y); },
+        "bitwise_and");
+}
+Tensor bitwise_or_scalar_cuda_impl(const Tensor& a, Scalar b) {
+    return bitwise_scalar_cuda(a, b,
+        [] __device__ (auto x, auto y) { return static_cast<decltype(x)>(x | y); },
+        "bitwise_or");
+}
+Tensor bitwise_xor_scalar_cuda_impl(const Tensor& a, Scalar b) {
+    return bitwise_scalar_cuda(a, b,
+        [] __device__ (auto x, auto y) { return static_cast<decltype(x)>(x ^ y); },
+        "bitwise_xor");
+}
+
+template <bool kLeft>
+Tensor bitwise_shift_tensor_cuda_impl(const Tensor& a_in, const Tensor& b_in, const char* name) {
+    bitwise_check_cuda(a_in, name);
+    bitwise_check_cuda(b_in, name);
+    std::vector<int64_t> out_shape = broadcast_shapes(shape_of(a_in), shape_of(b_in));
+    DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
+    if (dt != DType::Bool && !isIntegralType(dt)) {
+        TP_THROW(TypeError, name, ": only integral and boolean types are supported");
+    }
+    Tensor ac = (a_in.dtype() == dt ? a_in : a_in.to(dt)).expand(out_shape).contiguous();
+    Tensor bc = (b_in.dtype() == dt ? b_in : b_in.to(dt)).expand(out_shape).contiguous();
+    Tensor out = Tensor::empty(out_shape, dt, a_in.device());
+    int64_t n = out.numel();
+    if (n == 0) return out;
+    dim3 grid, block;
+    launch_ew(grid, block, n);
+    auto stream = getCurrentCUDAStream().stream();
+#define TP_SHIFT_BIN(ctype, name_) \
+    case DType::name_: { \
+        constexpr bool kShiftLeft = kLeft; \
+        auto op = [kShiftLeft] __device__ (ctype x, ctype y) -> ctype { \
+            using U = typename std::make_unsigned<ctype>::type; \
+            constexpr int64_t kBits = static_cast<int64_t>(sizeof(ctype) * 8); \
+            U xu = static_cast<U>(x); \
+            U sh = static_cast<U>(static_cast<uint64_t>(y) % static_cast<uint64_t>(kBits)); \
+            U r = kShiftLeft ? static_cast<U>(xu << sh) : static_cast<U>(xu >> sh); \
+            return static_cast<ctype>(r); \
+        }; \
+        ew_binary_kernel<ctype><<<grid, block, 0, stream>>>( \
+            n, ac.data_ptr<ctype>(), bc.data_ptr<ctype>(), out.data_ptr<ctype>(), op); \
+        break; \
+    }
+    switch (dt) {
+        TENSORPLAY_FORALL_INT_TYPES_CUDA(TP_SHIFT_BIN)
+        default: TP_THROW(TypeError, name, ": unsupported dtype");
+    }
+#undef TP_SHIFT_BIN
+    CUDA_CHECK(cudaGetLastError());
+    return out;
+}
+
+template <bool kLeft>
+Tensor bitwise_shift_scalar_cuda_impl(const Tensor& a_in, Scalar other, const char* name) {
+    // Shift amounts follow torch: modded by the element bit width.
+    bitwise_check_cuda(a_in, name);
+    int64_t bits = a_in.itemsize() * 8;
+    int64_t shift = other.to<int64_t>();
+    if (shift < 0 || shift >= bits) {
+        TP_THROW(RuntimeError, name, ": shift amount ", shift,
+                 " must be in [0, ", bits, ")");
+    }
+    Tensor sc = a_in.contiguous();
+    Tensor out = Tensor::empty(shape_of(a_in), a_in.dtype(), a_in.device());
+    int64_t n = out.numel();
+    if (n == 0) return out;
+    dim3 grid, block;
+    launch_ew(grid, block, n);
+    auto stream = getCurrentCUDAStream().stream();
+#define TP_SHIFT_SCALAR(ctype, name_) \
+    case DType::name_: { \
+        using U = typename std::make_unsigned<ctype>::type; \
+        U sh = static_cast<U>(shift % bits); \
+        auto op = [sh] __device__ (U x, U) -> ctype { \
+            U r = kLeft ? static_cast<U>(x << sh) : static_cast<U>(x >> sh); \
+            return static_cast<ctype>(r); \
+        }; \
+        ew_binary_kernel<ctype><<<grid, block, 0, stream>>>( \
+            n, sc.data_ptr<ctype>(), sc.data_ptr<ctype>(), out.data_ptr<ctype>(), op); \
+        break; \
+    }
+    switch (a_in.dtype()) {
+        TENSORPLAY_FORALL_INT_TYPES_CUDA(TP_SHIFT_SCALAR)
+        default: TP_THROW(TypeError, name, ": unsupported dtype");
+    }
+#undef TP_SHIFT_SCALAR
+    CUDA_CHECK(cudaGetLastError());
+    return out;
+}
+
+} // anonymous namespace
+
+namespace {
+
+template <typename T, typename Pred>
+__global__ void bitwise_unary_kernel(int64_t n, const T* sp, T* dp, Pred pred) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    for (; i < n; i += stride) dp[i] = pred(sp[i]);
+}
+
+} // anonymous namespace
+
+Tensor bitwise_not_cuda(const Tensor& self) {
+    bitwise_check_cuda(self, "bitwise_not");
+    Tensor sc = self.contiguous();
+    Tensor out = Tensor::empty(shape_of(self), self.dtype(), self.device());
+    int64_t n = out.numel();
+    if (n == 0) return out;
+    dim3 grid, block;
+    launch_ew(grid, block, n);
+    auto stream = getCurrentCUDAStream().stream();
+#define TP_BNOT(ctype, name_) \
+    case DType::name_: \
+        bitwise_unary_kernel<ctype><<<grid, block, 0, stream>>>( \
+            n, sc.data_ptr<ctype>(), out.data_ptr<ctype>(), \
+            [] __device__ (ctype x) -> ctype { return static_cast<ctype>(~x); }); \
+        break;
+    if (self.dtype() == DType::Bool) {
+        bitwise_unary_kernel<bool><<<grid, block, 0, stream>>>(
+            n, sc.data_ptr<bool>(), out.data_ptr<bool>(),
+            [] __device__ (bool x) -> bool { return !x; });
+        CUDA_CHECK(cudaGetLastError());
+        return out;
+    }
+    switch (self.dtype()) {
+        TENSORPLAY_FORALL_INT_TYPES_CUDA(TP_BNOT)
+        default: TP_THROW(TypeError, "bitwise_not: unsupported dtype");
+    }
+#undef TP_BNOT
+    CUDA_CHECK(cudaGetLastError());
+    return out;
+}
+Tensor bitwise_and_tensor_cuda(const Tensor& a, const Tensor& b) {
+    return bitwise_and_tensor_cuda_impl(a, b);
+}
+Tensor bitwise_or_tensor_cuda(const Tensor& a, const Tensor& b) {
+    return bitwise_or_tensor_cuda_impl(a, b);
+}
+Tensor bitwise_xor_tensor_cuda(const Tensor& a, const Tensor& b) {
+    return bitwise_xor_tensor_cuda_impl(a, b);
+}
+Tensor bitwise_and_scalar_cuda(const Tensor& a, Scalar b) {
+    return bitwise_and_scalar_cuda_impl(a, b);
+}
+Tensor bitwise_or_scalar_cuda(const Tensor& a, Scalar b) {
+    return bitwise_or_scalar_cuda_impl(a, b);
+}
+Tensor bitwise_xor_scalar_cuda(const Tensor& a, Scalar b) {
+    return bitwise_xor_scalar_cuda_impl(a, b);
+}
+Tensor bitwise_lshift_tensor_cuda(const Tensor& a, const Tensor& b) {
+    return bitwise_shift_tensor_cuda_impl<true>(a, b, "bitwise_left_shift");
+}
+Tensor bitwise_rshift_tensor_cuda(const Tensor& a, const Tensor& b) {
+    return bitwise_shift_tensor_cuda_impl<false>(a, b, "bitwise_right_shift");
+}
+Tensor bitwise_lshift_scalar_cuda(const Tensor& a, Scalar b) {
+    return bitwise_shift_scalar_cuda_impl<true>(a, b, "bitwise_left_shift");
+}
+Tensor bitwise_rshift_scalar_cuda(const Tensor& a, Scalar b) {
+    return bitwise_shift_scalar_cuda_impl<false>(a, b, "bitwise_right_shift");
+}
+
 TENSORPLAY_LIBRARY_IMPL(CUDA, TierOpsKernels) {
     m.impl("rsub.Scalar", rsub_scalar_cuda);
     m.impl("rsub.Tensor", rsub_tensor_cuda);
@@ -909,6 +1353,27 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, TierOpsKernels) {
     m.impl("softshrink", softshrink_cuda);
     m.impl("threshold", threshold_cuda);
     m.impl("prelu", prelu_cuda);
+    // Index/scatter complements
+    m.impl("select_scatter", select_scatter_cuda);
+    m.impl("slice_scatter", slice_scatter_cuda);
+    m.impl("diagonal_scatter", diagonal_scatter_cuda);
+    m.impl("take_along_dim", take_along_dim_cuda);
+    m.impl("msort", msort_cuda);
+    m.impl("nanmean", nanmean_cuda);
+    m.impl("isclose", isclose_cuda);
+    m.impl("isreal", isreal_cuda);
+    // Bitwise family
+    m.impl("bitwise_not", bitwise_not_cuda);
+    m.impl("bitwise_and.Tensor", bitwise_and_tensor_cuda);
+    m.impl("bitwise_or.Tensor", bitwise_or_tensor_cuda);
+    m.impl("bitwise_xor.Tensor", bitwise_xor_tensor_cuda);
+    m.impl("bitwise_and.Scalar", bitwise_and_scalar_cuda);
+    m.impl("bitwise_or.Scalar", bitwise_or_scalar_cuda);
+    m.impl("bitwise_xor.Scalar", bitwise_xor_scalar_cuda);
+    m.impl("bitwise_left_shift.Tensor", bitwise_lshift_tensor_cuda);
+    m.impl("bitwise_right_shift.Tensor", bitwise_rshift_tensor_cuda);
+    m.impl("bitwise_left_shift.Tensor_Scalar", bitwise_lshift_scalar_cuda);
+    m.impl("bitwise_right_shift.Tensor_Scalar", bitwise_rshift_scalar_cuda);
 }
 
 } // namespace cuda

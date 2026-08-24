@@ -18,6 +18,7 @@ binding, matching how ``torch.load`` itself is structured.
 
 from __future__ import annotations
 
+import copyreg
 import io
 import json
 import pickle
@@ -689,7 +690,7 @@ def write_torch_file(fileobj: BinaryIO, obj: Any, *, pickle_protocol: int = 2) -
 
     data_buf = io.BytesIO()
     pickler = pickle.Pickler(data_buf, protocol=pickle_protocol)
-    dispatch = dict(pickle.Pickler.dispatch_table)
+    dispatch = copyreg.dispatch_table.copy()
     dispatch[type(tp.Tensor)] = reduce_tensor
     parameter_cls = getattr(tp.nn, "Parameter", None)
     if parameter_cls is not None and parameter_cls is not tp.Tensor:

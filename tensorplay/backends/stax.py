@@ -17,7 +17,9 @@ import numbers
 import re
 from typing import Any
 
+from ..compiler.fx_passes import POINTWISE_FUSED_OP_NAMES
 from ..compiler.graph import GraphModule, Node
+from ..library import CustomOpDef as _CustomOpDef
 
 
 def _nodes(value: Any):
@@ -89,25 +91,9 @@ _NATIVE_OPS = {
     "flatten",
 }
 
-_CPU_FUSED_OPS = {
-    "add",
-    "sub",
-    "mul",
-    "div",
-    "pow",
-    "neg",
-    "pos",
-    "abs",
-    "sin",
-    "cos",
-    "exp",
-    "log",
-    "sigmoid",
-    "sqrt",
-    "square",
-    "tanh",
-    "relu",
-}
+# Single source of truth lives in compiler.fx_passes (consumed by the
+# PointwiseFusionHint pass); keep the historical private alias.
+_CPU_FUSED_OPS = POINTWISE_FUSED_OP_NAMES
 
 _CPU_FUSED_AUTOGRAD_OPS = _CPU_FUSED_OPS - {"pow"}
 
@@ -346,8 +332,17 @@ class _CpuFusedPointwiseLowering(_NativeLowering):
 
 def _build_pointwise_program(
     graph_module: GraphModule,
+    *,
+    skip_node: Node | None = None,
+    output_override: Node | None = None,
 ) -> tuple[list[Node], list[int], list[float], list[tuple[str, int, int, int]], int] | None:
-    """Encode one canonical pointwise graph as Stax's postfix program."""
+    """Encode one canonical pointwise graph as Stax's postfix program.
+
+    ``skip_node`` excludes one node from the program (used by the Triton
+    reduction-epilogue path, which folds a full-reduction ``sum`` tail into
+    the kernel instead of lowering it as an op), with ``output_override``
+    naming the program's result node.
+    """
 
     external_nodes = list(graph_module.graph.placeholders)
     refs: dict[Node, int] = {
@@ -383,6 +378,8 @@ def _build_pointwise_program(
 
     unary_ops = _CPU_FUSED_OPS.difference({"add", "sub", "mul", "div", "pow"})
     for node in graph_module.graph.nodes:
+        if node is skip_node:
+            continue
         if node.op in {"placeholder", "output"}:
             continue
         if node.op not in {"call_function", "call_method"} or node.kwargs:
@@ -414,9 +411,15 @@ def _build_pointwise_program(
         else:
             return None
 
-    output_values = [
-        value for output in graph_module.graph.outputs for value in _nodes(output.args)
-    ]
+    output_values = (
+        [output_override]
+        if output_override is not None
+        else [
+            value
+            for output in graph_module.graph.outputs
+            for value in _nodes(output.args)
+        ]
+    )
     if not program or len(output_values) != 1 or output_values[0] not in refs:
         return None
     return external_nodes, program, constants, instructions, refs[output_values[0]]
@@ -1058,6 +1061,22 @@ def _lower_native(
         if node.op not in {"call_function", "call_method"}:
             return None
         op_name = _target_name(node.target)
+        # User-defined operators (tensorplay.library) lower natively: the
+        # "custom_op" node re-enters the Python dispatcher bridge with full
+        # eager semantics, so compiled graphs never fall back to the
+        # interpreter just because a user kernel is opaque to Stax.
+        if isinstance(node.target, _CustomOpDef):
+            if node.kwargs or not node.args:
+                return None
+            native_node = graph.create_node("custom_op", node.name)
+            native_node.set_str_attr("op_name", node.target.name)
+            for argument in node.args:
+                resolved = values.get(argument) if isinstance(argument, Node) else None
+                if resolved is None:
+                    return None
+                native_node.add_input(resolved)
+            values[node] = native_node.add_output()
+            continue
         # ``ReLU(inplace=True)`` is an aliasing detail of the eager graph.
         # In inference mode the native compiled graph can use the equivalent
         # out-of-place kernel, while other keyword-bearing operations must
@@ -1700,32 +1719,107 @@ class _AotNativeGraphBuilder:
 
 def _aot_derivative_specs() -> dict[str, tuple[Any, dict[str, str]]]:
     """Read the local derivative schema used by TensorPlay code generation."""
+    from pathlib import Path
 
-    import yaml
-    from tools.codegen.gen import parse_func
-    from tools.codegen.yaml_utils import YamlLoader
+    from tools.codegen.model import parse_derivatives_yaml, parse_schema
 
-    with open("config/derivatives.yaml", encoding="utf-8") as handle:
-        definitions = yaml.load(handle, Loader=YamlLoader)
+    yaml_path = Path(__file__).resolve().parents[2] / "config" / "derivatives.yaml"
     result: dict[str, tuple[Any, dict[str, str]]] = {}
-    for definition in definitions or []:
-        parsed = parse_func(definition["name"])
+    for definition in parse_derivatives_yaml(str(yaml_path)):
+        parsed = parse_schema(definition["name"])
         formulas = {
             key: value for key, value in definition.items() if key != "name"
         }
-        result[parsed["func_name"]] = (parsed, formulas)
+        result[parsed.func_name] = (parsed, formulas)
     return result
 
 
 def _aot_formula_python(formula: str, tensor_params: set[str]) -> str:
-    from tools.codegen.gen import _translate_expr
+    """Compile one derivatives.yaml formula into a Python expression.
 
-    translated = _translate_expr(formula, tensor_params)
-    translated = translated.replace("tensorplay::tpx::ops::", "")
-    translated = re.sub(r"std::get<(\d+)>\(", r"get_tuple(\1, ", translated)
-    translated = re.sub(r"\btrue\b", "True", translated)
-    translated = re.sub(r"\bfalse\b", "False", translated)
-    return translated
+    Shares the codegen expression AST (tokenizer + parser); the emitter
+    renders against the runtime formula env -- builder callables like
+    add/mul/t/sum plus get_tuple -- instead of the C++ text the generated
+    autograd nodes need.
+    """
+    from tools.codegen.gen_autograd import (
+        BinOp, BoolLit, Braced, Call, Method, Neg, Num, StrLit, Var,
+        TENSOR_METHODS, parse_expr,
+    )
+
+    symbols = set(tensor_params) | {"grad", "grad_output", "result"}
+
+    def is_tensor(expr: Any) -> bool:
+        if isinstance(expr, Var):
+            return expr.name in symbols
+        if isinstance(expr, Neg):
+            return looks_tensor(expr.value)
+        if isinstance(expr, Method):
+            return expr.name.rstrip("_") in TENSOR_METHODS
+        if isinstance(expr, Call):
+            leaf = expr.callee.split("::")[-1].split("<")[0]
+            return leaf not in ("Scalar",)
+        if isinstance(expr, BinOp):
+            return is_tensor(expr.left) or looks_tensor(expr.right)
+        return False
+
+    def looks_tensor(expr: Any) -> bool:
+        return is_tensor(expr) or isinstance(expr, BinOp)
+
+    def emit(expr: Any) -> str:
+        if isinstance(expr, Num):
+            return expr.text
+        if isinstance(expr, BoolLit):
+            return "True" if expr.text == "true" else "False"
+        if isinstance(expr, StrLit):
+            return expr.text
+        if isinstance(expr, Var):
+            return expr.name
+        if isinstance(expr, Neg):
+            inner = emit(expr.value)
+            return f"neg({inner})" if looks_tensor(expr.value) else f"-{inner}"
+        if isinstance(expr, Braced):
+            # Python target: a braced list renders as a tuple (builder.sum
+            # dims, reshape shapes), matching _aot_default_value.
+            items = [emit(item) for item in expr.items]
+            if len(items) == 1:
+                return f"({items[0]},)"
+            return f"({', '.join(items)})"
+        if isinstance(expr, Call):
+            args = ", ".join(emit(a) for a in expr.args)
+            get = re.fullmatch(r"std::get<(\d+)>", expr.callee)
+            if get:
+                return f"get_tuple({get.group(1)}, {args})"
+            callee = expr.callee.split("::")[-1]
+            return f"{callee}({args})"
+        if isinstance(expr, Method):
+            recv = emit(expr.receiver)
+            args = ", ".join(emit(a) for a in expr.args)
+            name = expr.name
+            base = name[:-1] if name.endswith("_") and name[:-1] in TENSOR_METHODS else name
+            if base in TENSOR_METHODS:
+                return f"{TENSOR_METHODS[base]}({recv}, {args})" if args \
+                    else f"{TENSOR_METHODS[base]}({recv})"
+            return f"{recv}.{name}({args})" if args else f"{recv}.{name}()"
+        if isinstance(expr, BinOp):
+            left = emit(expr.left)
+            right = emit(expr.right)
+            left_tensor = is_tensor(expr.left)
+            right_tensor = looks_tensor(expr.right)
+            if expr.op in "+-" and left_tensor:
+                return f"{'add' if expr.op == '+' else 'sub'}({left}, {right})"
+            if expr.op == "*" and left_tensor:
+                return f"mul({left}, {right})"
+            if expr.op == "/" and left_tensor:
+                return f"div({left}, {right})"
+            if expr.op == "*" and right_tensor:
+                return f"mul({right}, {left})"
+            if expr.op == "-" and right_tensor:
+                return f"neg(sub({right}, {left}))"
+            return f"({left} {expr.op} {right})"
+        raise NotImplementedError(f"AOT formula node is unsupported: {expr!r}")
+
+    return emit(parse_expr(formula))
 
 
 def _build_aot_formula_env(
@@ -1896,7 +1990,12 @@ def _build_aot_backward(
     runtime_inputs: list[Any],
     public_node: Node,
 ) -> tuple[Any, list[int]] | None:
-    specs = _aot_derivative_specs()
+    try:
+        specs = _aot_derivative_specs()
+    except (ImportError, ModuleNotFoundError, OSError):
+        # Derivative tooling/config unavailable: AOT lowering is optional;
+        # the caller falls back to the non-AOT native path.
+        return None
     builder = _AotNativeGraphBuilder(native_module)
     external_nodes = list(graph_module.graph.placeholders) + [
         node for node in graph_module.graph.nodes if node.op == "get_attr"
@@ -1986,14 +2085,14 @@ def _build_aot_backward(
             )
             arg_values = tuple(zip(names, node.args))
         else:
-            arg_values = tuple(zip((arg["name"] for arg in parsed["args"]), node.args))
+            arg_values = tuple(zip((arg.name for arg in parsed.args), node.args))
         if op_name == "batch_norm":
             context = {name: value for name, value in arg_values}
         else:
             context = dict(arg_values)
-        for arg in parsed["args"]:
-            if arg["name"] not in context and arg.get("default") is not None:
-                context[arg["name"]] = _aot_default_value(arg["default"])
+        for arg in parsed.args:
+            if arg.name not in context and arg.default is not None:
+                context[arg.name] = _aot_default_value(arg.default)
         context["grad"] = grad
         # Some Torch formulas use the forward result (e.g. ReLU), while
         # others only need metadata or their inputs (e.g. adaptive average
@@ -2290,7 +2389,9 @@ def stax(
         except (AttributeError, IndexError):
             is_cuda = False
         if is_cuda:
-            from .triton import compile_graph_module as compile_triton_graph
+            from ..compiler.codegen.triton import (
+                compile_graph_module as compile_triton_graph,
+            )
 
             triton_graph = compile_triton_graph(
                 graph_module,

@@ -160,14 +160,24 @@ _RULES: Dict[Tuple[str, Any], Callable] = {
     ("call_function", operator.mul): _rule_mul,
     ("call_function", operator.truediv): _rule_truediv,
     ("call_function", operator.neg): _rule_neg,
+    # Method spellings of the same arithmetic (x.mul(y) traces as
+    # call_method) share the operator rules: identical args layout.
+    ("call_method", "add"): _rule_add,
+    ("call_method", "sub"): _rule_sub,
+    ("call_method", "mul"): _rule_mul,
+    ("call_method", "truediv"): _rule_truediv,
+    ("call_method", "div"): _rule_truediv,
+    ("call_method", "neg"): _rule_neg,
     ("call_method", "relu"): _method_rule(
         lambda b, go, s: b.bwd("call_function", operator.mul, (go, b.bwd("call_function", operator.gt, (s, 0))))
     ),
     ("call_method", "sum"): _method_rule(
+        # torch derivatives.yaml: `self: grad.expand(self.sizes())` -- the
+        # formula reads only the input's SIZES, never its values, so emit a
+        # metadata-only expand (no edge to the forward node) and the
+        # partitioner correctly saves nothing for sum.
         lambda b, go, s: b.bwd(
-            "call_function",
-            operator.mul,
-            (go, _ones_like(b.graph, s)),
+            "call_method", "expand", (go, b.shape_of(s))
         )
     ),
     ("call_method", "sin"): _method_rule(
@@ -233,12 +243,14 @@ def _copy_nodes(
 
 
 def partition_default(
-    joint_gm: GraphModule, *, num_fwd_outputs: int = 1
+    joint_gm: GraphModule, *, num_fwd_outputs: int = 1, policy: str = "save_needed"
 ):
     """torch-contract split of a tagged joint graph.
 
     Joint output args are ``(fwd..., bwd...)``; ``num_fwd_outputs`` marks the
-    boundary. Saved = forward nodes consumed by backward-tagged ops. Returns
+    boundary. ``save_needed`` saves every forward value the backward reads
+    (upstream default_partition); ``recompute_all`` saves nothing and clones
+    producer chains into the backward graph. Returns
     ``(fw_gm, bw_gm, input_kinds, input_keys, saved_names, leaf_targets)``
     where backward inputs carry a role tag for name-based binding.
     """
@@ -262,31 +274,74 @@ def partition_default(
 
     candidate_saved = [
         n for n in fwd_nodes
-        if n.op not in _LEAF_OPS
+        if policy != "recompute_all"
+        and n.op not in _LEAF_OPS
         and any(u.meta.get("is_backward") for u in n.users)
     ]
 
     fw_graph, _, _ = _copy_nodes(fwd_nodes, [*user_outputs, *candidate_saved], False)
 
-    bw_graph, bw_map, _ = _copy_nodes(bwd_nodes, bwd_out_args, True)
+    if policy == "recompute_all":
+        # No saved activations: backward references to forward values are
+        # satisfied by cloning the producer chains into the backward graph
+        # (the same recompute closure the min-cut extractor uses); only
+        # leaves and the tangent stay external.
+        bw_graph = Graph()
+        bw_map: Dict[Node, Node] = {}
+        input_kinds = []
+        input_keys = []
 
-    # Role-tag each auto-generated backward placeholder.
-    rev = {v: k for k, v in bw_map.items()}
-    input_kinds: List[str] = []
-    input_keys: List[str] = []
-    for p in bw_graph.placeholders:
-        old = rev[p]
-        if old.meta.get("is_backward"):
-            input_kinds.append("tangent")
-            input_keys.append(p.name)
-        elif old.op in _LEAF_OPS:
-            input_kinds.append("leaf")
-            input_keys.append(
-                old.target if isinstance(old.target, str) else old.name
+        def ensure(node: Node) -> Node:
+            if node in bw_map:
+                return bw_map[node]
+            if node.op in _LEAF_OPS:
+                clone = bw_graph.placeholder(node.name)
+                bw_map[node] = clone
+                if node.op == "placeholder" and node.meta.get("is_backward"):
+                    input_kinds.append("tangent")
+                    input_keys.append(clone.name)
+                else:
+                    input_kinds.append("leaf")
+                    input_keys.append(
+                        node.target if isinstance(node.target, str) else node.name
+                    )
+                return clone
+            new_args = tuple(ensure(a) if isinstance(a, Node) else a for a in node.args)
+            new_kwargs = {
+                k: ensure(v) if isinstance(v, Node) else v
+                for k, v in node.kwargs.items()
+            }
+            clone = bw_graph.create_node(
+                node.op, node.target, new_args, new_kwargs, name=node.name
             )
-        else:
-            input_kinds.append("saved")
-            input_keys.append(old.name)
+            clone.meta.update(
+                {k: v for k, v in node.meta.items() if k != "val"}
+            )
+            bw_map[node] = clone
+            return clone
+
+        for node in bwd_nodes:
+            ensure(node)
+    else:
+        bw_graph, bw_map, _ = _copy_nodes(bwd_nodes, bwd_out_args, True)
+
+        # Role-tag each auto-generated backward placeholder.
+        rev = {v: k for k, v in bw_map.items()}
+        input_kinds = []
+        input_keys = []
+        for p in bw_graph.placeholders:
+            old = rev[p]
+            if old.meta.get("is_backward"):
+                input_kinds.append("tangent")
+                input_keys.append(p.name)
+            elif old.op in _LEAF_OPS:
+                input_kinds.append("leaf")
+                input_keys.append(
+                    old.target if isinstance(old.target, str) else old.name
+                )
+            else:
+                input_kinds.append("saved")
+                input_keys.append(old.name)
 
     mapped_bwd_outs = [bw_map[a] for a in bwd_out_args]
     bw_graph.output(
@@ -317,6 +372,12 @@ _RECOMPUTABLE_OPS = {
     ("call_function", operator.mul),
     ("call_function", operator.truediv),
     ("call_function", operator.neg),
+    ("call_method", "add"),
+    ("call_method", "sub"),
+    ("call_method", "mul"),
+    ("call_method", "truediv"),
+    ("call_method", "div"),
+    ("call_method", "neg"),
     ("call_method", "relu"),
     ("call_method", "sum"),
     ("call_method", "sin"),
@@ -472,8 +533,9 @@ def partition_min_cut(
         n for n in candidates
         if f"n_{n.name}" not in reachable or n in must_save
     }
-    if not saved_set:
-        raise AOTError("min-cut produced an empty save set")
+    # An empty save set is legal when every backward formula reads only
+    # metadata or inputs (e.g. sum's expand-only derivative): the backward
+    # then recomputes/clones everything it needs.
 
     fw_graph, _, _ = _copy_nodes(fwd_nodes, [*user_outputs, *sorted(saved_set, key=lambda x: x.name)], False)
 
@@ -487,15 +549,18 @@ def partition_min_cut(
     def ensure(node: Node) -> Node:
         if node in bw_map:
             return bw_map[node]
+        # Upstream _extract_graph_with_inputs_outputs: only the explicit
+        # input list (saved values + tangent) becomes placeholders; every
+        # other reachable node -- including backward-internal ones -- is
+        # cloned recursively into the extracted graph.
         external = (
             node.op in _LEAF_OPS
-            or node.meta.get("is_backward")
             or node in saved_set
         )
         if external:
             clone = bw_graph.placeholder(node.name)
             bw_map[node] = clone
-            if node.meta.get("is_backward"):
+            if node.op == "placeholder" and node.meta.get("is_backward"):
                 input_kinds.append("tangent")
                 input_keys.append(clone.name)
             elif node.op in _LEAF_OPS:
@@ -553,6 +618,7 @@ class AotResult:
         saved_names: Sequence[str],
         input_kinds: Sequence[str] = (),
         input_keys: Sequence[str] = (),
+        num_user_outputs: int = 1,
     ) -> None:
         self.forward_gm = forward_gm
         self.backward_gm = backward_gm
@@ -561,17 +627,32 @@ class AotResult:
         self.saved_names = list(saved_names)
         self.input_kinds = list(input_kinds)
         self.input_keys = list(input_keys)
+        self.num_user_outputs = num_user_outputs
 
     def forward(self, *args: Any) -> Tuple[Any, Tuple[Any, ...]]:
         outputs = self.forward_gm.forward(*args)
-        return outputs[0], tuple(outputs[1:])
+        if not isinstance(outputs, tuple):
+            # Zero-saved extraction: the forward graph's single output is
+            # returned unwrapped by the interpreter.
+            outputs = (outputs,)
+        user_out: Any = (
+            tuple(outputs[: self.num_user_outputs])
+            if self.num_user_outputs > 1
+            else outputs[0]
+        )
+        return user_out, tuple(outputs[self.num_user_outputs :])
 
     def value_and_grad(
         self, *args: Any, grad_output: Any = None
     ) -> Tuple[Any, Dict[str, Any]]:
         user_out, saved = self.forward(*args)
         if grad_output is None:
-            grad_output = user_out * 0 + 1
+            if isinstance(user_out, tuple):
+                # Total-derivative tangent for multi-output regions, mirroring
+                # eager `sum(t.sum() for t in outs).backward()`.
+                grad_output = sum(o.sum() for o in user_out) * 0 + 1
+            else:
+                grad_output = user_out * 0 + 1
         # Backward placeholder order interleaves saved values and leaves
         # (extraction auto-placeholders external refs in first-use order),
         # so bind by the role tags recorded at partition time.
@@ -604,13 +685,12 @@ def build_aot(
 ) -> AotResult:
     """Differentiate a captured region into an AOT forward/backward pair.
 
-    ``policy`` is kept for API compatibility with the v1 slice; v2 always
-    partitions structurally (save-needed semantics). ``recompute_all`` is
-    accepted and currently mapped to the same behavior. ``partitioner``
+    ``policy`` selects the save strategy: ``"save_needed"`` stashes exactly
+    the forward values the backward reads; ``"recompute_all`` saves nothing
+    and rematerializes them inside the backward graph. ``partitioner``
     selects the splitting strategy: ``"default"`` (structural save-need) or
     ``"min_cut"`` (memory-optimal cut, P3-L4b).
     """
-    del policy
 
     bindings = {
         p.name: sample_inputs[p.name]
@@ -624,10 +704,20 @@ def build_aot(
 
     builder = _JointBuilder(graph_module)
     out_arg = graph_module.graph.output_node.args[0]
-    if not isinstance(out_arg, Node):
+    # torch contract: every forward output seeds its own tangent. Multi-output
+    # regions (tuple returns) each receive the unit tangent, which reproduces
+    # the total derivative d(sum(out_i))/dx that eager `sum(...).backward()`
+    # computes.
+    if isinstance(out_arg, (tuple, list)):
+        out_elements = list(out_arg)
+    else:
+        out_elements = [out_arg]
+    if not all(isinstance(elem, Node) for elem in out_elements):
         raise AOTError("constant outputs cannot be differentiated")
 
-    adjoint: Dict[Node, List[Node]] = {out_arg: [builder.tangent]}
+    adjoint: Dict[Node, List[Node]] = {
+        elem: [builder.tangent] for elem in out_elements
+    }
     grad_outputs: List[Tuple[str, Node]] = []
     for node in reversed(list(graph_module.graph.nodes)):
         if node.op == "output":
@@ -653,6 +743,15 @@ def build_aot(
 
     if not grad_outputs:
         raise AOTError("no leaf gradients were computed")
+    # Upstream contract: backward outputs follow primal input order -- the
+    # reverse sweep discovers leaf gradients bottom-up, so restore the
+    # forward placeholder order before emitting the joint output.
+    placeholder_order = {
+        p.name: idx for idx, p in enumerate(graph_module.graph.placeholders)
+    }
+    grad_outputs.sort(
+        key=lambda item: placeholder_order.get(item[0], len(placeholder_order))
+   )
     # Tag every node appended after the original output as backward. Rules
     # emit through several helpers (some via untagged _emit), so a positional
     # sweep is the only reliable way to close the tag set.
@@ -681,7 +780,7 @@ def build_aot(
             input_kinds,
             input_keys,
             saved_names_list,
-        ) = partition_default(graph_module)
+        ) = partition_default(graph_module, policy=policy)
 
     leaf_targets = [name for name, _ in grad_outputs]
     if required_grads is not None:
@@ -697,4 +796,5 @@ def build_aot(
         saved_names=saved_names_list,
         input_kinds=input_kinds,
         input_keys=input_keys,
+        num_user_outputs=len(out_elements),
     )

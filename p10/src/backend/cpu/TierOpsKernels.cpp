@@ -730,6 +730,13 @@ Tensor hypot_cpu(const Tensor& a, const Tensor& b) {
         return std::hypot(x, y);
     }, "hypot");
 }
+
+// ATen BinaryOpsKernel.cpp atan2_cpu: std::atan2 over float/int iterator.
+Tensor atan2_cpu(const Tensor& a, const Tensor& b) {
+    return binary_float_kernel(a, b, [](double x, double y) {
+        return std::atan2(x, y);
+    }, "atan2");
+}
 Tensor nextafter_cpu(const Tensor& a, const Tensor& b) {
     return binary_float_kernel(a, b, [](double x, double y) {
         return std::nextafter(x, y);
@@ -914,11 +921,13 @@ Tensor prelu_cpu(const Tensor& self, const Tensor& weight) {
 // Reductions (ReduceOps.cpp / Sorting.cpp anchors)
 // ===========================================================================
 
-Tensor amax_cpu(const Tensor& self, std::vector<int64_t> dim, bool keepdim) {
+Tensor amax_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
     // ReduceOps.cpp:1801 amax_out
-    if (dim.empty()) {
-        for (int64_t i = 0; i < self.dim(); ++i) dim.push_back(i);
+    std::vector<int64_t> resolved = dim_in;
+    if (resolved.empty()) {
+        for (int64_t i = 0; i < self.dim(); ++i) resolved.push_back(i);
     }
+    const std::vector<int64_t>& dim = resolved;
     return reduce_dims_impl<double>(
         self, dim, keepdim, isFloatingType(self.dtype()) ? self.dtype() : self.dtype(),
         -std::numeric_limits<double>::infinity(),
@@ -926,10 +935,12 @@ Tensor amax_cpu(const Tensor& self, std::vector<int64_t> dim, bool keepdim) {
         [](double acc) { return acc; });
 }
 
-Tensor amin_cpu(const Tensor& self, std::vector<int64_t> dim, bool keepdim) {
-    if (dim.empty()) {
-        for (int64_t i = 0; i < self.dim(); ++i) dim.push_back(i);
+Tensor amin_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
+    std::vector<int64_t> resolved = dim_in;
+    if (resolved.empty()) {
+        for (int64_t i = 0; i < self.dim(); ++i) resolved.push_back(i);
     }
+    const std::vector<int64_t>& dim = resolved;
     return reduce_dims_impl<double>(
         self, dim, keepdim, self.dtype(),
         std::numeric_limits<double>::infinity(),
@@ -937,10 +948,12 @@ Tensor amin_cpu(const Tensor& self, std::vector<int64_t> dim, bool keepdim) {
         [](double acc) { return acc; });
 }
 
-std::tuple<Tensor, Tensor> aminmax_cpu(const Tensor& self, std::vector<int64_t> dim, bool keepdim) {
-    if (dim.empty()) {
-        for (int64_t i = 0; i < self.dim(); ++i) dim.push_back(i);
+std::tuple<Tensor, Tensor> aminmax_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
+    std::vector<int64_t> resolved = dim_in;
+    if (resolved.empty()) {
+        for (int64_t i = 0; i < self.dim(); ++i) resolved.push_back(i);
     }
+    const std::vector<int64_t>& dim = resolved;
     Tensor mn = amin_cpu(self, dim, keepdim);
     Tensor mx = amax_cpu(self, dim, keepdim);
     return {mn, mx};
@@ -967,11 +980,16 @@ Tensor logsumexp_cpu(const Tensor& self, int64_t dim, bool keepdim) {
         });
 }
 
-Tensor nansum_cpu(const Tensor& self, std::vector<int64_t> dim, bool keepdim) {
+Tensor nansum_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
     // ReduceOps.cpp:1310 nansum_out: NaN treated as 0
     DType out_dt = isFloatingType(self.dtype()) ? self.dtype() : DType::Int64;
+    std::vector<int64_t> dim = dim_in;
+    if (dim.empty()) {
+        // torch: dim omitted (or empty) reduces over every dimension
+        for (int64_t i = 0; i < self.dim(); ++i) dim.push_back(i);
+    }
     return reduce_dims_impl<double>(
-        self, dim.empty() ? std::vector<int64_t>{} : dim, keepdim, out_dt, 0.0,
+        self, dim, keepdim, out_dt, 0.0,
         [](double acc, double v) { return (v != v) ? acc : acc + v; },
         [](double acc) { return acc; });
 }
@@ -1268,7 +1286,8 @@ Tensor trace_cpu(const Tensor& self) {
     int64_t d = std::min(rows, cols);
     int64_t batch = self.numel() / (rows * cols);
     Tensor sc64 = self.to(DType::Float64).contiguous();
-    std::vector<int64_t> out_shape(sc64.shape().begin(), sc64.shape().end() - 2);
+    const Size sc64_shape = sc64.shape();
+    std::vector<int64_t> out_shape(sc64_shape.begin(), sc64_shape.end() - 2);
     Tensor out = Tensor::zeros(out_shape, DType::Float64, self.device());
     double* dp = out.data_ptr<double>();
     const double* sp = sc64.data_ptr<double>();
@@ -1341,7 +1360,8 @@ Tensor diag_embed_cpu(const Tensor& self, int64_t offset, int64_t dim1_, int64_t
     int64_t dim2 = wrap_dim(dim2_, nDims);
     if (dim1 == dim2) TP_THROW(RuntimeError, "diagonal dimensions cannot be identical");
     int64_t new_dim_len = std::abs(offset) + self.size(-1);
-    std::vector<int64_t> sizes(self.shape().begin(), self.shape().end());
+    const Size self_shape = self.shape();
+    std::vector<int64_t> sizes(self_shape.begin(), self_shape.end());
     sizes.pop_back();
     sizes.insert(sizes.begin() + std::min(dim1, dim2), new_dim_len);
     sizes.insert(sizes.begin() + std::max(dim1, dim2), new_dim_len);
@@ -1494,7 +1514,7 @@ Tensor flip_cpu(const Tensor& self, const std::vector<int64_t>& dims) {
     return out;
 }
 
-Tensor roll_cpu(const Tensor& self, std::vector<int64_t> shifts, std::vector<int64_t> dims) {
+Tensor roll_cpu(const Tensor& self, const std::vector<int64_t>& shifts, const std::vector<int64_t>& dims) {
     // TensorTransformations.cpp:110 roll.
     int64_t nd = self.dim();
     Tensor sc = self.contiguous();
@@ -1556,7 +1576,7 @@ Tensor roll_cpu(const Tensor& self, std::vector<int64_t> shifts, std::vector<int
     return out;
 }
 
-Tensor rot90_cpu(const Tensor& self, int64_t k, std::vector<int64_t> dims) {
+Tensor rot90_cpu(const Tensor& self, int64_t k, const std::vector<int64_t>& dims) {
     // TensorTransformations.cpp:145 rot90 switch.
     int64_t total_dims = self.dim();
     if (dims.size() != 2) TP_THROW(RuntimeError, "expected total rotation dims == 2");
@@ -1575,7 +1595,8 @@ Tensor rot90_cpu(const Tensor& self, int64_t k, std::vector<int64_t> dims) {
         for (int64_t i = 0; i < nd2; ++i) new_shape.push_back(x.size(perm[i]));
         Tensor out = Tensor::empty(new_shape, x.dtype(), x.device());
         int64_t n = x.numel();
-        std::vector<int64_t> xs(x.shape().begin(), x.shape().end());
+        const Size x_shape = x.shape();
+        std::vector<int64_t> xs(x_shape.begin(), x_shape.end());
         std::vector<int64_t> xs_strides(nd2, 0);
         { int64_t s = 1; for (int64_t i = nd2 - 1; i >= 0; --i) { xs_strides[i] = s; s *= xs[i]; } }
         std::vector<int64_t> out_strides(nd2, 0);
@@ -1644,105 +1665,121 @@ Tensor repeat_interleave_cpu(const Tensor& self, int64_t repeats, int64_t dim) {
 }
 
 std::vector<Tensor> meshgrid_cpu(const std::vector<Tensor>& tensors, const std::string& indexing) {
-    // ij-indexing semantics.
+    // ATen TensorShape.cpp meshgrid: grid j carries input j's VALUES tiled
+    // along dim j; common promoted dtype; "xy" swaps the first two axes.
     size_t k = tensors.size();
     if (k == 0) return {};
+    if (indexing != "ij" && indexing != "xy") {
+        TP_THROW(RuntimeError, "meshgrid: indexing must be 'ij' or 'xy', got " + indexing);
+    }
+    std::vector<Tensor> flat;
+    flat.reserve(k);
+    for (auto& t : tensors) {
+        if (t.dim() > 1) {
+            TP_THROW(RuntimeError, "meshgrid: expected 0-D or 1-D tensors");
+        }
+        flat.push_back(t.contiguous());
+    }
+    DType common = flat[0].dtype();
+    for (size_t j = 1; j < k; ++j) {
+        common = promoteTypes(common, flat[j].dtype());
+    }
+    for (auto& t : flat) {
+        if (t.dtype() != common) t = t.to(common);
+    }
+    // working order: "xy" builds with the first two inputs swapped
+    std::vector<Tensor> order = flat;
+    if (indexing == "xy" && k >= 2) {
+        std::swap(order[0], order[1]);
+    }
     std::vector<int64_t> sizes;
     sizes.reserve(k);
-    for (auto& t : tensors) sizes.push_back(static_cast<int64_t>(t.numel()));
-    std::vector<int64_t> grid_shape(sizes.begin(), sizes.end());
+    for (auto& t : order) sizes.push_back(t.dim() == 1 ? t.size(0) : 1);
+    const size_t esz = elementSize(static_cast<ScalarType>(common));
     std::vector<Tensor> outs;
-    int64_t total = 1;
-    for (int64_t s : sizes) total *= s;
+    outs.reserve(k);
     for (size_t j = 0; j < k; ++j) {
-        Tensor g = Tensor::empty(grid_shape, DType::Int64, tensors[0].device());
-        int64_t* gp = g.data_ptr<int64_t>();
-        // coordinate along axis j equals decoded index at dim j
-        parallel_for(0, total, GRAIN_SIZE, [&](int64_t b, int64_t e) {
-            for (int64_t li = b; li < e; ++li) {
-                int64_t r2 = li;
-                std::vector<int64_t> coords(k, 0);
-                for (int64_t d2 = static_cast<int64_t>(k) - 1; d2 >= 0; --d2) {
-                    coords[d2] = r2 % sizes[d2];
-                    r2 /= sizes[d2];
+        int64_t nj = sizes[j];
+        int64_t outer = 1;
+        for (size_t d = 0; d < j; ++d) outer *= sizes[d];
+        int64_t inner = 1;
+        for (size_t d = j + 1; d < k; ++d) inner *= sizes[d];
+        Tensor g = Tensor::empty(sizes, common, tensors[0].device());
+        const char* src = reinterpret_cast<const char*>(order[j].data_ptr());
+        char* dst = reinterpret_cast<char*>(g.data_ptr());
+        for (int64_t o = 0; o < outer; ++o) {
+            for (int64_t r = 0; r < nj; ++r) {
+                char* drow = dst + ((o * nj + r) * inner) * esz;
+                for (int64_t v = 0; v < inner; ++v) {
+                    std::memcpy(drow + v * esz, src + r * esz, esz);
                 }
-                gp[li] = coords[j];
             }
-        });
+        }
         outs.push_back(g);
     }
     return outs;
 }
 
 std::vector<Tensor> broadcast_tensors_cpu(const std::vector<Tensor>& tensors) {
+    // ATen TensorShape.cpp broadcast_tensors: expand every input to the
+    // common broadcast shape.  Returns stride-0 views; gradients flow through
+    // the dispatcher expand op (sum-to-size backward).
     std::vector<int64_t> shape{};
     for (auto& t : tensors) {
-        std::vector<int64_t> ts(t.shape().begin(), t.shape().end());
+        const Size t_shape = t.shape();
+        std::vector<int64_t> ts(t_shape.begin(), t_shape.end());
         shape = broadcast_shapes(shape, ts);
     }
     std::vector<Tensor> outs;
+    outs.reserve(tensors.size());
     for (auto& t : tensors) {
-        std::vector<int64_t> ts(t.shape().begin(), t.shape().end());
+        const Size t_shape = t.shape();
+        std::vector<int64_t> ts(t_shape.begin(), t_shape.end());
         if (ts == shape) { outs.push_back(t); continue; }
-        // manual broadcast copy (stride-0 on broadcast dims)
-        Tensor src = t.contiguous();
-        Tensor out = Tensor::empty(shape, t.dtype(), t.device());
-        int64_t nd = static_cast<int64_t>(shape.size());
-        std::vector<int64_t> padded(nd, 1), src_strides_padded(nd, 0);
-        int64_t off = nd - static_cast<int64_t>(ts.size());
-        for (int64_t i = 0; i < static_cast<int64_t>(ts.size()); ++i) padded[off + i] = ts[i];
-        { int64_t s = 1; for (int64_t i = static_cast<int64_t>(ts.size()) - 1; i >= 0; --i) { src_strides_padded[off + i] = s; s *= ts[i]; } }
-        int64_t n = out.numel();
-        auto wk = [&](int64_t b, int64_t e) {
-            for (int64_t li = b; li < e; ++li) {
-                int64_t r2 = li, src_off = 0, mult = 1;
-                for (int64_t d2 = nd - 1; d2 >= 0; --d2) {
-                    int64_t c = r2 % shape[d2];
-                    r2 /= shape[d2];
-                    src_off += (padded[d2] == 1 ? 0 : c) * src_strides_padded[d2];
-                    (void)mult;
-                }
-                (void)mult;
-                switch (t.dtype()) {
-#define TP_BC_W(ctype, name_) case DType::name_: reinterpret_cast<ctype*>(out.data_ptr())[li] = reinterpret_cast<const ctype*>(src.data_ptr())[src_off]; break;
-                    TENSORPLAY_FORALL_SCALAR_TYPES(TP_BC_W)
-#undef TP_BC_W
-                    default: break;
-                }
-            }
-        };
-        parallel_for(0, n, GRAIN_SIZE, wk);
-        outs.push_back(out);
+        outs.push_back(t.expand(shape));
     }
     return outs;
 }
 
+
 Tensor block_diag_cpu(const std::vector<Tensor>& tensors) {
-    int64_t total = 0;
-    for (auto& t : tensors) {
-        if (t.dim() != 2) TP_THROW(RuntimeError, "block_diag: expecting a list of 2D tensors");
-        if (t.size(0) != t.size(1)) TP_THROW(RuntimeError, "block_diag: expecting square matrices");
-        total += t.size(0);
-    }
-    Tensor out = Tensor::zeros({total, total}, tensors.at(0).dtype(), tensors.at(0).device());
-    int64_t off = 0;
-    for (auto& t : tensors) {
-        int64_t m = t.size(0);
-        Tensor sc = t.contiguous();
-        for (int64_t r = 0; r < m; ++r) {
-            for (int64_t c = 0; c < m; ++c) {
-                switch (t.dtype()) {
-#define TP_BD_W(ctype, name_) \
-    case DType::name_: \
-        out.data_ptr<ctype>()[(off + r) * total + off + c] = sc.data_ptr<ctype>()[r * m + c]; \
-        break;
-                    TENSORPLAY_FORALL_SCALAR_TYPES(TP_BD_W)
-#undef TP_BD_W
-                    default: break;
-                }
-            }
+    // ATen TensorShape.cpp block_diag: 0-D -> 1x1, 1-D -> (1, n) diag row,
+    // 2-D rectangular blocks; result dtype = promoted inputs; empty call
+    // yields a (1, 0) tensor.
+    if (tensors.empty()) return Tensor::empty({1, 0}, DType::Float32);
+    const Device& device = tensors[0].device();
+    DType out_dtype = tensors[0].dtype();
+    int64_t rows = 0, cols = 0;
+    std::vector<Tensor> blocks2d;
+    blocks2d.reserve(tensors.size());
+    for (size_t idx = 0; idx < tensors.size(); ++idx) {
+        const Tensor& t = tensors[idx];
+        if (!(t.device() == device)) {
+            TP_THROW(RuntimeError,
+                     "torch.block_diag: input tensors must all be on the same device.");
         }
-        off += m;
+        out_dtype = promoteTypes(out_dtype, t.dtype());
+        const int64_t nd = t.dim();
+        if (nd > 2) {
+            TP_THROW(RuntimeError,
+                     "torch.block_diag: Input tensors must have 2 or fewer dimensions. Input ",
+                     static_cast<int64_t>(idx), " has ", nd, " dimensions");
+        }
+        Tensor b2 = t;
+        if (nd == 1) b2 = t.expand({1, t.size(0)});
+        else if (nd == 0) b2 = t.expand({1, 1});
+        blocks2d.push_back(b2);
+        rows += b2.size(0);
+        cols += b2.size(1);
+    }
+    Tensor out = Tensor::zeros({rows, cols}, out_dtype, device);
+    int64_t off0 = 0, off1 = 0;
+    for (const auto& b : blocks2d) {
+        out.slice(0, off0, off0 + b.size(0))
+           .slice(1, off1, off1 + b.size(1))
+           .copy_(b);
+        off0 += b.size(0);
+        off1 += b.size(1);
     }
     return out;
 }
@@ -1892,6 +1929,431 @@ Tensor unfold_cpu(const Tensor& self, int64_t dimension, int64_t size, int64_t s
     return out;
 }
 
+// ===========================================================================
+// Index/scatter complements + isclose/isreal (torch parity 2026-08-24)
+//
+// ATen anchors:
+//   TensorShape.cpp select_scatter_out / slice_scatter_out
+//   (composite: clone the base, mutate a view, return);
+//   TensorAdvancedIndexing.cpp take_along_dim_out (broadcast indices against
+//   self on all non-dim axes, then gather);
+//   Sorting.cpp msort_cpu -> sort(dim=0).values;
+//   ReduceOps.cpp nanmean -> nansum / valid-count with all-NaN -> NaN guard
+//   (ReduceOpsKernel nanmean_kernel);
+//   TensorCompare.cpp isclose (|a-b| <= atol + rtol*|b| with inf/nan rules);
+//   isreal: complex tensors test imag==0, everything else is true.
+// ===========================================================================
+
+Tensor select_scatter_cpu(const Tensor& self, const Tensor& src, int64_t dim, int64_t index) {
+    int64_t nd = self.dim();
+    dim = wrap_dim(dim, nd);
+    if (index < 0) index += self.size(dim);
+    if (index < 0 || index >= self.size(dim)) {
+        TP_THROW(IndexError, "select_scatter: index ", index, " is out of bounds for dimension ",
+                 dim, " with size ", self.size(dim));
+    }
+    Tensor result = self.clone();
+    result.select(dim, index).copy_(src);
+    return result;
+}
+
+Tensor slice_scatter_cpu(const Tensor& self, const Tensor& src, int64_t dim,
+                         std::optional<int64_t> start, std::optional<int64_t> end, int64_t step) {
+    // torch slice_scatter: start/end follow slice() normalization.
+    if (step <= 0) TP_THROW(RuntimeError, "slice_scatter: step must be positive");
+    int64_t nd = self.dim();
+    dim = wrap_dim(dim, nd);
+    int64_t length = self.size(dim);
+    int64_t s = start.has_value() ? *start : 0;
+    int64_t e = end.has_value() ? *end : length;
+    if (s < 0) s += length;
+    if (e < 0) e += length;
+    s = std::max<int64_t>(0, std::min<int64_t>(s, length));
+    e = std::max<int64_t>(0, std::min<int64_t>(e, length));
+    if (e < s) e = s;
+    Tensor result = self.clone();
+    result.slice(dim, s, e, step).copy_(src);
+    return result;
+}
+
+Tensor diagonal_scatter_cpu(const Tensor& self, const Tensor& src, int64_t offset,
+                            int64_t dim1, int64_t dim2) {
+    Tensor result = self.clone();
+    Tensor diag = result.diagonal(offset, dim1, dim2);
+    std::vector<int64_t> diag_shape(static_cast<std::vector<int64_t>>(diag.shape()));
+    result.diagonal(offset, dim1, dim2).copy_(src.reshape(diag_shape));
+    return result;
+}
+
+Tensor take_along_dim_cpu(const Tensor& self, const Tensor& indices, std::optional<int64_t> dim) {
+    // TensorAdvancedIndexing.cpp take_along_dim_out
+    if (!dim.has_value()) {
+        // Flattened variant: indices must be 1-D (torch requires equal numel).
+        Tensor flat = self.reshape({-1});
+        Tensor idx = indices.to(DType::Int64).reshape({-1});
+        return flat.gather(0, idx);
+    }
+    int64_t nd = self.dim();
+    int64_t d = wrap_dim(*dim, nd);
+    if (indices.dim() != nd) {
+        TP_THROW(RuntimeError, "take_along_dim: indices must have the same number of dimensions as input");
+    }
+    // Broadcast both operands over every axis except d; along d only the
+    // index extent matters (that is the gather length).
+    std::vector<int64_t> target(nd);
+    for (int64_t i = 0; i < nd; ++i) {
+        if (i == d) { target[i] = indices.size(i); continue; }
+        int64_t a = self.size(i), b = indices.size(i);
+        if (a != b && a != 1 && b != 1) {
+            TP_THROW(RuntimeError, "take_along_dim: input and indices must match on non-selected dimensions");
+        }
+        target[i] = std::max(a, b);
+    }
+    std::vector<int64_t> idx_target = target;
+    std::vector<int64_t> self_target = target;
+    self_target[d] = self.size(d);
+    Tensor idx_b = indices.expand(idx_target).contiguous().to(DType::Int64);
+    Tensor self_b = self.expand(self_target).contiguous();
+    return self_b.gather(d, idx_b);
+}
+
+Tensor msort_cpu(const Tensor& self) {
+    // Sorting.cpp msort_cpu: values of sort along dim 0.
+    Tensor values = std::get<0>(self.sort(0, false));
+    return values;
+}
+
+Tensor nanmean_cpu(const Tensor& self, std::optional<int64_t> dim_opt, bool keepdim,
+                   std::optional<DType> dtype) {
+    // ReduceOps.cpp nanmean: sum of non-NaN / count of non-NaN; an empty
+    // count yields NaN (unlike mean's error).
+    DType acc_dt = dtype.value_or(DType::Undefined);
+    Tensor x = self;
+    if (!isFloatingType(x.dtype()) && !isComplexType(x.dtype())) {
+        x = x.to(acc_dt != DType::Undefined ? acc_dt : DType::Float32);
+    } else if (isReducedFloatingType(x.dtype()) && acc_dt == DType::Undefined) {
+        x = x.to(DType::Float32);   // accumulate in f32 like ATen opmath
+    }
+    std::vector<int64_t> dims;
+    if (dim_opt.has_value()) dims.push_back(*dim_opt);
+    else if (!dims.empty()) { /* unreachable */ }
+    else {
+        // global reduction over every dimension
+        for (int64_t i = 0; i < x.dim(); ++i) dims.push_back(i);
+    }
+    Tensor total = nansum_cpu(x, dims, keepdim);
+    Tensor valid = isnan_cpu(x).logical_not();
+    Tensor count = reduce_dims_impl<double>(
+        valid, dims, keepdim, DType::Float32, 0.0,
+        [](double acc, double v) { return acc + v; },
+        [](double acc) { return acc; });
+    Tensor zero = count.eq(Scalar(0.0));
+    Tensor quot = total.to(DType::Float32).div(count);
+    return quot.masked_fill(zero, Scalar(std::numeric_limits<double>::quiet_NaN()))
+               .to(acc_dt != DType::Undefined ? acc_dt
+                                              : (isComplexType(self.dtype()) ? self.dtype()
+                                                                             : total.dtype()));
+}
+
+Tensor isclose_cpu(const Tensor& self, const Tensor& other, double rtol, double atol, bool equal_nan) {
+    // TensorCompare.cpp isclose: |a-b| <= atol + rtol*|b|; NaNs compare equal
+    // only under equal_nan; infinities compare equal to themselves.
+    std::vector<int64_t> out_shape = broadcast_shapes(
+        static_cast<std::vector<int64_t>>(self.shape()),
+        static_cast<std::vector<int64_t>>(other.shape()));
+    Tensor a = self.to(DType::Float64).expand(out_shape).contiguous();
+    Tensor b = other.to(DType::Float64).expand(out_shape).contiguous();
+    Tensor out = Tensor::empty(out_shape, DType::Bool, self.device());
+    int64_t n = out.numel();
+    const double* ap = a.data_ptr<double>();
+    const double* bp = b.data_ptr<double>();
+    bool* dp = out.data_ptr<bool>();
+    parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
+        for (int64_t i = begin; i < end; ++i) {
+            double x = ap[i], y = bp[i];
+            if (x != x || y != y) {
+                dp[i] = equal_nan && x != x && y != y;
+            } else if (std::isinf(x) || std::isinf(y)) {
+                dp[i] = x == y;
+            } else {
+                double tol = atol + rtol * std::fabs(y);
+                dp[i] = std::fabs(x - y) <= tol;
+            }
+        }
+    });
+    return out;
+}
+
+Tensor isreal_cpu(const Tensor& self) {
+    // ComplexHelper: real dtypes are trivially real; complex tests imag==0.
+    if (!isComplexType(self.dtype())) {
+        return Tensor::ones(static_cast<std::vector<int64_t>>(self.shape()),
+                            DType::Bool, self.device());
+    }
+    Tensor sc = self.contiguous();
+    Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(self.shape()),
+                               DType::Bool, self.device());
+    int64_t n = out.numel();
+    bool* dp = out.data_ptr<bool>();
+    if (self.dtype() == DType::ComplexFloat) {
+        const auto* sp = static_cast<const std::complex<float>*>(sc.data_ptr());
+        for (int64_t i = 0; i < n; ++i) dp[i] = sp[i].imag() == 0.0f;
+    } else {
+        const auto* sp = static_cast<const std::complex<double>*>(sc.data_ptr());
+        for (int64_t i = 0; i < n; ++i) dp[i] = sp[i].imag() == 0.0;
+    }
+    return out;
+}
+
+// --- Bitwise family --------------------------------------------------------
+// BinaryOps.cpp bitwise_*: integer/bool only; bool computes the logical op.
+
+#define TENSORPLAY_FORALL_INT_TYPES(_) \
+    _(uint8_t, UInt8)                  \
+    _(int8_t, Int8)                    \
+    _(int16_t, Int16)                  \
+    _(int32_t, Int32)                  \
+    _(int64_t, Int64)                  \
+    _(uint16_t, UInt16)                \
+    _(uint32_t, UInt32)                \
+    _(uint64_t, UInt64)
+
+inline void bitwise_check_cpu(const Tensor& t, const char* name) {
+    DType d = t.dtype();
+    if (d == DType::Bool || isIntegralType(d)) return;
+    TP_THROW(TypeError, name, ": only integral and boolean types are supported");
+}
+
+template <typename Pred>
+Tensor bitwise_binary_cpu(const Tensor& a_in, const Tensor& b_in, Pred pred, const char* name) {
+    bitwise_check_cpu(a_in, name);
+    bitwise_check_cpu(b_in, name);
+    std::vector<int64_t> out_shape = broadcast_shapes(
+        static_cast<std::vector<int64_t>>(a_in.shape()),
+        static_cast<std::vector<int64_t>>(b_in.shape()));
+    DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
+    if (a_in.dtype() == DType::Bool && b_in.dtype() == DType::Bool) dt = DType::Bool;
+    if (dt != DType::Bool && !isIntegralType(dt)) {
+        TP_THROW(TypeError, name, ": only integral and boolean types are supported");
+    }
+    Tensor ac = (a_in.dtype() == dt ? a_in : a_in.to(dt)).expand(out_shape).contiguous();
+    Tensor bc = (b_in.dtype() == dt ? b_in : b_in.to(dt)).expand(out_shape).contiguous();
+    Tensor out = Tensor::empty(out_shape, dt, a_in.device());
+    int64_t n = out.numel();
+    if (dt == DType::Bool) {
+        const bool* ap = ac.data_ptr<bool>();
+        const bool* bp = bc.data_ptr<bool>();
+        bool* dp = out.data_ptr<bool>();
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
+            for (int64_t i = begin; i < end; ++i)
+                dp[i] = pred(static_cast<uint8_t>(ap[i]), static_cast<uint8_t>(bp[i]));
+        });
+        return out;
+    }
+#define TP_BIT_BIN_CASE(ctype, name_) \
+    case DType::name_: { \
+        const ctype* ap = ac.data_ptr<ctype>(); \
+        const ctype* bp = bc.data_ptr<ctype>(); \
+        ctype* dp = out.data_ptr<ctype>(); \
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
+            for (int64_t i = begin; i < end; ++i) dp[i] = pred(ap[i], bp[i]); \
+        }); \
+        break; \
+    }
+    switch (dt) {
+        TENSORPLAY_FORALL_INT_TYPES(TP_BIT_BIN_CASE)
+        default: TP_THROW(TypeError, name, ": unsupported dtype");
+    }
+#undef TP_BIT_BIN_CASE
+    return out;
+}
+
+template <typename Pred>
+Tensor bitwise_scalar_cpu(const Tensor& self_in, Scalar other, Pred pred, const char* name) {
+    bitwise_check_cpu(self_in, name);
+    Tensor sc = self_in.contiguous();
+    Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(self_in.shape()),
+                               self_in.dtype(), self_in.device());
+    int64_t n = out.numel();
+    if (self_in.dtype() == DType::Bool) {
+        const bool* sp = sc.data_ptr<bool>();
+        uint8_t o = other.to<bool>() ? 1 : 0;
+        bool* dp = out.data_ptr<bool>();
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
+            for (int64_t i = begin; i < end; ++i)
+                dp[i] = pred(static_cast<uint8_t>(sp[i]), o);
+        });
+        return out;
+    }
+#define TP_BIT_SCALAR_CASE(ctype, name_) \
+    case DType::name_: { \
+        const ctype* sp = sc.data_ptr<ctype>(); \
+        ctype ov = static_cast<ctype>(other.to<int64_t>()); \
+        ctype* dp = out.data_ptr<ctype>(); \
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
+            for (int64_t i = begin; i < end; ++i) dp[i] = pred(sp[i], ov); \
+        }); \
+        break; \
+    }
+    switch (self_in.dtype()) {
+        TENSORPLAY_FORALL_INT_TYPES(TP_BIT_SCALAR_CASE)
+        default: TP_THROW(TypeError, name, ": unsupported dtype");
+    }
+#undef TP_BIT_SCALAR_CASE
+    return out;
+}
+
+template <typename Pred>
+Tensor bitwise_shift_scalar_cpu(const Tensor& self_in, Scalar other, Pred pred, const char* name) {
+    // Shift amounts follow torch: modded by the element bit width.
+    bitwise_check_cpu(self_in, name);
+    int64_t bits = self_in.itemsize() * 8;
+    int64_t shift = other.to<int64_t>();
+    if (shift < 0 || shift >= bits) {
+        TP_THROW(RuntimeError, name, ": shift amount ", shift,
+                 " must be in [0, ", bits, ")");
+    }
+    Tensor sc = self_in.contiguous();
+    Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(self_in.shape()),
+                               self_in.dtype(), self_in.device());
+    int64_t n = out.numel();
+#define TP_SHIFT_SCALAR_CASE(ctype, name_) \
+    case DType::name_: { \
+        using U = typename std::make_unsigned<ctype>::type; \
+        const ctype* sp = sc.data_ptr<ctype>(); \
+        U sh = static_cast<U>(shift % bits); \
+        ctype* dp = out.data_ptr<ctype>(); \
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
+            for (int64_t i = begin; i < end; ++i) \
+                dp[i] = pred(static_cast<U>(sp[i]), sh); \
+        }); \
+        break; \
+    }
+    switch (self_in.dtype()) {
+        TENSORPLAY_FORALL_INT_TYPES(TP_SHIFT_SCALAR_CASE)
+        default: TP_THROW(TypeError, name, ": unsupported dtype");
+    }
+#undef TP_SHIFT_SCALAR_CASE
+    return out;
+}
+
+Tensor bitwise_not_cpu(const Tensor& self) {
+    bitwise_check_cpu(self, "bitwise_not");
+    Tensor sc = self.contiguous();
+    Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(self.shape()),
+                               self.dtype(), self.device());
+    int64_t n = out.numel();
+    if (self.dtype() == DType::Bool) {
+        const bool* sp = sc.data_ptr<bool>();
+        bool* dp = out.data_ptr<bool>();
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
+            for (int64_t i = begin; i < end; ++i) dp[i] = !sp[i];
+        });
+        return out;
+    }
+#define TP_BNOT_CASE(ctype, name_) \
+    case DType::name_: { \
+        const ctype* sp = sc.data_ptr<ctype>(); \
+        ctype* dp = out.data_ptr<ctype>(); \
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
+            for (int64_t i = begin; i < end; ++i) dp[i] = static_cast<ctype>(~sp[i]); \
+        }); \
+        break; \
+    }
+    switch (self.dtype()) {
+        TENSORPLAY_FORALL_INT_TYPES(TP_BNOT_CASE)
+        default: TP_THROW(TypeError, "bitwise_not: unsupported dtype");
+    }
+#undef TP_BNOT_CASE
+    return out;
+}
+
+template <bool kLeft>
+Tensor bitwise_shift_tensor_cpu(const Tensor& a_in, const Tensor& b_in, const char* name) {
+    // ATen BinaryBitwiseOpsKernel: shift amounts are taken modulo the element
+    // bit width; shifting through the unsigned domain keeps << defined.
+    bitwise_check_cpu(a_in, name);
+    bitwise_check_cpu(b_in, name);
+    std::vector<int64_t> out_shape = broadcast_shapes(
+        static_cast<std::vector<int64_t>>(a_in.shape()),
+        static_cast<std::vector<int64_t>>(b_in.shape()));
+    DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
+    if (a_in.dtype() == DType::Bool && b_in.dtype() == DType::Bool) dt = DType::Bool;
+    if (dt != DType::Bool && !isIntegralType(dt)) {
+        TP_THROW(TypeError, name, ": only integral and boolean types are supported");
+    }
+    Tensor ac = (a_in.dtype() == dt ? a_in : a_in.to(dt)).expand(out_shape).contiguous();
+    Tensor bc = (b_in.dtype() == dt ? b_in : b_in.to(dt)).expand(out_shape).contiguous();
+    Tensor out = Tensor::empty(out_shape, dt, a_in.device());
+    int64_t n = out.numel();
+#define TP_SHIFT_BIN_CASE(ctype, name_) \
+    case DType::name_: { \
+        using U = typename std::make_unsigned<ctype>::type; \
+        constexpr int64_t kBits = static_cast<int64_t>(sizeof(ctype) * 8); \
+        const ctype* ap = ac.data_ptr<ctype>(); \
+        const ctype* bp = bc.data_ptr<ctype>(); \
+        ctype* dp = out.data_ptr<ctype>(); \
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
+            for (int64_t i = begin; i < end; ++i) { \
+                U x = static_cast<U>(ap[i]); \
+                U sh = static_cast<U>(static_cast<uint64_t>(bp[i]) % \
+                                      static_cast<uint64_t>(kBits)); \
+                U r = kLeft ? static_cast<U>(x << sh) : static_cast<U>(x >> sh); \
+                dp[i] = static_cast<ctype>(r); \
+            } \
+        }); \
+        break; \
+    }
+    switch (dt) {
+        TENSORPLAY_FORALL_INT_TYPES(TP_SHIFT_BIN_CASE)
+        default: TP_THROW(TypeError, name, ": unsupported dtype");
+    }
+#undef TP_SHIFT_BIN_CASE
+    return out;
+}
+
+// Named entry points registered with the dispatcher.
+Tensor bitwise_and_tensor_cpu(const Tensor& a, const Tensor& b) {
+    return bitwise_binary_cpu(a, b,
+        [](auto x, auto y) { return static_cast<decltype(x)>(x & y); }, "bitwise_and");
+}
+Tensor bitwise_or_tensor_cpu(const Tensor& a, const Tensor& b) {
+    return bitwise_binary_cpu(a, b,
+        [](auto x, auto y) { return static_cast<decltype(x)>(x | y); }, "bitwise_or");
+}
+Tensor bitwise_xor_tensor_cpu(const Tensor& a, const Tensor& b) {
+    return bitwise_binary_cpu(a, b,
+        [](auto x, auto y) { return static_cast<decltype(x)>(x ^ y); }, "bitwise_xor");
+}
+Tensor bitwise_and_scalar_cpu(const Tensor& a, Scalar b) {
+    return bitwise_scalar_cpu(a, b,
+        [](auto x, auto y) { return static_cast<decltype(x)>(x & y); }, "bitwise_and");
+}
+Tensor bitwise_or_scalar_cpu(const Tensor& a, Scalar b) {
+    return bitwise_scalar_cpu(a, b,
+        [](auto x, auto y) { return static_cast<decltype(x)>(x | y); }, "bitwise_or");
+}
+Tensor bitwise_xor_scalar_cpu(const Tensor& a, Scalar b) {
+    return bitwise_scalar_cpu(a, b,
+        [](auto x, auto y) { return static_cast<decltype(x)>(x ^ y); }, "bitwise_xor");
+}
+Tensor bitwise_lshift_tensor_cpu(const Tensor& a, const Tensor& b) {
+    return bitwise_shift_tensor_cpu<true>(a, b, "bitwise_left_shift");
+}
+Tensor bitwise_rshift_tensor_cpu(const Tensor& a, const Tensor& b) {
+    return bitwise_shift_tensor_cpu<false>(a, b, "bitwise_right_shift");
+}
+Tensor bitwise_lshift_scalar_cpu(const Tensor& a, Scalar b) {
+    return bitwise_shift_scalar_cpu(a, b,
+        [](auto x, auto sh) { return static_cast<decltype(x)>(x << sh); },
+        "bitwise_left_shift");
+}
+Tensor bitwise_rshift_scalar_cpu(const Tensor& a, Scalar b) {
+    return bitwise_shift_scalar_cpu(a, b,
+        [](auto x, auto sh) { return static_cast<decltype(x)>(x >> sh); },
+        "bitwise_right_shift");
+}
+
 TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     // Arithmetic
     m.impl("rsub.Scalar", rsub_scalar_cpu);
@@ -1944,6 +2406,7 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("logaddexp2", logaddexp2_cpu);
     m.impl("copysign.Tensor", copysign_cpu);
     m.impl("hypot", hypot_cpu);
+    m.impl("atan2", atan2_cpu);
     m.impl("nextafter", nextafter_cpu);
     m.impl("gcd", gcd_cpu);
     m.impl("lcm", lcm_cpu);
@@ -1984,7 +2447,8 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("diag_embed", diag_embed_cpu);
     m.impl("narrow", narrow_cpu);
     m.impl("split_with_sizes", split_with_sizes_cpu);
-    m.impl("tensor_split.sections", tensor_split_cpu);
+    // tensor_split.sections: owned by cpu/ShapeAlignKernels.cpp (torch-exact
+    // view semantics + indices/tensor overloads); duplicate removed.
     m.impl("roll", roll_cpu);
     m.impl("flip", flip_cpu);
     m.impl("rot90", rot90_cpu);
@@ -1996,6 +2460,27 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("pixel_unshuffle", pixel_unshuffle_cpu);
     m.impl("channel_shuffle", channel_shuffle_cpu);
     m.impl("unfold.Tensor", unfold_cpu);
+    // Index/scatter complements
+    m.impl("select_scatter", select_scatter_cpu);
+    m.impl("slice_scatter", slice_scatter_cpu);
+    m.impl("diagonal_scatter", diagonal_scatter_cpu);
+    m.impl("take_along_dim", take_along_dim_cpu);
+    m.impl("msort", msort_cpu);
+    m.impl("nanmean", nanmean_cpu);
+    m.impl("isclose", isclose_cpu);
+    m.impl("isreal", isreal_cpu);
+    // Bitwise family
+    m.impl("bitwise_not", bitwise_not_cpu);
+    m.impl("bitwise_and.Tensor", bitwise_and_tensor_cpu);
+    m.impl("bitwise_or.Tensor", bitwise_or_tensor_cpu);
+    m.impl("bitwise_xor.Tensor", bitwise_xor_tensor_cpu);
+    m.impl("bitwise_and.Scalar", bitwise_and_scalar_cpu);
+    m.impl("bitwise_or.Scalar", bitwise_or_scalar_cpu);
+    m.impl("bitwise_xor.Scalar", bitwise_xor_scalar_cpu);
+    m.impl("bitwise_left_shift.Tensor", bitwise_lshift_tensor_cpu);
+    m.impl("bitwise_right_shift.Tensor", bitwise_rshift_tensor_cpu);
+    m.impl("bitwise_left_shift.Tensor_Scalar", bitwise_lshift_scalar_cpu);
+    m.impl("bitwise_right_shift.Tensor_Scalar", bitwise_rshift_scalar_cpu);
 }
 
 } // namespace cpu

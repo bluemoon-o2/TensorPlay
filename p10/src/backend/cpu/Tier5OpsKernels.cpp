@@ -24,6 +24,7 @@
 #include "Exception.h"
 #include "Parallel.h"
 #include "TypePromotion.h"
+#include "tensorplay/ops/TensorRedispatchGenerated.h"
 
 #include <vector>
 #include <algorithm>
@@ -534,42 +535,17 @@ std::tuple<Tensor, Tensor, Tensor> svd_cpu(const Tensor& self, bool some, bool c
 
 Tensor pairwise_distance_cpu(const Tensor& x1, const Tensor& x2, double p, double eps,
                              bool keepdim) {
-    // DistanceKernels pair semantics: x2 either (N, D) or broadcastable (D,).
-    int64_t N = x1.size(0);
-    int64_t D = x1.size(1);
-    Tensor b = x2;
-    if (x2.dim() == 1) b = x2.expand(shape_of(x1));
-    b = b.contiguous().to(DType::Float64);
-    Tensor a = x1.contiguous().to(DType::Float64);
-    const double* ap = a.data_ptr<double>();
-    const double* bp = b.data_ptr<double>();
-    std::vector<int64_t> oshape = keepdim && x2.dim() == 1 ? std::vector<int64_t>{N, 1}
-                                                           : std::vector<int64_t>{N};
-    Tensor out = Tensor::empty(oshape, DType::Float64, x1.device());
-    double* op = out.data_ptr<double>();
-    (void)eps;  // eps only affects gradients in ATen; value semantics identical.
-    parallel_for(0, N, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
-        for (int64_t i = begin; i < end; ++i) {
-            if (p == std::numeric_limits<double>::infinity()) {
-                double mx = 0;
-                for (int64_t j = 0; j < D; ++j)
-                    mx = std::max(mx, std::fabs(ap[i * D + j] - bp[i * D + j]));
-                op[i] = mx;
-            } else if (p == 0.0) {
-                int64_t cnt = 0;
-                for (int64_t j = 0; j < D; ++j)
-                    if (ap[i * D + j] != bp[i * D + j]) ++cnt;
-                op[i] = static_cast<double>(cnt);
-            } else {
-                double s2 = 0;
-                for (int64_t j = 0; j < D; ++j)
-                    s2 += std::pow(std::fabs(ap[i * D + j] - bp[i * D + j]), p);
-                op[i] = std::pow(s2, 1.0 / p);
-            }
-        }
-    });
-    DType out_dt = x1.dtype() == DType::Float64 ? DType::Float64 : DType::Float32;
-    return out.to(out_dt);
+    // ATen Distance.cpp: pairwise_distance is a composite --
+    //   norm(x1 - x2 + eps, p, last_dim, keepdim)
+    // with full broadcasting; the old hand loop assumed (N, D) inputs and
+    // silently produced zeros for 1-D pairs.
+    Tensor diff = x1 - x2 + eps;
+    if (diff.dim() == 0) {
+        TP_THROW(RuntimeError, "pairwise_distance: inputs must be at least 1-dimensional");
+    }
+    const int64_t dim = diff.dim() - 1;
+    return detail::redispatch_norm_function(diff,
+                                            std::vector<int64_t>{dim}, p, keepdim);
 }
 
 Tensor pdist_cpu(const Tensor& self, double p) {
@@ -583,10 +559,11 @@ Tensor pdist_cpu(const Tensor& self, double p) {
     double* op = out.data_ptr<double>();
     parallel_for(0, std::max<int64_t>(outn, 1), GRAIN_SIZE, [&](int64_t begin, int64_t end) {
         for (int64_t li = begin; li < end; ++li) {
-            // linear -> (i, j), i < j (numpy trick used by torch)
+            // linear -> (i, j), i < j (numpy condensed-index trick)
             int64_t i = static_cast<int64_t>(
                 n - 2 - std::floor(std::sqrt(-8.0 * li + 4.0 * n * (n - 1) - 7) / 2.0 - 0.5));
-            int64_t j = li + i + 1 - i * n + (n * (n + 1)) / 2;
+            int64_t j = li + i + 1 - (n * (n - 1)) / 2 +
+                        ((n - i) * (n - i - 1)) / 2;
             double d2 = 0;
             if (p == std::numeric_limits<double>::infinity()) {
                 for (int64_t c = 0; c < D; ++c)
@@ -623,8 +600,11 @@ Tensor pdist_cpu(const Tensor& self, double p) {
 // ===========================================================================
 
 Tensor binary_cross_entropy_with_logits_cpu(const Tensor& self, const Tensor& target,
-                                            const Tensor& weight, const Tensor& pos_weight) {
+                                            const std::optional<Tensor>& weight_opt,
+                                            const std::optional<Tensor>& pos_weight_opt) {
     // Stable form (LossBCE2d): l = w*(pw*t*softplus(-x) + (1-t)*softplus(x)).
+    Tensor weight = weight_opt.value_or(Tensor());
+    Tensor pos_weight = pos_weight_opt.value_or(Tensor());
     Tensor x = self.contiguous().to(DType::Float64);
     Tensor t = target.contiguous().to(DType::Float64).expand(shape_of(x)).contiguous();
     bool has_w = weight.defined() && weight.numel() > 0;
@@ -814,137 +794,121 @@ static std::tuple<Tensor, Tensor, Tensor> rnn_impl(
     const Tensor& input, const std::vector<Tensor>& hx,
     const std::vector<Tensor>& params, bool has_biases, int64_t num_layers,
     bool bidirectional, bool batch_first) {
+    // Vectorized port of at::native RNN loops (aten/src/ATen/native/RNN.cpp).
+    // Compute happens in the input dtype (fp32 stays fp32); input-side gates
+    // for a whole direction are produced by a single GEMM and gate math is
+    // expressed with tensor ops so the pointwise kernels do the element work.
+    const DType dt = input.dtype();
+    if (dt != DType::Float32 && dt != DType::Float64) {
+        TP_THROW(RuntimeError, "rnn: only Float32/Float64 inputs are supported");
+    }
     Tensor x = batch_first ? input.transpose(0, 1).contiguous() : input.contiguous();
-    int64_t T = x.size(0), N = x.size(1), I = x.size(2);
-    int64_t dirs = bidirectional ? 2 : 1;
+    const int64_t T = x.size(0), N = x.size(1);
     if (hx.empty()) TP_THROW(RuntimeError, "rnn: hx required");
-    int64_t L = num_layers;
-    int64_t H = hx[0].size(-1);
+    const int64_t L = num_layers;
+    const int64_t dirs = bidirectional ? 2 : 1;
+    const int64_t H = hx[0].size(-1);
+
     Tensor hn_out = Tensor::zeros({L * dirs, N, H}, hx[0].dtype(), input.device());
-    Tensor cn_out = Tensor::zeros({L * dirs, N, H}, hx[0].dtype(), input.device());
+    Tensor cn_out = kind == 0
+        ? Tensor::zeros({L * dirs, N, H}, hx[0].dtype(), input.device())
+        : Tensor();
 
-    size_t ppi = 0;  // params cursor
+    size_t ppi = 0;  // params cursor: per layer/direction w_ih, w_hh[, b_ih, b_hh]
+    auto param_at = [&](void) -> const Tensor& {
+        if (ppi >= params.size()) TP_THROW(RuntimeError, "rnn: missing parameter ", ppi);
+        return params[ppi++];
+    };
+
     for (int64_t layer = 0; layer < L; ++layer) {
-        int64_t feat = x.size(2);
-        Tensor layer_out = Tensor::zeros({T, N, dirs * H}, x.dtype(), x.device());
+        // Per-direction sequence outputs concatenated along the feature dim;
+        // writes go through Tensor::slice/select views (narrow is a copying
+        // op on this backend and must not be used as an assignment target).
+        std::vector<Tensor> dir_outs;
         for (int64_t dir = 0; dir < dirs; ++dir) {
-            const Tensor& h0s = hx[0];
-            Tensor h = slice_matrix_copy(h0s.contiguous(),
-                                         (layer * dirs + dir) * N * H, N, H)
-                           .to(DType::Float64);
-            Tensor c = kind == 0 ? slice_matrix_copy(hx[1].contiguous(),
-                                                     (layer * dirs + dir) * N * H, N, H)
-                                       .to(DType::Float64)
-                                 : h;
-            const Tensor& w_ih = param_at(params, ppi++, has_biases);
-            const Tensor& w_hh = param_at(params, ppi++, has_biases);
-            const double* bih = nullptr;
-            const double* bhhd = nullptr;
-            Tensor bihT, bhhdT;
-            if (has_biases) {
-                bihT = param_at(params, ppi++, true).contiguous().to(DType::Float64);
-                bhhdT = param_at(params, ppi++, true).contiguous().to(DType::Float64);
-                bih = bihT.numel() ? bihT.data_ptr<double>() : nullptr;
-                bhhd = bhhdT.numel() ? bhhdT.data_ptr<double>() : nullptr;
-            }
-            Tensor wt = transpose_matrix_copy(w_ih.contiguous().to(DType::Float64));
-            Tensor wht = transpose_matrix_copy(w_hh.contiguous().to(DType::Float64));
-            const double* wihp = wt.data_ptr<double>();   // (feat x G)
-            const double* whhp = wht.data_ptr<double>();  // (H x G)
-            int64_t G = (kind == 0) ? 4 * H : (kind == 1 ? 3 * H : H);
+            const int64_t state_idx = layer * dirs + dir;
+            Tensor h = hx[0].select(0, state_idx).contiguous();
+            Tensor c = kind == 0 ? hx[1].select(0, state_idx).contiguous() : h;
+            Tensor dir_out = Tensor::zeros({T, N, H}, dt, x.device());
 
-            auto step = [&](int64_t t) {
-                Tensor xt = slice_matrix_copy(x, t * N * feat, N, feat);
-                Tensor g1 = mm_kernel(xt.to(DType::Float64), wt);          // (N,G)
-                Tensor g2 = mm_kernel(h.reshape({N, H}), wht);             // (N,H)
-                Tensor out = Tensor::zeros({N, H}, DType::Float64, x.device());
-                double* hp = out.data_ptr<double>();
-                const double* gp1 = g1.data_ptr<double>();
-                const double* gp2 = g2.data_ptr<double>();
-                const double* cp = c.data_ptr<double>();
-                double* cnp = kind == 0 ? c.data_ptr<double>() : nullptr;
-                std::vector<double> ctmp(kind == 0 ? N * H : 0);
-                if (kind == 0) ctmp.assign(cp, cp + N * H);
-                for (int64_t row = 0; row < N; ++row) {
-                    if (kind == 0) {
-                        for (int64_t j = 0; j < H; ++j) {
-                            double iv = 1.0 / (1.0 + std::exp(-(gp1[row * G + j] +
-                                        (bih ? bih[j] : 0.0) + gp2[row * H + j] + (bhhd ? bhhd[j] : 0.0))));
-                            double fv = 1.0 / (1.0 + std::exp(-(gp1[row * G + H + j] +
-                                        (bih ? bih[H + j] : 0.0) + gp2[row * H + H + j] + (bhhd ? bhhd[H + j] : 0.0))));
-                            double gv = std::tanh(gp1[row * G + 2 * H + j] +
-                                                  (bih ? bih[2 * H + j] : 0.0) +
-                                                  gp2[row * H + 2 * H + j] + (bhhd ? bhhd[2 * H + j] : 0.0));
-                            double ov = 1.0 / (1.0 + std::exp(-(gp1[row * G + 3 * H + j] +
-                                        (bih ? bih[3 * H + j] : 0.0) + gp2[row * H + 3 * H + j] + (bhhd ? bhhd[3 * H + j] : 0.0))));
-                            double cv = fv * ctmp[row * H + j] + iv * gv;
-                            cnp[row * H + j] = cv;
-                            hp[row * H + j] = ov * std::tanh(cv);
-                        }
-                    } else if (kind == 1) {
-                        // gates: i = sigmoid(x wi + h wh + b);
-                        //        r = sigmoid(x wr + h whr + b);
-                        //        n = tanh(x wn + b_in + r*(h whn + b_hn))
-                        const double* hp_prev = h.data_ptr<double>();
-                        for (int64_t j = 0; j < H; ++j) {
-                            double iv = 1.0 / (1.0 + std::exp(-(gp1[row * G + j] +
-                                        (bih ? bih[j] : 0.0) + gp2[row * H + j] + (bhhd ? bhhd[j] : 0.0))));
-                            double rv = 1.0 / (1.0 + std::exp(-(gp1[row * G + H + j] +
-                                        (bih ? bih[H + j] : 0.0) + gp2[row * H + H + j] + (bhhd ? bhhd[H + j] : 0.0))));
-                            double base_n = gp1[row * G + 2 * H + j] + (bih ? bih[2 * H + j] : 0.0);
-                            double hn_part = bhhd ? bhhd[2 * H + j] : 0.0;
-                            for (int64_t qq = 0; qq < H; ++qq)
-                                hn_part += whhp[(2 * H + j) * H + qq] * hp_prev[qq];
-                            hp[row * H + j] =
-                                std::tanh(base_n + iv * 0.0 + rv * hn_part) * iv +
-                                std::tanh(base_n + rv * hn_part) * (1.0 - iv);
-                            // torch: h' = (1-i)*n + i*h_old? No -- GRU output is n only;
-                            // collapse the blend above to pure n:
-                            hp[row * H + j] = std::tanh(base_n + rv * hn_part);
-                        }
-                    } else {
-                        for (int64_t j = 0; j < H; ++j) {
-                            double v = gp1[row * G + j] + (bih ? bih[j] : 0.0) +
-                                       gp2[row * H + j] + (bhhd ? bhhd[j] : 0.0);
-                            hp[row * H + j] = (kind == 2) ? std::tanh(v) : (v > 0 ? v : 0.0);
-                        }
-                    }
-                }
-                // write into layer output at feature offset
-                Tensor loc = layer_out.contiguous();
-                for (int64_t row = 0; row < N; ++row) {
-                    std::memcpy(reinterpret_cast<char*>(loc.data_ptr()) +
-                                    ((t * N + row) * dirs * H + dir * H) * loc.itemsize(),
-                                reinterpret_cast<const char*>(out.contiguous().data_ptr()) +
-                                    row * H * out.itemsize(),
-                                H * out.itemsize());
-                }
-                layer_out = loc;
-                h = out;
-                if (kind == 0) c = cnp ? c : c;
-                // stash final states at the end of time loop
-            };
-            for (int64_t t = 0; t < T; ++t) {
-                int64_t tt = dir == 0 ? t : (T - 1 - t);
-                step(tt);
-                if (t == T - 1 || tt == 0) {
-                    // record final hidden state for this direction
-                    Tensor hc = hn_out.contiguous();
-                    std::memcpy(reinterpret_cast<char*>(hc.data_ptr()) +
-                                    ((layer * dirs + dir) * N * H) * hc.itemsize(),
-                                reinterpret_cast<const char*>(h.contiguous().data_ptr()),
-                                N * H * h.itemsize());
-                    hn_out = hc;
-                    if (kind == 0) {
-                        Tensor cc = cn_out.contiguous();
-                        std::memcpy(reinterpret_cast<char*>(cc.data_ptr()) +
-                                        ((layer * dirs + dir) * N * H) * cc.itemsize(),
-                                    reinterpret_cast<const char*>(c.contiguous().data_ptr()),
-                                    N * H * c.itemsize());
-                        cn_out = cc;
-                    }
-                }
+            const Tensor& w_ih = param_at();
+            const Tensor& w_hh = param_at();
+            Tensor b_ih, b_hh;
+            if (has_biases) {
+                b_ih = param_at();
+                b_hh = param_at();
+                if (!(b_ih.numel() > 0)) b_ih = Tensor();
+                if (!(b_hh.numel() > 0)) b_hh = Tensor();
             }
+
+            // Input-side gates for the whole sequence in one GEMM:
+            // (T*N, feat) @ (feat, G)^T + b_ih  ->  (T*N, G).
+            Tensor x2d = x.reshape({T * N, x.size(2)});
+            Tensor in_gates = x2d.mm(w_ih.t());
+            if (b_ih.defined()) in_gates = in_gates.add(b_ih);
+            const int64_t G = in_gates.size(1);
+
+            const Tensor w_hh_t = w_hh.t();  // (H, G)
+
+            for (int64_t t = 0; t < T; ++t) {
+                const int64_t tt = dir == 0 ? t : (T - 1 - t);
+                const Tensor ig = in_gates.narrow(0, tt * N, N);   // (N, G)
+                Tensor hg = h.mm(w_hh_t);                          // (N, G)
+                // lstm / simple cells fold b_hh linearly into every gate;
+                // gru handles the three bias segments separately below.
+                if (kind != 1 && b_hh.defined()) hg = hg.add(b_hh);
+
+                if (kind == 0) {
+                    auto gate = [&](int64_t off, Tensor (*fn)(const Tensor&)) -> Tensor {
+                        return fn(ig.narrow(1, off, H).add(hg.narrow(1, off, H)));
+                    };
+                    Tensor i_ = gate(0, [](const Tensor& v) { return v.sigmoid(); });
+                    Tensor f_ = gate(H, [](const Tensor& v) { return v.sigmoid(); });
+                    Tensor g_ = gate(2 * H, [](const Tensor& v) { return v.tanh(); });
+                    Tensor o_ = gate(3 * H, [](const Tensor& v) { return v.sigmoid(); });
+                    c = f_.mul(c).add(i_.mul(g_));
+                    h = o_.mul(c.tanh());
+                } else if (kind == 1) {
+                    // torch GRUCell:
+                    //   r = sigmoid(ir + hr), z = sigmoid(iz + hz)
+                    //   n = tanh(in + r * (hn + b_hn))
+                    //   h' = (1 - z) * n + z * h
+                    Tensor b_r, b_z, b_n;
+                    if (b_hh.defined()) {
+                        b_r = b_hh.narrow(0, 0, H);
+                        b_z = b_hh.narrow(0, H, H);
+                        b_n = b_hh.narrow(0, 2 * H, H);
+                    }
+                    Tensor r_ = ig.narrow(1, 0, H)
+                                    .add(b_r.defined() ? b_r.add(hg.narrow(1, 0, H))
+                                                       : hg.narrow(1, 0, H))
+                                    .sigmoid();
+                    Tensor z_ = ig.narrow(1, H, H)
+                                    .add(b_z.defined() ? b_z.add(hg.narrow(1, H, H))
+                                                       : hg.narrow(1, H, H))
+                                    .sigmoid();
+                    Tensor hn_lin = hg.narrow(1, 2 * H, H);
+                    if (b_n.defined()) hn_lin = hn_lin.add(b_n);
+                    Tensor n_ = ig.narrow(1, 2 * H, H).add(r_.mul(hn_lin)).tanh();
+                    Tensor one_minus_z = z_.neg().add(Scalar(1));
+                    h = one_minus_z.mul(n_).add(z_.mul(h));
+                } else {
+                    Tensor pre = ig.add(hg);
+                    h = (kind == 2) ? pre.tanh() : pre.relu();
+                }
+
+                dir_out.select(0, tt).copy_(h);
+                hn_out.select(0, state_idx).copy_(h);
+                if (kind == 0) cn_out.select(0, state_idx).copy_(c);
+            }
+            dir_outs.push_back(dir_out);
+        }
+        Tensor layer_out;
+        if (dirs == 1) {
+            layer_out = dir_outs[0];
+        } else {
+            extern Tensor cat_kernel(const std::vector<Tensor>& tensors, int64_t dim);
+            layer_out = cat_kernel({dir_outs[0], dir_outs[1]}, 2);
         }
         x = layer_out;
     }

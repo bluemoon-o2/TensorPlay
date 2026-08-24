@@ -342,7 +342,10 @@ Tensor binary_cross_entropy_cuda(const Tensor& input, const Tensor& target) {
 }
 
 Tensor binary_cross_entropy_with_logits_cuda(const Tensor& self, const Tensor& target,
-                                             const Tensor& weight, const Tensor& pos_weight) {
+                                             const std::optional<Tensor>& weight_opt,
+                                             const std::optional<Tensor>& pos_weight_opt) {
+    Tensor weight = weight_opt.value_or(Tensor());
+    Tensor pos_weight = pos_weight_opt.value_or(Tensor());
     auto pr = pair_f64_dev(self, target);
     bool has_w = weight.defined() && weight.numel() > 0;
     bool has_pw = pos_weight.defined() && pos_weight.numel() > 0;

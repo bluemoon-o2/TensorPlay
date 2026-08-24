@@ -158,7 +158,7 @@ def logsumexp(input, dim, keepdim=False, *, out=None):
     if out is not None:
         raise NotImplementedError("logsumexp: out= is not supported")
     dims = [dim] if isinstance(dim, int) else list(dim)
-    m = tp.max(input, dim=dims, keepdim=True)
+    m = tp.amax(input, dim=dims, keepdim=True)
     s = (exp(input - m)).sum(dim=dims, keepdim=True)
     lse = log(s) + m
     if not keepdim:

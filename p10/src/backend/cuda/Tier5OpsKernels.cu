@@ -234,7 +234,10 @@ static std::tuple<Tensor, Tensor, Tensor> rnn_cuda_impl(
     };
 
     for (int64_t layer = 0; layer < L; ++layer) {
-        Tensor layer_out = Tensor::zeros({T, N, dirs * H}, dt, x.device());
+        // Per-direction outputs written through Tensor::select views (narrow
+        // must not be used as an assignment target), concatenated along the
+        // feature dim afterwards.
+        std::vector<Tensor> dir_outs;
         for (int64_t dir = 0; dir < dirs; ++dir) {
             const int64_t state_idx = layer * dirs + dir;
             Tensor h = hx[0].select(0, state_idx).contiguous();
@@ -257,6 +260,7 @@ static std::tuple<Tensor, Tensor, Tensor> rnn_cuda_impl(
             if (b_ih.numel() > 0) in_gates = in_gates + b_ih;
             const int64_t G = in_gates.size(1);
 
+            Tensor dir_out = Tensor::zeros({T, N, H}, dt, x.device());
             for (int64_t t = 0; t < T; ++t) {
                 const int64_t tt = dir == 0 ? t : (T - 1 - t);
                 Tensor ig_row = in_gates.narrow(0, tt * N, N);
@@ -275,11 +279,17 @@ static std::tuple<Tensor, Tensor, Tensor> rnn_cuda_impl(
                     h = (kind == 2) ? gates.tanh() : gates.relu();
                 }
 
-                layer_out.narrow(0, tt, 1).narrow(2, dir * H, H)
-                    .copy_(h.reshape({1, N, H}));
+                dir_out.select(0, tt).copy_(h);
                 hn_out.select(0, state_idx).copy_(h);
                 if (kind == 0) cn_out.select(0, state_idx).copy_(c);
             }
+            dir_outs.push_back(dir_out);
+        }
+        Tensor layer_out;
+        if (dirs == 1) {
+            layer_out = dir_outs[0];
+        } else {
+            layer_out = Tensor::cat({dir_outs[0], dir_outs[1]}, 2);
         }
         x = layer_out;
     }

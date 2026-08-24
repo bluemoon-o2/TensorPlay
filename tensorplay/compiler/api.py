@@ -19,7 +19,9 @@ from weakref import WeakSet
 
 from .graph import GraphCaptureError, GraphModule, Tracer
 from .guards import GuardChain, build_guard_chain, format_recompile_reasons
+from .decompositions import DecomposePass
 from .passes import ConstFold, DeadCodeElimination, PassManager, ShapeProp
+from .fx_passes import NormalizeOperators, PointwiseFusionHint
 from .registry import CompilerFn, get_default_backend, lookup_backend
 
 
@@ -485,10 +487,20 @@ def _compile_region(
                     model, example_inputs, example_kwargs
                 ),
             )
-            # Default capture pipeline: constant folding first, then dead
-            # code elimination.  Backends always receive a folded, linted
-            # graph; ShapeProp below additionally annotates tensor shapes.
-            PassManager([ConstFold(), DeadCodeElimination()])(graph_module)
+            # Default capture pipeline: canonicalize operators, then constant
+            # folding, then dead code elimination; fusion hints are stamped
+            # last so they see the final graph.  Backends always receive a
+            # folded, linted, hint-annotated graph; ShapeProp below
+            # additionally annotates tensor shapes.
+            PassManager(
+                [
+                    NormalizeOperators(),
+                    ConstFold(),
+                    DecomposePass(),
+                    DeadCodeElimination(),
+                    PointwiseFusionHint(),
+                ]
+            )(graph_module)
     except GraphCaptureError:
         if fullgraph:
             raise

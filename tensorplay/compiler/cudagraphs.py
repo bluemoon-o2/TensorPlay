@@ -169,9 +169,18 @@ class CudaGraphManager:
         try:
             # Warmup executes lazy initialisations outside capture.
             fn(*sample_args)
+            # Static input buffers must be allocated AND filled before the
+            # capture window opens: a clone issued inside capture becomes a
+            # captured node that would overwrite the staged replay inputs
+            # with the sample values on every replay.  Allocating outside
+            # also keeps them out of the graph-private pool, so their
+            # lifetime is independent of cuda_graph_destroy.  No ordering
+            # fence is needed here: nothing executes during capture, and at
+            # replay time the staging copies are enqueued on the launch
+            # stream ahead of the graph.
+            static_inputs = [_clone_static(a) for a in sample_args]
             self.capturing = key
             native.cuda_graph_begin_capture()
-            static_inputs = [_clone_static(a) for a in sample_args]
             outputs = fn(*static_inputs)
             graph = native.cuda_graph_end_capture()
             executable = native.cuda_graph_instantiate(graph)
