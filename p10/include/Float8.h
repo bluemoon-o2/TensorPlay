@@ -149,10 +149,20 @@ struct Float8_e5m2 {
     }
 };
 // ---------------------------------------------------------------------------
-// Arithmetic/comparison via float promotion (mirrors Half.h)
+// Arithmetic/comparison via float promotion (mirrors Half.h).  Constrained to
+// Float8 operands: without the constraint these templates hijack every other
+// type combination (complex, etc.) and hard-fail on the float() casts.
 // ---------------------------------------------------------------------------
+namespace detail {
+template <typename T> struct is_float8 : std::false_type {};
+template <> struct is_float8<Float8_e4m3fn> : std::true_type {};
+template <> struct is_float8<Float8_e5m2> : std::true_type {};
+}
 #define TP_F8_BINARY_OP(OP)                                                    \
-    template <typename A, typename B>                                          \
+    template <typename A, typename B,                                          \
+              typename = std::enable_if_t<                                     \
+                  detail::is_float8<std::decay_t<A>>::value ||                 \
+                  detail::is_float8<std::decay_t<B>>::value>>                  \
     inline TP_F8_HOST_DEVICE auto operator OP(const A& a, const B& b)          \
         ->decltype(float(a) OP float(b)) {                                     \
         return float(a) OP float(b);                                           \

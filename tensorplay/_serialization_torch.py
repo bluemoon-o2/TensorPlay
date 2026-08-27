@@ -27,6 +27,7 @@ import sys
 import tarfile
 import zipfile
 from collections import OrderedDict
+from types import FunctionType
 from typing import Any, BinaryIO, Mapping
 
 import tensorplay as tp
@@ -226,9 +227,11 @@ def _rebuild_tensor_v2(storage, storage_offset, size, stride, requires_grad,
 _rebuild_tensor_v2.__module__ = "torch._utils"
 _rebuild_tensor_v2.__name__ = "_rebuild_tensor_v2"
 _rebuild_tensor_v2.__qualname__ = "_rebuild_tensor_v2"
+_rebuild_tensor_v2._tp_torch_ref = ("torch._utils", "_rebuild_tensor_v2")
 _rebuild_tensor.__module__ = "torch._utils"
 _rebuild_tensor.__name__ = "_rebuild_tensor"
 _rebuild_tensor.__qualname__ = "_rebuild_tensor"
+_rebuild_tensor._tp_torch_ref = ("torch._utils", "_rebuild_tensor")
 
 
 def _rebuild_parameter(data, requires_grad, backward_hooks, process_dict=None):
@@ -365,7 +368,34 @@ class _ReaderState:
         return resolve_map_location(self.map_location, location)
 
 
+class _RootedZipReader:
+    """ZipFile shim exposing torch's root-prefixed records under bare names."""
+
+    def __init__(self, archive: zipfile.ZipFile, prefix: str):
+        self._archive = archive
+        self._prefix = prefix
+
+    def namelist(self) -> list:
+        cut = len(self._prefix)
+        return [name[cut:] if name.startswith(self._prefix) else name
+                for name in self._archive.namelist()]
+
+    def read(self, name: str) -> bytes:
+        return self._archive.read(self._prefix + name)
+
+
+def _normalize_torch_zip_root(archive: zipfile.ZipFile) -> zipfile.ZipFile:
+    names = set(archive.namelist())
+    if "data.pkl" in names:
+        return archive
+    roots = {name[:-len("data.pkl")] for name in names if name.endswith("/data.pkl")}
+    if len(roots) == 1:
+        return _RootedZipReader(archive, next(iter(roots)))
+    return archive
+
+
 def _read_zip_archive(archive: zipfile.ZipFile, *, map_location) -> Any:
+    archive = _normalize_torch_zip_root(archive)
     names = set(archive.namelist())
     if "constants.pkl" in names:
         raise RuntimeError(
@@ -385,7 +415,7 @@ def _read_zip_archive(archive: zipfile.ZipFile, *, map_location) -> Any:
     def persistent_load(saved_id):
         if not isinstance(saved_id, tuple) or not saved_id or saved_id[0] != "storage":
             raise pickle.UnpicklingError(f"unsupported persistent id: {saved_id!r}")
-        _, storage_type, key, location, numel = saved_id[1:]
+        storage_type, key, location, numel = saved_id[1:]
         if isinstance(location, bytes):
             location = location.decode("ascii")
         return _LazyZipStorage(
@@ -634,12 +664,38 @@ def _make_pt_storage_class(dtype_name: str):
         (),
         {"__module__": "torch", "__qualname__": storage_name, "__name__": storage_name},
     )
+    cls._tp_torch_ref = ("torch", storage_name)
     return cls
 
 
 _PT_STORAGE_CLASSES = {
     dtype_name: _make_pt_storage_class(dtype_name) for dtype_name in _STORAGE_NAMES_BY_DTYPE
 }
+
+
+class _TorchCompatPickler(pickle._Pickler):
+    """Pure-Python pickler that emits ``torch.*`` global refs verbatim.
+
+    CPython's C pickler verifies forged ``__module__``/``__qualname__``
+    against the real importable object, which fails whenever genuine torch
+    is installed; the archive must nonetheless reference torch's names for
+    cross-loading.  Objects advertise their target through a
+    ``_tp_torch_ref`` ``(module, qualname)`` attribute.
+    """
+
+    def save_global(self, obj, name=None):
+        forced = getattr(obj, "_tp_torch_ref", None)
+        if forced is not None:
+            module, forced_name = forced
+            self.write(pickle.GLOBAL
+                       + module.encode("ascii") + b"\n"
+                       + forced_name.encode("ascii") + b"\n")
+            self.memoize(obj)
+            return
+        super().save_global(obj, name)
+
+    dispatch = dict(pickle._Pickler.dispatch)
+    dispatch[FunctionType] = save_global
 
 
 def write_torch_file(fileobj: BinaryIO, obj: Any, *, pickle_protocol: int = 2) -> None:
@@ -689,9 +745,9 @@ def write_torch_file(fileobj: BinaryIO, obj: Any, *, pickle_protocol: int = 2) -
         return None
 
     data_buf = io.BytesIO()
-    pickler = pickle.Pickler(data_buf, protocol=pickle_protocol)
+    pickler = _TorchCompatPickler(data_buf, pickle_protocol)
     dispatch = copyreg.dispatch_table.copy()
-    dispatch[type(tp.Tensor)] = reduce_tensor
+    dispatch[tp.Tensor] = reduce_tensor
     parameter_cls = getattr(tp.nn, "Parameter", None)
     if parameter_cls is not None and parameter_cls is not tp.Tensor:
         dispatch[parameter_cls] = reduce_tensor
@@ -701,12 +757,13 @@ def write_torch_file(fileobj: BinaryIO, obj: Any, *, pickle_protocol: int = 2) -
 
     with zipfile.ZipFile(fileobj, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
         data_value = data_buf.getvalue()
-        archive.writestr("data.pkl", data_value)
-        archive.writestr(".format_version", "1")
-        archive.writestr(".storage_alignment", "64")
-        archive.writestr("byteorder", sys.byteorder)
+        archive.writestr("archive/data.pkl", data_value)
+        archive.writestr("archive/version", "3")
+        archive.writestr("archive/.format_version", "1")
+        archive.writestr("archive/.storage_alignment", "64")
+        archive.writestr("archive/byteorder", sys.byteorder)
         for record in order:
-            archive.writestr(f"data/{record['key']}", _tensor_bytes(record["tensor"]))
+            archive.writestr(f"archive/data/{record['key']}", _tensor_bytes(record["tensor"]))
         fileobj.flush()
 
 
@@ -719,6 +776,7 @@ def describe_torch_file(fileobj: BinaryIO) -> dict:
         return {"format": "torch_stream_or_tar"}
 
     with zipfile.ZipFile(fileobj) as archive:
+        archive = _normalize_torch_zip_root(archive)
         names = set(archive.namelist())
         if "constants.pkl" in names:
             return {"format": "torchscript_zip"}
@@ -960,7 +1018,10 @@ def write_safetensors_file(fileobj: BinaryIO, obj: Mapping[str, Any], *,
     offset = 0
     for name, tensor in obj.items():
         if not isinstance(tensor, tp.Tensor):
-            raise TypeError(f"safetensors value {name!r} is not a TensorPlay tensor")
+            raise TypeError(
+                f"safetensors requires a flat mapping of name to Tensor; "
+                f"got non-tensor value at {name!r}"
+            )
         dtype_name = _dtype_name_of(tensor)
         st_name = _SAFETENSORS_DTYPE_NAMES.get(dtype_name)
         if st_name is None:

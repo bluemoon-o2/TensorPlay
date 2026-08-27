@@ -5,6 +5,8 @@
 // slice and walk the reduced dimension sequentially. Rare complex ops
 // (mode/kthvalue/nanmedian/dist-special-p) are host-staged reference paths.
 #include "Tensor.h"
+#include "CUDAComplex.cuh"
+#include <thrust/complex.h>
 #include "Dispatcher.h"
 #include "Scalar.h"
 #include "Exception.h"
@@ -481,6 +483,29 @@ Tensor isposinf_cuda(const Tensor& self) {
 // ===========================================================================
 
 Tensor reciprocal_cuda(const Tensor& self) {
+    // torch parity: 1/z over complex, dtype preserved.
+    if (isComplexType(self.dtype())) {
+        if (self.dtype() != DType::ComplexFloat &&
+            self.dtype() != DType::ComplexDouble)
+            TP_THROW(NotImplementedError,
+                     "CUDA reciprocal: half complexes not supported");
+        Tensor result = Tensor::empty(
+            static_cast<std::vector<int64_t>>(self.shape()), self.dtype(),
+            self.device());
+        const int64_t n = self.numel();
+        auto stream = getCurrentCUDAStream().stream();
+        Tensor sc = self.contiguous();
+        if (self.dtype() == DType::ComplexFloat)
+            cuda::cplx::launch_unary<float>(
+                n, sc.data_ptr(), result.data_ptr(),
+                cuda::cplx::RecipOp{}, stream);
+        else
+            cuda::cplx::launch_unary<double>(
+                n, sc.data_ptr(), result.data_ptr(),
+                cuda::cplx::RecipOp{}, stream);
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
     return float_math_cuda(self, [] __device__ (double x) { return 1.0 / x; }, "reciprocal");
 }
 Tensor sgn_cuda(const Tensor& self) {

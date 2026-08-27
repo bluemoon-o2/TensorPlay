@@ -25,6 +25,7 @@ __all__ = [
     "ProcessGroup",
     "ReduceOp",
     "Work",
+    "group",
     "all_gather",
     "all_gather_into_tensor",
     "all_gather_object",
@@ -96,6 +97,11 @@ class ReduceOp:
 class GroupMember:
     NON_GROUP_MEMBER = -100
     WORLD: Optional["ProcessGroup"] = None
+
+
+#: torch parity: ``dist.group.WORLD`` is the canonical spelling of the
+#: default process group after ``init_process_group``.
+group = GroupMember
 
 
 class Work:

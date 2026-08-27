@@ -17,7 +17,14 @@ from contextvars import ContextVar
 from typing import Any, Callable, Iterable
 from weakref import WeakSet
 
-from .graph import GraphCaptureError, GraphModule, Tracer
+from .graph import (
+    GraphCaptureError,
+    GraphModule,
+    Tracer,
+    _compiling,
+    _iter_nodes,
+    compiler_context,
+)
 from .guards import GuardChain, build_guard_chain, format_recompile_reasons
 from .decompositions import DecomposePass
 from .passes import ConstFold, DeadCodeElimination, PassManager, ShapeProp
@@ -25,7 +32,6 @@ from .fx_passes import NormalizeOperators, PointwiseFusionHint
 from .registry import CompilerFn, get_default_backend, lookup_backend
 
 
-_compiling: ContextVar[bool] = ContextVar("tensorplay_compiling", default=False)
 _capture_disabled: ContextVar[bool] = ContextVar(
     "tensorplay_capture_disabled", default=False
 )
@@ -56,13 +62,10 @@ def _disable_capture() -> Iterable[None]:
         _capture_disabled.reset(token)
 
 
-@contextmanager
-def _compiler_context() -> Iterable[None]:
-    token = _compiling.set(True)
-    try:
-        yield
-    finally:
-        _compiling.reset(token)
+def _compiler_context() -> Any:
+    """Capture context, owned by :mod:`tensorplay.compiler.graph`."""
+
+    return compiler_context()
 
 
 def _tensor_signature(value: Any, *, dynamic: bool) -> tuple[Any, ...] | None:
@@ -194,6 +197,38 @@ def _quick_input_signature(
     )
 
 
+def _arg_fingerprint(value: Any) -> Any:
+    """Cheap per-call identity probe for the hot-path key memo.
+
+    ``(id, version)`` for tensors: in-place mutation bumps ``_version`` so a
+    cached key component is never reused across mutated inputs; fresh tensors
+    have fresh ids.  Scalars compare by value.  This replaces per-call
+    shape/dtype/device reads and tuple rebuilding, which profiling showed at
+    ~40% of steady-state compiled-call time.
+    """
+
+    module = type(value).__module__
+    if module.startswith("tensorplay") and hasattr(value, "_version"):
+        return (
+            "t",
+            id(value),
+            getattr(value, "_version", None),
+            bool(getattr(value, "requires_grad", False)),
+        )
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return ("v", type(value).__name__, value)
+    return ("o", id(value))
+
+
+def _call_fingerprint(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple:
+    items = [_arg_fingerprint(item) for item in args]
+    if kwargs:
+        items.extend(
+            (key, _arg_fingerprint(kwargs[key])) for key in sorted(kwargs)
+        )
+    return tuple(items)
+
+
 def _backend_kwargs(
     *,
     mode: str | None,
@@ -311,6 +346,14 @@ def compile(
     last_compiled_fn: Callable[..., Any] | None = None
     last_arg_refs: tuple[weakref.ReferenceType[Any], ...] | None = None
     guard_param_names: tuple[str, ...] = ()
+    gate_evaluator: Callable[..., tuple] | None = None
+    target_cache = model.forward if _is_module_like(model) else model
+    try:
+        target_signature: Any = inspect.signature(target_cache)
+    except (TypeError, ValueError):
+        target_signature = None
+    last_call_fp: Any = None
+    last_quick_parts: tuple[Any, ...] | None = None
 
     def _guard_component(
         args_: tuple[Any, ...],
@@ -319,9 +362,10 @@ def compile(
     ) -> tuple[Any, ...]:
         if not guard_param_names:
             return ()
-        target = model.forward if _is_module_like(model) else model
+        if target_signature is None:
+            return ("shape-guards", "unbound")
         try:
-            bound = inspect.signature(target).bind_partial(*args_, **kwargs_)
+            bound = target_signature.bind_partial(*args_, **kwargs_)
             bound.apply_defaults()
         except (TypeError, ValueError):
             return ("shape-guards", "unbound")
@@ -335,23 +379,40 @@ def compile(
 
     @functools.wraps(model)
     def optimized(*args: Any, **kwargs: Any) -> Any:
-        nonlocal last_quick_key, last_compiled_fn, last_arg_refs, guard_param_names
+        nonlocal last_quick_key, last_compiled_fn, last_arg_refs
+        nonlocal guard_param_names, gate_evaluator
+        nonlocal last_call_fp, last_quick_parts
+        # Identity reuse is unsound once control-flow gates exist: in-place
+        # mutation preserves weakref identity but can flip the traced branch,
+        # so gate outcomes are always re-evaluated.
         same_last_args = (
-            not kwargs
+            gate_evaluator is None
+            and not kwargs
             and last_arg_refs is not None
             and len(last_arg_refs) == len(args)
             and all(reference() is value for reference, value in zip(last_arg_refs, args))
         )
-        quick_key = (
-            last_quick_key
-            if same_last_args
-            else (
-                _quick_input_signature(
-                    args, kwargs, dynamic=specialization_dynamic
-                ),
-                _guard_component(args, kwargs, _quick_value_signature),
+        # Steady-state memo: identical objects with unchanged versions (or
+        # unchanged scalars) cannot produce different signatures or gate
+        # outcomes -- skip metadata reads and evaluator replay entirely.
+        call_fp = _call_fingerprint(args, kwargs)
+        if last_quick_parts is not None and call_fp == last_call_fp:
+            input_signature, shape_component, data_component = last_quick_parts
+        else:
+            input_signature = _quick_input_signature(
+                args, kwargs, dynamic=specialization_dynamic
             )
-        )
+            shape_component = _guard_component(
+                args, kwargs, _quick_value_signature
+            )
+            data_component = gate_evaluator(args, kwargs) if gate_evaluator else ()
+            last_quick_parts = (
+                input_signature,
+                shape_component,
+                data_component,
+            )
+            last_call_fp = call_fp
+        quick_key = (input_signature, shape_component, data_component)
         with lock:
             if cache and last_compiled_fn is not None and quick_key == last_quick_key:
                 compiled_fn = last_compiled_fn
@@ -359,6 +420,7 @@ def compile(
                 key = (
                     _input_signature(args, kwargs, dynamic=specialization_dynamic),
                     _guard_component(args, kwargs, _value_signature),
+                    data_component,
                 )
                 compiled_fn = cache.get(key)
             if compiled_fn is None:
@@ -394,21 +456,43 @@ def compile(
                         fullgraph=fullgraph,
                         backend_kwargs=backend_kwargs,
                     )
+                    # Keys gain a guard component once capture reveals
+                    # metadata reads or control-flow gates; invalidate so
+                    # every entry is stored uniformly.
                     promoted = _extract_shape_guard_params(captured_gm)
-                    if promoted - set(guard_param_names):
-                        # Keys gain a guard component once shape reads exist;
-                        # invalidate so every entry is stored uniformly.
+                    replay = captured_gm.meta.get("guard_replay")
+                    if promoted - set(guard_param_names) or (
+                        replay is not None and gate_evaluator is None
+                    ):
                         guard_param_names = tuple(
                             sorted({*guard_param_names, *promoted})
                         )
+                        if replay is not None:
+                            gate_target = (
+                                model.forward if _is_module_like(model) else model
+                            )
+                            gate_evaluator = _make_gate_evaluator(
+                                replay, gate_target
+                            )
                         cache.clear()
                         guard_chains.clear()
                         last_compiled_fn = None
+                        # Key SHAPE changed: memoized components were built
+                        # under the old one.
+                        last_call_fp = None
+                        last_quick_parts = None
+                        # Components were computed before this capture revealed
+                        # gates/shape reads; rebuild so the stored entry lands
+                        # under the SAME key shape later lookups will use.
+                        if gate_evaluator is not None:
+                            data_component = gate_evaluator(args, kwargs)
+                        shape_component_full = None
                     key = (
                         _input_signature(
                             args, kwargs, dynamic=specialization_dynamic
                         ),
                         _guard_component(args, kwargs, _value_signature),
+                        data_component,
                     )
                     cache[key] = compiled_fn
                     guard_chains[key] = build_guard_chain(
@@ -417,6 +501,7 @@ def compile(
                         kwargs=kwargs,
                         dynamic=specialization_dynamic,
                         target=model.forward if _is_module_like(model) else model,
+                        gate_evaluator=gate_evaluator,
                     )
             last_quick_key = quick_key
             last_compiled_fn = compiled_fn
@@ -427,6 +512,10 @@ def compile(
                     last_arg_refs = None
             else:
                 last_arg_refs = None
+        if not kwargs:
+            fast = getattr(compiled_fn, "_fast_call", None)
+            if fast is not None:
+                return fast(*args)
         return compiled_fn(*args, **kwargs)
 
     optimized._tensorplay_backend = backend_spec  # type: ignore[attr-defined]
@@ -481,7 +570,7 @@ def _compile_region(
 ) -> Callable[..., Any]:
     try:
         with _compiler_context():
-            graph_module = Tracer().trace(
+            graph_module = Tracer(execute=True).trace(
                 model,
                 sample_inputs=_bind_sample_arguments(
                     model, example_inputs, example_kwargs
@@ -515,6 +604,8 @@ def _compile_region(
     # and is especially harmful for native Stax lowering.
     bound = graph_module.signature.bind_partial(*example_inputs, **example_kwargs)
     bound.apply_defaults()
+    # Numeric-gate placeholders ride the contract as synthetic inputs; their
+    # trace-time values stand in at lowering so kernels see real 0-d tensors.
     backend_inputs = [bound.arguments[node.name] for node in graph_module.graph.placeholders]
 
     # Advisory shape/value metadata for backends and visualization; never a
@@ -535,6 +626,63 @@ def _compile_region(
 
 
 _SHAPE_GUARD_ATTRS = frozenset({"shape", "len", "ndim"})
+
+
+def _make_gate_evaluator(replay: dict[str, Any], target: Any) -> Callable[..., tuple]:
+    """Build the per-call gate re-evaluator for one specialization (L1-D1).
+
+    Replays the extracted condition subgraph on live inputs and returns the
+    branch-deciding outcomes (``bool``/``iter`` gates) as the cache-key tail.
+    Numeric-gate values never fragment the cache: they stay live inside the
+    captured graph itself (GateValue proxies keep the condition subgraph
+    reachable from the output), so the artifact recomputes them per call.
+    """
+
+    from .graph import GraphModule, gate_outcome
+
+    mini = GraphModule(
+        target,
+        replay["graph"],
+        inspect.Signature(
+            [
+                inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                for name in replay["placeholders"]
+            ]
+        ),
+    )
+    gates = replay["gates"]
+    target_signature = None
+    try:
+        target_signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        pass
+
+    def evaluate(args_: tuple[Any, ...], kwargs_: dict[str, Any]) -> tuple:
+        if target_signature is not None:
+            try:
+                bound = target_signature.bind_partial(*args_, **kwargs_)
+                bound.apply_defaults()
+            except (TypeError, ValueError):
+                return ("gates", "unbound")
+            feeds_src = {
+                name: bound.arguments.get(name) for name in replay["placeholders"]
+            }
+        else:
+            feeds_src = dict(zip(replay["placeholders"], args_))
+        values = mini._interpret(**feeds_src)
+        outputs = values if isinstance(values, tuple) else (values,)
+        # compiler.gate() nodes stay symbolic inside the captured graph, so
+        # their concrete values never fragment reuse; plain int()/float()
+        # consumption bakes constants into the artifact and MUST key.
+        symbolic = set(replay.get("symbolic") or ())
+        key_tail: list[Any] = ["gates"]
+        for output, (node_name, kind) in zip(outputs, gates):
+            if kind in ("int", "float", "index") and node_name in symbolic:
+                continue
+            key_tail.append(gate_outcome(kind, output))
+        return tuple(key_tail)
+
+    return evaluate
 
 
 def _extract_shape_guard_params(graph_module: GraphModule) -> frozenset[str]:

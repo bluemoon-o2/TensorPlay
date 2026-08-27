@@ -499,7 +499,26 @@ Tensor transpose_copy_cuda(const Tensor& x, int64_t a2, int64_t b2) {
 // Reduction entry points
 // ===========================================================================
 
+// ATen parity (ReduceOps.cpp meta funcs + ReduceOpsUtils.h
+// zero_numel_check_dims): reducing an empty tensor is only valid along an
+// explicitly given non-empty dim; a full reduction has no identity.
+static void zero_numel_check_dims(const Tensor& self, const std::vector<int64_t>& dims,
+                                  const char* fn_name) {
+    if (dims.empty()) {
+        TP_THROW(RuntimeError, fn_name,
+                 ": Expected reduction dim to be specified for input.numel() == 0. "
+                 "Specify the reduction dim with the 'dim' argument.");
+    }
+    const int64_t nd = self.dim();
+    for (int64_t d : dims) {
+        if (d < 0) d += nd;
+        TP_CHECK_INDEX(self.size(d) != 0, fn_name,
+                       ": Expected reduction dim ", d, " to have non-zero size.");
+    }
+}
+
 Tensor amax_cuda2(const Tensor& self, const std::vector<int64_t>& dim, bool keepdim) {
+    if (self.numel() == 0) zero_numel_check_dims(self, dim, "amax()");
     return reduce_iterative(self, dim.empty()
                                        ? [&]{ std::vector<int64_t> a;
                                               for (int64_t i = 0; i < self.dim(); ++i) a.push_back(i);
@@ -508,6 +527,7 @@ Tensor amax_cuda2(const Tensor& self, const std::vector<int64_t>& dim, bool keep
                             keepdim, 0);
 }
 Tensor amin_cuda2(const Tensor& self, const std::vector<int64_t>& dim, bool keepdim) {
+    if (self.numel() == 0) zero_numel_check_dims(self, dim, "amin()");
     return reduce_iterative(self, dim.empty()
                                        ? [&]{ std::vector<int64_t> a;
                                               for (int64_t i = 0; i < self.dim(); ++i) a.push_back(i);
@@ -517,6 +537,13 @@ Tensor amin_cuda2(const Tensor& self, const std::vector<int64_t>& dim, bool keep
 }
 std::tuple<Tensor, Tensor> aminmax_cuda(const Tensor& self, std::vector<int64_t> dim,
                                         bool keepdim) {
+    if (self.numel() == 0) {
+        if (dim.empty()) {
+            TP_THROW(RuntimeError, "aminmax(): cannot compute aminmax over an empty dimension as "
+                     "the operation has no identity.");
+        }
+        zero_numel_check_dims(self, dim, "aminmax");
+    }
     return {amin_cuda2(self, dim, keepdim), amax_cuda2(self, dim, keepdim)};
 }
 Tensor logsumexp_cuda2(const Tensor& self, int64_t dim, bool keepdim) {

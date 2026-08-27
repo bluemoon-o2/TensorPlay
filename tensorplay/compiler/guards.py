@@ -112,14 +112,20 @@ class GuardChain:
         param_names: Sequence[str],
         dynamic: bool,
         target: Any = None,
+        gate_evaluator: Callable[..., Tuple] | None = None,
     ) -> None:
         self.key = key
         self.param_names = tuple(param_names)
+        self.gate_evaluator = gate_evaluator
         self.dynamic = dynamic
         self._target = target
-        self._signature = key[0] if isinstance(key, tuple) and len(key) == 2 else key
+        components: Tuple[Any, ...] = key if isinstance(key, tuple) else (key,)
+        self._signature = components[0] if components else key
         self._guard_component = (
-            key[1] if isinstance(key, tuple) and len(key) == 2 else ()
+            components[1] if len(components) > 1 and isinstance(key, tuple) else ()
+        )
+        self._data_component = (
+            components[2] if len(components) > 2 and isinstance(key, tuple) else ()
         )
         self._evaluate: Callable[..., bool] | None = None
         self.hits = 0
@@ -137,6 +143,12 @@ class GuardChain:
                 "shape-guards",
                 f"shape-guards == {_render(self._guard_component)}",
                 self._guard_component,
+            ))
+        if self._data_component:
+            rendered.append(Guard(
+                "gate-guards",
+                "control-flow gate outcomes match the traced branch",
+                self._data_component,
             ))
         return rendered
 
@@ -156,28 +168,39 @@ class GuardChain:
         return (
             _input_signature(args, kwargs, dynamic=self.dynamic),
             self._live_guard_component(args, kwargs),
+            self._live_data_component(args, kwargs),
         )
+
+    def _bind_arguments(
+        self, args: Tuple[Any, ...], kwargs: Dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if not self.param_names or self._target is None:
+            return None
+        try:
+            bound = inspect.signature(self._target).bind_partial(*args, **kwargs)
+            bound.apply_defaults()
+        except (TypeError, ValueError):
+            return None
+        return bound.arguments
 
     def _live_guard_component(self, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Tuple:
         from .api import _value_signature
 
-        if not self.param_names:
-            return ()
-        target = self._target
-        if target is None:
-            return ("shape-guards", "unbound")
-        try:
-            bound = inspect.signature(target).bind_partial(*args, **kwargs)
-            bound.apply_defaults()
-        except (TypeError, ValueError):
-            return ("shape-guards", "unbound")
+        arguments = self._bind_arguments(args, kwargs)
+        if arguments is None:
+            return ("shape-guards", "unbound") if self.param_names else ()
         return (
             "shape-guards",
             tuple(
-                _value_signature(bound.arguments.get(name), dynamic=False)
+                _value_signature(arguments.get(name), dynamic=False)
                 for name in self.param_names
             ),
         )
+
+    def _live_data_component(self, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Tuple:
+        if self.gate_evaluator is None:
+            return ()
+        return self.gate_evaluator(args, kwargs)
 
     def evaluate(self, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> bool:
         if self._evaluate is None:
@@ -188,7 +211,9 @@ class GuardChain:
             def _compiled(args_: Tuple[Any, ...], kwargs_: Dict[str, Any],
                           _chain: GuardChain = chain) -> bool:
                 return _chain._live_signature(args_, kwargs_) == (
-                    _chain._signature, _chain._guard_component
+                    _chain._signature,
+                    _chain._guard_component,
+                    _chain._data_component,
                 )
 
             self._evaluate = _compiled
@@ -200,13 +225,20 @@ class GuardChain:
     def explain(self, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> List[Guard]:
         """Guards this chain would fail against the given live arguments."""
 
-        expected_sig = (self._signature, self._guard_component)
+        expected_sig = (self._signature, self._guard_component, self._data_component)
         live_sig = self._live_signature(args, kwargs)
         if expected_sig == live_sig:
             return []
         failures: List[Guard] = []
         _diff_guards(expected_sig[0], live_sig[0], "inputs", failures)
         _diff_guards(expected_sig[1], live_sig[1], "shape-guards", failures)
+        if expected_sig[2] != live_sig[2]:
+            failures.append(Guard(
+                "gate-guards",
+                "control-flow gate outcomes match the traced branch",
+                expected_sig[2],
+                live_sig[2],
+            ))
         return failures
 
 
@@ -217,11 +249,12 @@ def build_guard_chain(
     kwargs: Dict[str, Any],
     dynamic: bool,
     target: Any,
+    gate_evaluator: Callable[..., Tuple] | None = None,
 ) -> GuardChain:
     """Create the GuardChain stored alongside one compiled specialization."""
 
     param_names: Tuple[str, ...] = ()
-    if isinstance(key, tuple) and len(key) == 2 and key[1]:
+    if isinstance(key, tuple) and len(key) >= 2 and key[1]:
         component = key[1]
         if (
             isinstance(component, tuple)
@@ -230,7 +263,13 @@ def build_guard_chain(
             and isinstance(component[1], tuple)
         ):
             param_names = tuple(f"arg{index}" for index in range(len(component[1])))
-    return GuardChain(key, param_names=param_names, dynamic=dynamic, target=target)
+    return GuardChain(
+        key,
+        param_names=param_names,
+        dynamic=dynamic,
+        target=target,
+        gate_evaluator=gate_evaluator,
+    )
 
 
 def format_recompile_reasons(reasons: Sequence[Guard], limit: int = 4) -> str:

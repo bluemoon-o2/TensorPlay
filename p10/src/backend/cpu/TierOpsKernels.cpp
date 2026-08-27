@@ -20,6 +20,7 @@
 #include "Parallel.h"
 #include "TypePromotion.h"
 #include "SpecialMath.h"
+#include "cpu/ComplexUnary.h"
 
 #include <vector>
 #include <algorithm>
@@ -65,7 +66,11 @@ inline DType scalar_promote(DType t, const Scalar& s) {
 // ---------------------------------------------------------------------------
 
 // Broadcast both inputs to a common promoted dtype; op returns that dtype.
-template <typename Op>
+// kArith selects the complex-capable TensorIterator applier for pure
+// arithmetic functors (rsub/subtract/multiply); ordering/fmod-style callers
+// must keep the default: those ops are not defined over complex, mirroring
+// ATen.
+template <bool kArith = false, typename Op>
 Tensor binary_same_kernel(const Tensor& a_in, const Tensor& b_in, Op op, const char* name) {
     DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
     // Cast to the promoted dtype but do NOT materialize broadcasts:
@@ -76,7 +81,11 @@ Tensor binary_same_kernel(const Tensor& a_in, const Tensor& b_in, Op op, const c
         static_cast<std::vector<int64_t>>(a_in.shape()),
         static_cast<std::vector<int64_t>>(b_in.shape()));
     Tensor out = Tensor::empty(out_shape, dt, a_in.device());
-    ti_apply_binary(out, ac, bc, op);
+    if constexpr (kArith) {
+        ti_apply_arith(out, ac, bc, op);
+    } else {
+        ti_apply_binary(out, ac, bc, op);
+    }
     (void)name;
     return out;
 }
@@ -429,10 +438,14 @@ Tensor rsub_scalar_cpu(const Tensor& self, Scalar other, Scalar alpha) {
 
 Tensor rsub_tensor_cpu(const Tensor& self, const Tensor& other, Scalar alpha) {
     // BinaryOps.cpp:1169
-    return binary_same_kernel(self, other,
+    return binary_same_kernel<true>(self, other,
         [alpha](auto s, auto o) {
             using T = decltype(o);
-            return static_cast<T>(o * alpha.to<double>() - s);
+            if constexpr (is_complex_type_v<T> || std::is_floating_point_v<T>) {
+                return o * alpha.to<T>() - s;
+            } else {
+                return static_cast<T>(o * alpha.to<double>() - s);
+            }
         }, "rsub");
 }
 
@@ -485,7 +498,7 @@ Tensor fmod_scalar_cpu(const Tensor& self, Scalar other) {
 }
 
 Tensor subtract_tensor_cpu(const Tensor& self, const Tensor& other) {
-    return binary_same_kernel(self, other, [](auto x, auto y) { return x - y; }, "subtract");
+    return binary_same_kernel<true>(self, other, [](auto x, auto y) { return x - y; }, "subtract");
 }
 Tensor subtract_scalar_cpu(const Tensor& self, Scalar other) {
     DType dt = scalar_promote(self.dtype(), other);
@@ -493,14 +506,35 @@ Tensor subtract_scalar_cpu(const Tensor& self, Scalar other) {
                                Tensor::full({}, other, dt, self.device()));
 }
 Tensor multiply_tensor_cpu(const Tensor& self, const Tensor& other) {
-    return binary_same_kernel(self, other, [](auto x, auto y) { return x * y; }, "multiply");
+    return binary_same_kernel<true>(self, other, [](auto x, auto y) { return x * y; }, "multiply");
 }
 Tensor multiply_scalar_cpu(const Tensor& self, Scalar other) {
+    // torch parity: complex tensors (or complex scalars) multiply component-wise
+    if (isComplexType(self.dtype()) || other.isComplex()) {
+        DType dt;
+        if (isComplexType(self.dtype())) {
+            dt = other.isComplex() ? promoteTypes(self.dtype(), other.dtype())
+                                   : self.dtype();
+        } else {
+            // weak-scalar rule: int tensors go to complex64; float tensors
+            // widen through their own complex width
+            dt = promoteTypes(
+                isFloatingType(self.dtype()) ? toComplexType(self.dtype())
+                                             : DType::ComplexFloat,
+                other.dtype());
+        }
+        return complex_unary_op_kernel(self.to(dt), [other](auto x) {
+            return x * other.to<std::decay_t<decltype(x)>>();
+        });
+    }
     return dtype_unary_kernel(self, [other](auto x) {
         return static_cast<decltype(x)>(x * other.to<double>());
     }, "multiply");
 }
 Tensor negative_cpu(const Tensor& self) {
+    if (isComplexType(self.dtype())) {
+        return complex_unary_op_kernel(self, [](auto x) { return -x; });
+    }
     return dtype_unary_kernel(self, [](auto x) { return static_cast<decltype(x)>(-x); }, "negative");
 }
 Tensor positive_cpu(const Tensor& self) { return self.clone(); }
@@ -584,6 +618,14 @@ Tensor isposinf_cpu(const Tensor& self) {
 // ===========================================================================
 
 Tensor reciprocal_cpu(const Tensor& self) {
+    // torch parity: reciprocal over complex tensors preserves dtype (1/z);
+    // the old float_math_kernel path silently dropped the imaginary part.
+    if (isComplexType(self.dtype())) {
+        return complex_unary_op_kernel(self, [](auto z) {
+            using T = decltype(z);
+            return static_cast<T>(1) / z;
+        });
+    }
     return float_math_kernel(self, [](double x) { return 1.0 / x; }, "reciprocal");
 }
 Tensor sgn_cpu(const Tensor& self) {
@@ -921,8 +963,27 @@ Tensor prelu_cpu(const Tensor& self, const Tensor& weight) {
 // Reductions (ReduceOps.cpp / Sorting.cpp anchors)
 // ===========================================================================
 
+// ATen parity (ReduceOps.cpp meta funcs + ReduceOpsUtils.h
+// zero_numel_check_dims): reducing an empty tensor is only valid along an
+// explicitly given non-empty dim; a full reduction has no identity.
+static void zero_numel_check_dims(const Tensor& self, const std::vector<int64_t>& dims,
+                                  const char* fn_name) {
+    if (dims.empty()) {
+        TP_THROW(RuntimeError, fn_name,
+                 ": Expected reduction dim to be specified for input.numel() == 0. "
+                 "Specify the reduction dim with the 'dim' argument.");
+    }
+    const int64_t nd = self.dim();
+    for (int64_t d : dims) {
+        if (d < 0) d += nd;
+        TP_CHECK_INDEX(self.size(d) != 0, fn_name,
+                       ": Expected reduction dim ", d, " to have non-zero size.");
+    }
+}
+
 Tensor amax_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
     // ReduceOps.cpp:1801 amax_out
+    if (self.numel() == 0) zero_numel_check_dims(self, dim_in, "amax()");
     std::vector<int64_t> resolved = dim_in;
     if (resolved.empty()) {
         for (int64_t i = 0; i < self.dim(); ++i) resolved.push_back(i);
@@ -931,11 +992,14 @@ Tensor amax_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool kee
     return reduce_dims_impl<double>(
         self, dim, keepdim, isFloatingType(self.dtype()) ? self.dtype() : self.dtype(),
         -std::numeric_limits<double>::infinity(),
-        [](double acc, double v) { return v > acc ? v : acc; },
+        // torch amax semantics: NaN is treated as greater than any number
+        // (strictly propagates), matching slice_max_kernel on CUDA.
+        [](double acc, double v) { return (v != v || v > acc) ? v : acc; },
         [](double acc) { return acc; });
 }
 
 Tensor amin_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
+    if (self.numel() == 0) zero_numel_check_dims(self, dim_in, "amin()");
     std::vector<int64_t> resolved = dim_in;
     if (resolved.empty()) {
         for (int64_t i = 0; i < self.dim(); ++i) resolved.push_back(i);
@@ -944,11 +1008,22 @@ Tensor amin_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool kee
     return reduce_dims_impl<double>(
         self, dim, keepdim, self.dtype(),
         std::numeric_limits<double>::infinity(),
-        [](double acc, double v) { return v < acc ? v : acc; },
+        // torch amin semantics: NaN is treated as greater than any number
+        // (strictly propagates), matching slice_min_kernel on CUDA.
+        [](double acc, double v) { return (v != v || v < acc) ? v : acc; },
         [](double acc) { return acc; });
 }
 
 std::tuple<Tensor, Tensor> aminmax_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
+    if (self.numel() == 0) {
+        // ReduceOps.cpp aminmax meta: full reduction has no identity; dim
+        // reductions must name a non-empty dim.
+        if (dim_in.empty()) {
+            TP_THROW(RuntimeError, "aminmax(): cannot compute aminmax over an empty dimension as "
+                     "the operation has no identity.");
+        }
+        zero_numel_check_dims(self, dim_in, "aminmax");
+    }
     std::vector<int64_t> resolved = dim_in;
     if (resolved.empty()) {
         for (int64_t i = 0; i < self.dim(); ++i) resolved.push_back(i);
@@ -1240,7 +1315,10 @@ Tensor dist_cpu(const Tensor& self, const Tensor& other, Scalar p) {
         for (int64_t i = 0; i < n; ++i) s += std::pow(std::fabs(ap[i] - bp[i]), pd);
         result = std::pow(s, 1.0 / pd);
     }
-    return Tensor::zeros({}, DType::Float64, self.device()).fill_(Scalar(result));
+    // torch semantics: dist returns the promoted input dtype, not fp64.
+    DType out_dt = promoteTypes(self.dtype(), other.dtype());
+    if (!isFloatingType(out_dt)) out_dt = DType::Float32;
+    return Tensor::zeros({}, out_dt, self.device()).fill_(Scalar(static_cast<double>(result)));
 }
 
 Tensor renorm_cpu(const Tensor& self, Scalar p, int64_t dim, Scalar maxnorm) {

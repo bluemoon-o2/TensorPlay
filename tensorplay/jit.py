@@ -7,6 +7,9 @@ TorchScript, so the decorators are identity passthroughs and
 execution environment.
 """
 
+import builtins
+import typing as _typing
+
 from typing import Callable, TypeVar
 
 T = TypeVar("T")
@@ -69,7 +72,36 @@ def Final(value):
 
 
 def isinstance(x, *args):
-    """Eager fallback for torch.jit.isinstance: always the else-branch value."""
-    if len(args) == 2:
-        return False
-    return False
+    """Eager fallback for torch.jit.isinstance: a real runtime type check.
+
+    torch's eager implementation evaluates the predicate against the value
+    (torch.jit.isinstance("a", str) is True), including Optional/Union and
+    container generics (List[int], Dict[str, Tensor], Tuple[T, ...]).
+    """
+    if len(args) != 1:
+        raise TypeError(
+            "isinstance() takes exactly one type argument, got {}".format(len(args)))
+    t = args[0]
+    origin = _typing.get_origin(t)
+    if origin is _typing.Union:
+        members = list(_typing.get_args(t))
+        if type(None) in members:
+            if x is None:
+                return True
+            members = [m for m in members if m is not type(None)]
+            if not members:
+                return False
+            rest = members[0] if len(members) == 1 else _typing.Union[tuple(members)]
+            return isinstance(x, rest)
+        return any(isinstance(x, m) for m in members)
+    if origin is not None:
+        base = {list: list, set: set, frozenset: frozenset,
+                dict: dict, tuple: tuple}.get(origin, origin)
+        try:
+            return builtins.isinstance(x, base)
+        except TypeError:
+            return False
+    if builtins.isinstance(t, type):
+        return builtins.isinstance(x, t)
+    # Non-type annotations without an origin (e.g. typing.Any) accept anything.
+    return t is _typing.Any or x is t

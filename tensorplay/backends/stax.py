@@ -170,6 +170,41 @@ def _normalize_pointwise_grad_output(grad_output: Any, reference: Any) -> Any:
     return grad_output
 
 
+
+def _attach_fast_call(lowering: Any) -> None:
+    """Install the C steady-state trampoline when the extension offers it.
+
+    Soft failure keeps the plain lowering object: older extensions without
+    ``_stax.install_call_trampoline`` simply skip the fast entry.
+    """
+
+    try:
+        import tensorplay
+
+        installer = getattr(
+            tensorplay._C._stax, "install_call_trampoline", None
+        )
+        if installer is None:
+            return
+        tail = [
+            lowering.graph_module._get_attr(target)
+            for target in lowering.attribute_targets
+        ]
+        tail.extend(lowering.constant_values)
+        lowering._fast_call = installer(
+            lowering,
+            lowering.graph.execute,
+            tail,
+            tensorplay.Tensor,
+            len(lowering.placeholders),
+            int(getattr(lowering, "_output_count", 1)),
+            getattr(lowering, "_gradient_plan", None) is not None,
+        )
+    except Exception:
+        # Never let a trampoline install failure break compilation.
+        pass
+
+
 class _NativeLowering:
     def __init__(
         self,
@@ -188,8 +223,30 @@ class _NativeLowering:
         self._output_count = output_count
         self.native_values = dict(native_values or {})
         self._tensorplay_codegen = "stax-native"
+        # (id, _version) memo of the last resolved input vector; attributes
+        # and constants appended by _bind_inputs are process-stable.
+        self._bind_fp: Any = None
+        self._last_bound_inputs: list[Any] | None = None
+        _attach_fast_call(self)
 
-    def _bind_inputs(self, *args: Any, **kwargs: Any) -> list[Any]:
+    @staticmethod
+    def _input_route_fingerprint(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        import tensorplay
+
+        def fp(value: Any) -> Any:
+            if isinstance(value, tensorplay.Tensor):
+                return (
+                    "t",
+                    id(value),
+                    getattr(value, "_version", None),
+                )
+            return ("o", id(value))
+
+        items = [fp(item) for item in args]
+        items.extend((k, fp(v)) for k, v in sorted(kwargs.items()))
+        return tuple(items)
+
+    def _bind_inputs_fresh(self, *args: Any, **kwargs: Any) -> list[Any]:
         bound = self.graph_module.signature.bind_partial(*args, **kwargs)
         bound.apply_defaults()
         inputs = [bound.arguments[node.name] for node in self.placeholders]
@@ -197,6 +254,18 @@ class _NativeLowering:
             self.graph_module._get_attr(target) for target in self.attribute_targets
         )
         inputs.extend(self.constant_values)
+        return inputs
+
+    def _bind_inputs(self, *args: Any, **kwargs: Any) -> list[Any]:
+        # Attribute targets and constants are process-stable; user inputs are
+        # covered by the (id, _version) fingerprint, so an unchanged call
+        # reuses the previously resolved input list without signature binding.
+        fp = self._input_route_fingerprint(args, kwargs)
+        if fp == self._bind_fp:
+            return list(self._last_bound_inputs)
+        inputs = self._bind_inputs_fresh(*args, **kwargs)
+        self._bind_fp = fp
+        self._last_bound_inputs = inputs
         return inputs
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -230,6 +299,13 @@ class _CpuFusedPointwiseLowering(_NativeLowering):
         self._fallback = None if strict_native else graph_module.recompile()
         self._tensorplay_codegen = "stax-fused-cpu"
         self._autograd_function: Any | None = None
+        # Route memo (id, _version, requires_grad) per input: eligibility and
+        # autograd routing are pure functions of these, so steady-state calls
+        # skip the per-input shape/dtype/device/contiguity probes entirely.
+        # In-place mutation bumps _version; fresh tensors have fresh ids.
+        self._route_fp: tuple[Any, ...] | None = None
+        self._route: str | None = None
+        _attach_fast_call(self)
         if gradient_plan is not None:
             from ..autograd import Function
 
@@ -303,6 +379,33 @@ class _CpuFusedPointwiseLowering(_NativeLowering):
         )
         return tuple(gradients)
 
+    @staticmethod
+    def _input_route_fingerprint(value: Any) -> Any:
+        import tensorplay
+
+        if isinstance(value, tensorplay.Tensor):
+            return (
+                "t",
+                id(value),
+                getattr(value, "_version", None),
+                bool(getattr(value, "requires_grad", False)),
+            )
+        return ("o", id(value))
+
+    def _resolve_route(self, inputs: list[Any]) -> str:
+        if not self._eligible_inputs(
+            inputs,
+            self._expected_shape,
+            self._expected_dtype,
+            self._expected_device,
+        ):
+            return "fallback"
+        if self._gradient_plan is not None and any(
+            value.requires_grad for value in inputs
+        ):
+            return "autograd"
+        return "native"
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         if not kwargs and len(args) == len(self.placeholders):
             inputs = list(args)
@@ -310,12 +413,12 @@ class _CpuFusedPointwiseLowering(_NativeLowering):
             bound = self.graph_module.signature.bind_partial(*args, **kwargs)
             bound.apply_defaults()
             inputs = [bound.arguments[node.name] for node in self.placeholders]
-        if not self._eligible_inputs(
-            inputs,
-            self._expected_shape,
-            self._expected_dtype,
-            self._expected_device,
-        ):
+        fp = tuple(self._input_route_fingerprint(value) for value in inputs)
+        if fp != self._route_fp:
+            self._route = self._resolve_route(inputs)
+            self._route_fp = fp
+        route = self._route
+        if route == "fallback":
             if self._strict_native:
                 raise RuntimeError(
                     "Stax strict_native lowering received inputs outside its "
@@ -323,7 +426,7 @@ class _CpuFusedPointwiseLowering(_NativeLowering):
                 )
             assert self._fallback is not None
             return self._fallback(*args, **kwargs)
-        if self._gradient_plan is not None and any(value.requires_grad for value in inputs):
+        if route == "autograd":
             if self._autograd_function is None:
                 raise RuntimeError("Stax fused pointwise autograd function is missing")
             return self._autograd_function.apply(*inputs)
@@ -335,6 +438,7 @@ def _build_pointwise_program(
     *,
     skip_node: Node | None = None,
     output_override: Node | None = None,
+    allow_empty: bool = False,
 ) -> tuple[list[Node], list[int], list[float], list[tuple[str, int, int, int]], int] | None:
     """Encode one canonical pointwise graph as Stax's postfix program.
 
@@ -420,7 +524,9 @@ def _build_pointwise_program(
             for value in _nodes(output.args)
         ]
     )
-    if not program or len(output_values) != 1 or output_values[0] not in refs:
+    if (not program and not allow_empty) or len(output_values) != 1 or (
+        output_values[0] not in refs
+    ):
         return None
     return external_nodes, program, constants, instructions, refs[output_values[0]]
 

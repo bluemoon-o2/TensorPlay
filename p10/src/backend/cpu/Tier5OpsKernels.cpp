@@ -44,8 +44,8 @@ Tensor mm_kernel(const Tensor& self, const Tensor& mat2);
 namespace {
 
 inline void require_float(const Tensor& t, const char* who) {
-    if (!isFloatingType(t.dtype()) || t.dtype() == DType::Float16 || t.dtype() == DType::BFloat16)
-        TP_THROW(TypeError, who, ": only Float32/Float64 tensors are supported");
+    if (!isFloatingType(t.dtype()))
+        TP_THROW(TypeError, who, ": only floating-point tensors are supported");
 }
 
 inline int64_t wrap_dim(int64_t dim, int64_t ndim) {
@@ -85,6 +85,17 @@ inline void axpy_add(Tensor& acc, const Tensor& prod) {
     int64_t n = acc.numel();
     const double* pp = prod.data_ptr<double>();
     double* ap = acc.data_ptr<double>();
+    parallel_for(0, n, GRAIN_SIZE, [&](int64_t b, int64_t e) {
+        for (int64_t i = b; i < e; ++i) ap[i] += pp[i];
+    });
+}
+
+// fp32 twin of axpy_add: the Blas.cpp-style accumulator dtype for
+// Float32/Float16/BFloat16 batches.
+inline void axpy_add_f32(Tensor& acc, const Tensor& prod) {
+    int64_t n = acc.numel();
+    const float* pp = prod.data_ptr<float>();
+    float* ap = acc.data_ptr<float>();
     parallel_for(0, n, GRAIN_SIZE, [&](int64_t b, int64_t e) {
         for (int64_t i = b; i < e; ++i) ap[i] += pp[i];
     });
@@ -163,89 +174,109 @@ Tensor transpose_matrix_copy(const Tensor& m) {
 
 Tensor addbmm_cpu(const Tensor& self, const Tensor& batch1, const Tensor& batch2,
                   Scalar beta, Scalar alpha) {
-    // Blas.cpp addbmm: beta*self + alpha * sum_i batch1[i] @ batch2[i]
+    // Blas.cpp addbmm: beta*self + alpha * sum_i batch1[i] @ batch2[i].
+    // GEMMs run in the operands' dtype (oneDNN bf16/fp16 paths keep their
+    // 2x throughput); the cross-batch sum accumulates in fp32 -- fp64 only
+    // for Float64 inputs -- matching torch's Blas.cpp accumulation contract.
     require_float(batch1, "addbmm");
     require_float(batch2, "addbmm");
     int64_t b = batch1.size(0), n = batch1.size(1), p = batch1.size(2), m = batch2.size(2);
     DType dt = promoteTypes(batch1.dtype(), batch2.dtype());
-    Tensor work = Tensor::zeros({n, m}, DType::Float64, self.device());
+    DType acc_dt = (dt == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor work = Tensor::zeros({n, m}, acc_dt, self.device());
     for (int64_t bi = 0; bi < b; ++bi) {
-        Tensor s1 = slice_matrix_copy(batch1.contiguous(), bi * n * p, n, p).to(dt);
-        Tensor s2 = slice_matrix_copy(batch2.contiguous(), bi * p * m, p, m).to(dt);
-        Tensor prod = mm_kernel(s1, s2).to(DType::Float64);
-        axpy_add(work, prod);
+        Tensor s1 = slice_matrix_copy(batch1.contiguous(), bi * n * p, n, p);
+        Tensor s2 = slice_matrix_copy(batch2.contiguous(), bi * p * m, p, m);
+        Tensor prod = mm_kernel(s1, s2).to(acc_dt);
+        if (acc_dt == DType::Float64) axpy_add(work, prod);
+        else axpy_add_f32(work, prod);
     }
-    Tensor self_b = self.expand({n, m}).contiguous().to(DType::Float64);
+    Tensor self_b = self.expand({n, m}).contiguous().to(acc_dt);
     Tensor out = Tensor::empty({n, m}, dt, self.device());
-    const double* wp = work.data_ptr<double>();
-    const double* sp = self_b.data_ptr<double>();
     double beta_d = beta.toDouble(), alpha_d = alpha.toDouble();
-#define TP_ABMM(ctype, name_) \
+#define TP_ABMM_ACC(ctype, name_, acct) \
     case DType::name_: { \
         ctype* dp = out.data_ptr<ctype>(); \
+        const acct* wp = work.data_ptr<acct>(); \
+        const acct* sp = self_b.data_ptr<acct>(); \
         parallel_for(0, n * m, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
             for (int64_t i = begin; i < end; ++i) \
                 dp[i] = static_cast<ctype>(beta_d * sp[i] + alpha_d * wp[i]); \
         }); \
         break; }
     switch (dt) {
-        TP_ABMM(float, Float32)
-        TP_ABMM(double, Float64)
+        TP_ABMM_ACC(float, Float32, float)
+        TP_ABMM_ACC(double, Float64, double)
+        TP_ABMM_ACC(BFloat16, BFloat16, float)
+        TP_ABMM_ACC(Half, Float16, float)
         default: TP_THROW(TypeError, "addbmm: unsupported dtype");
     }
+#undef TP_ABMM_ACC
 #undef TP_ABMM
     return out;
 }
 
 Tensor addmv_cpu(const Tensor& self, const Tensor& mat, const Tensor& vec,
                  Scalar beta, Scalar alpha) {
+    // Blas.cpp addmv: beta*self + alpha*(mat @ vec).  Low-precision inputs
+    // are upcast to fp32 once so the product rounds a single time (the ATen
+    // CPU contract); Float64 stays in double precision.
     require_float(mat, "addmv");
     int64_t m = mat.size(0), k = mat.size(1);
     if (vec.numel() != k) TP_THROW(RuntimeError, "addmv: both args should have matching shapes");
-    Tensor mc = mat.contiguous().to(DType::Float64);
-    Tensor vc = vec.contiguous().to(DType::Float64);
-    const double* mp = mc.data_ptr<double>();
-    const double* vp = vc.data_ptr<double>();
-    Tensor self_b = self.reshape({-1}).to(DType::Float64).contiguous();
+    DType dt = promoteTypes(promoteTypes(mat.dtype(), vec.dtype()), self.dtype());
+    DType cdt = (dt == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor mc = mat.contiguous().to(cdt);
+    Tensor vc = vec.contiguous().to(cdt);
+    Tensor self_b = self.reshape({-1}).to(cdt).contiguous();
     bool scalar_self = self_b.numel() == 1;
-    const double* sp = self_b.data_ptr<double>();
-    Tensor out = Tensor::empty({m}, mat.dtype(), mat.device());
+    Tensor out = Tensor::empty({m}, dt, mat.device());
     double beta_d = beta.toDouble(), alpha_d = alpha.toDouble();
-#define TP_ADMV(ctype, name_) \
+#define TP_ADMV_ACC(ctype, name_, acct) \
     case DType::name_: { \
+        const acct* mp = mc.data_ptr<acct>(); \
+        const acct* vp = vc.data_ptr<acct>(); \
+        const acct* sp = self_b.data_ptr<acct>(); \
         ctype* dp = out.data_ptr<ctype>(); \
         parallel_for(0, m, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
             for (int64_t i = begin; i < end; ++i) { \
-                double s2 = 0; \
+                acct s2 = 0; \
                 for (int64_t j = 0; j < k; ++j) s2 += mp[i * k + j] * vp[j]; \
-                double base = scalar_self ? sp[0] : sp[i]; \
+                acct base = scalar_self ? sp[0] : sp[i]; \
                 dp[i] = static_cast<ctype>(beta_d * base + alpha_d * s2); \
             } \
         }); \
         break; }
-    switch (mat.dtype()) {
-        TP_ADMV(float, Float32)
-        TP_ADMV(double, Float64)
+    switch (dt) {
+        TP_ADMV_ACC(float, Float32, float)
+        TP_ADMV_ACC(double, Float64, double)
+        TP_ADMV_ACC(BFloat16, BFloat16, float)
+        TP_ADMV_ACC(Half, Float16, float)
         default: TP_THROW(TypeError, "addmv: unsupported dtype");
     }
+#undef TP_ADMV_ACC
 #undef TP_ADMV
     return out;
 }
 
 Tensor addr_cpu(const Tensor& self, const Tensor& vec1, const Tensor& vec2,
                 Scalar beta, Scalar alpha) {
+    // Blas.cpp addr: beta*self + alpha*vec1⊗vec2.  fp32 compute for
+    // Float32/Float16/BFloat16 (single rounding), fp64 for Float64.
     require_float(vec1, "addr");
     int64_t m = vec1.numel(), k = vec2.numel();
-    Tensor v1 = vec1.contiguous().to(DType::Float64);
-    Tensor v2 = vec2.contiguous().to(DType::Float64);
-    const double* a = v1.data_ptr<double>();
-    const double* bv = v2.data_ptr<double>();
-    Tensor self_b = self.expand({m, k}).contiguous().to(DType::Float64);
-    const double* sp = self_b.data_ptr<double>();
-    Tensor out = Tensor::empty({m, k}, self.dtype(), self.device());
+    DType dt = promoteTypes(promoteTypes(vec1.dtype(), vec2.dtype()), self.dtype());
+    DType cdt = (dt == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor v1 = vec1.contiguous().to(cdt);
+    Tensor v2 = vec2.contiguous().to(cdt);
+    Tensor self_b = self.expand({m, k}).contiguous().to(cdt);
+    Tensor out = Tensor::empty({m, k}, dt, self.device());
     double beta_d = beta.toDouble(), alpha_d = alpha.toDouble();
-#define TP_ADDR(ctype, name_) \
+#define TP_ADDR_ACC(ctype, name_, acct) \
     case DType::name_: { \
+        const acct* a = v1.data_ptr<acct>(); \
+        const acct* bv = v2.data_ptr<acct>(); \
+        const acct* sp = self_b.data_ptr<acct>(); \
         ctype* dp = out.data_ptr<ctype>(); \
         parallel_for(0, m * k, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
             for (int64_t i = begin; i < end; ++i) { \
@@ -254,11 +285,14 @@ Tensor addr_cpu(const Tensor& self, const Tensor& vec1, const Tensor& vec2,
             } \
         }); \
         break; }
-    switch (self.dtype()) {
-        TP_ADDR(float, Float32)
-        TP_ADDR(double, Float64)
+    switch (dt) {
+        TP_ADDR_ACC(float, Float32, float)
+        TP_ADDR_ACC(double, Float64, double)
+        TP_ADDR_ACC(BFloat16, BFloat16, float)
+        TP_ADDR_ACC(Half, Float16, float)
         default: TP_THROW(TypeError, "addr: unsupported dtype");
     }
+#undef TP_ADDR_ACC
 #undef TP_ADDR
     return out;
 }
@@ -713,8 +747,15 @@ Tensor imag_cpu(const Tensor& self) {
 }
 
 Tensor conj_cpu(const Tensor& self) {
-    if (!is_cplx(self.dtype())) return self.clone();
-    Tensor out = self.clone();
+    // ATen alignment: conj over real tensors is a zero-copy VIEW -- a new
+    // TensorImpl sharing storage, exactly like torch's conjugate-bit views.
+    // Returning `self` itself would hand the same impl back to autograd
+    // wrappers, which then re-tag the input's grad_fn and corrupt graphs.
+    if (!is_cplx(self.dtype())) {
+        return self.as_strided(static_cast<std::vector<int64_t>>(self.shape()),
+                               static_cast<std::vector<int64_t>>(self.strides()));
+    }
+    Tensor out = detail::contiguous_clone(self);
     int64_t n = out.numel();
     if (self.dtype() == DType::ComplexFloat) {
         std::complex<float>* dp = out.data_ptr<std::complex<float>>();
@@ -724,6 +765,13 @@ Tensor conj_cpu(const Tensor& self) {
         for (int64_t i = 0; i < n; ++i) dp[i] = std::conj(dp[i]);
     }
     return out;
+}
+
+// ATen native_functions.yaml: adjoint(Tensor(a) self) -> Tensor(a) is
+// transpose(-2, -1) composed with conj(); ndim <= 1 is plain conj.
+Tensor adjoint_cpu(const Tensor& self) {
+    if (self.dim() <= 1) return conj_cpu(self);
+    return conj_cpu(self.transpose(-2, -1));
 }
 
 Tensor complex_cpu(const Tensor& real, const Tensor& imag) {
@@ -1209,6 +1257,7 @@ TENSORPLAY_LIBRARY_IMPL(CPU, Tier5OpsKernelsB) {
     m.impl("real", real_cpu);
     m.impl("imag", imag_cpu);
     m.impl("conj", conj_cpu);
+    m.impl("adjoint", adjoint_cpu);
     m.impl("complex", complex_cpu);
     m.impl("polar", polar_cpu);
     m.impl("lstm", lstm_cpu);

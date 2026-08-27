@@ -85,7 +85,30 @@ class ExportedProgram:
         return self.graph_module
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return self.graph_module(*args, **kwargs)
+        # Arguments omitted at call time fall back to the export-time binding
+        # (``example_inputs``), so ``export(fn, x, offset=5.0)`` keeps the
+        # keyword override when invoked as ``program(x)``.
+        placeholders = list(self.graph.placeholders)
+        if len(args) > len(placeholders):
+            raise TypeError(
+                f"exported program takes at most {len(placeholders)} "
+                f"argument(s), got {len(args)}"
+            )
+        call_kwargs = dict(kwargs)
+        for node, value in zip(placeholders, args):
+            if node.name in call_kwargs:
+                raise TypeError(f"duplicate value for argument {node.name!r}")
+            call_kwargs[node.name] = value
+        for node in placeholders:
+            if node.name in call_kwargs:
+                continue
+            try:
+                call_kwargs[node.name] = self.example_inputs[node.name]
+            except KeyError as exc:
+                raise TypeError(
+                    f"missing required export input: {node.name}"
+                ) from exc
+        return self.graph_module(**call_kwargs)
 
     def print_readable(self) -> str:
         signature = self.graph_signature
@@ -165,7 +188,6 @@ def _normalize_dynamic_shapes(
         raise TypeError("dynamic_shapes must be a dict keyed by argument name")
 
     normalized: dict[str, dict[int, Any]] = {}
-    allowed = (int, Dim)
     for arg_name, dims in spec.items():
         if arg_name not in parameter_names:
             raise ValueError(
@@ -182,13 +204,14 @@ def _normalize_dynamic_shapes(
                 raise TypeError(
                     f"dimension index must be a non-negative int, got {dim_index!r}"
                 )
-            if isinstance(value, str):
-                value = Dim(value)
-            if not isinstance(value, allowed):
+            if isinstance(value, Dim):
+                entry[dim_index] = value
+            elif isinstance(value, int) and not isinstance(value, bool):
+                entry[dim_index] = value
+            else:
                 raise TypeError(
                     f"dimension spec must be int or Dim, got {type(value)!r}"
                 )
-            entry[dim_index] = value
         normalized[arg_name] = entry
     return normalized
 

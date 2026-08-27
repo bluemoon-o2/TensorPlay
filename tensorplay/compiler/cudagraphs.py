@@ -1,34 +1,21 @@
 """CUDA graphs orchestration (L5-M3).
 
 Management layer modeled on ``torch/_inductor/cudagraph_trees.py`` concepts
-(capture once, replay with static buffers), kept decoupled from the native
-runtime through an injectable binding surface so the full logic is testable
-before the system layer lands.
+(capture once, replay against static buffers), driven entirely by the native
+:class:`tensorplay._C.CUDAGraph` class:
 
-Required native surface (probed lazily on ``tensorplay._C``):
+* ``capture_begin/capture_end`` own the dedicated per-device side stream,
+  route allocations into a graph-private allocator pool and register
+  graph-safe RNG state; instantiation happens eagerly at ``capture_end``.
+* ``stage_and_launch`` is the low-overhead replay path: every input is
+  copied onto its static buffer with a raw async device-to-device copy and
+  the cached executable is launched - one Python-to-native crossing per
+  replay instead of one dispatcher round trip per input plus launch.
 
-===============================  ==========================================
-symbol                           semantics
-===============================  ==========================================
-``cuda_graph_begin_capture()``   start capture on the dedicated side stream
-                                 (it becomes the thread's current stream)
-``cuda_graph_end_capture()``     stop -> opaque graph handle
-``cuda_graph_instantiate(g)``    compile to executable
-``cuda_graph_launch(e)``         enqueue executable on current stream
-===============================  ==========================================
-
-Optional symbols used when present (all shipped by ``tensorplay._C`` builds
-with CUDA): ``cuda_graph_capture_stream()`` exposes the dedicated capture
-side stream so warmup runs on the same stream as capture (lazy per-stream
-state such as cuBLAS workspaces must see both equally);
-``cuda_stream_get_current()/cuda_stream_set_current(s)`` save and restore the
-caller's stream around the whole sequence.  Allocations issued during
-capture are routed into a graph-private allocator pool natively, keeping
-replay-baked addresses exclusive until the entry is dropped.
-
-Until the required symbols land, :meth:`CudaGraphManager.capture` raises
-:class:`NotImplementedError` naming the missing symbols. Tests may inject a
-fake via ``CudaGraphManager(native=...)``.
+Tests may inject a stand-in via ``CudaGraphManager(native=...)``; the
+stand-in must expose a ``CUDAGraph`` class with ``capture_begin``,
+``capture_end``, ``replay``, ``reset`` and optionally
+``stage_and_launch``.
 """
 
 from __future__ import annotations
@@ -40,28 +27,19 @@ class CudaGraphError(RuntimeError):
     """Raised for capture/replay contract violations."""
 
 
-_REQUIRED_NATIVE = (
-    "cuda_graph_begin_capture",
-    "cuda_graph_end_capture",
-    "cuda_graph_instantiate",
-    "cuda_graph_launch",
-)
-
-
 def _default_native() -> Any:
     try:
         from .. import _C  # type: ignore
     except Exception as exc:  # pragma: no cover - import failure diagnostics
         raise NotImplementedError(
             "CUDA graph support requires tensorplay._C; import failed: "
-            f"{exc!r}. Required symbols: {', '.join(_REQUIRED_NATIVE)}"
+            f"{exc!r}. Was TensorPlay built with CUDA support?"
         ) from exc
-    missing = [name for name in _REQUIRED_NATIVE if not hasattr(_C, name)]
-    if missing:
+    if not hasattr(_C, "CUDAGraph"):
         raise NotImplementedError(
-            "CUDA graph bindings not implemented yet in tensorplay._C: "
-            f"{', '.join(missing)}. See module docstring for the required "
-            "native surface contract."
+            "CUDA graphs are not supported by this TensorPlay build "
+            "(tensorplay._C exposes no CUDAGraph class). Was it built "
+            "with CUDA support?"
         )
     return _C
 
@@ -73,57 +51,29 @@ def _shape_signature(args: Sequence[Any]) -> Tuple:
     )
 
 
-def _clone_static(tensor: Any) -> Any:
-    """Allocate the static input buffer as an exact copy of ``tensor``."""
-
-    clone = tensor.clone()
-    return clone
-
-
-def _switch_to_capture_stream(native: Any) -> Any:
-    """Move the calling thread onto the native capture side stream.
-
-    Returns the caller's previous stream when the switch happened (the
-    caller must restore it), or ``None`` when the native surface lacks the
-    optional stream symbols and capture will run on whatever is current.
-    """
-
-    get_capture_stream = getattr(native, "cuda_graph_capture_stream", None)
-    set_current = getattr(native, "cuda_stream_set_current", None)
-    if get_capture_stream is None or set_current is None:
-        return None
-    side_stream = get_capture_stream()
-    get_current = getattr(native, "cuda_stream_get_current", None)
-    previous = get_current() if get_current is not None else None
-    set_current(side_stream)
-    return previous
-
-
-def _copy_into(dst: Any, src: Any) -> None:
-    copy = getattr(dst, "copy_", None)
-    if copy is None:
-        raise CudaGraphError(
-            "static input buffer lacks copy_; cannot stage replay inputs"
-        )
-    copy(src)
-
-
 class _GraphEntry:
-    def __init__(self, key: str, signature: Tuple, handle: Any,
+    __slots__ = ("key", "signature", "graph", "static_inputs",
+                 "static_outputs", "replays", "bulk")
+
+    def __init__(self, key: str, signature: Tuple, graph: Any,
                  static_inputs: List[Any], static_outputs: List[Any]) -> None:
         self.key = key
         self.signature = signature
-        self.handle = handle
+        self.graph = graph
         self.static_inputs = static_inputs
         self.static_outputs = static_outputs
         self.replays = 0
+        # Bulk staging keeps the whole replay inside one native call;
+        # stand-in natives without stage_and_launch fall back to per-tensor
+        # copies plus replay().
+        self.bulk = hasattr(graph, "stage_and_launch")
 
 
 class CudaGraphManager:
     """Capture functions once, replay them against static buffers."""
 
     def __init__(self, native: Optional[Any] = None, max_entries: int = 8) -> None:
-        self._native = native if native is not None else None
+        self._native_module = native
         self._owns_lookup = native is None
         self._entries: Dict[str, _GraphEntry] = {}
         self.max_entries = max_entries
@@ -133,9 +83,12 @@ class CudaGraphManager:
 
     @property
     def native(self) -> Any:
-        if self._native is None:
-            self._native = _default_native()
-        return self._native
+        if self._native_module is None:
+            self._native_module = _default_native()
+        return self._native_module
+
+    def _new_graph(self) -> Any:
+        return self.native.CUDAGraph()
 
     # -- API ------------------------------------------------------------------
 
@@ -158,38 +111,32 @@ class CudaGraphManager:
                 f"graph cache full ({self.max_entries}); clear stale entries"
             )
 
-        native = self.native
-        # Warmup must run on the same stream capture uses (lazy per-stream
-        # state such as cuBLAS workspaces would otherwise land mid-capture),
-        # so switch to the dedicated capture side stream when the native
-        # surface exposes it.  begin/end capture manage the current stream
-        # themselves for the captured window; we restore the caller's stream
-        # afterwards so replays enqueue where the user expects.
-        restore_stream = _switch_to_capture_stream(native)
+        graph = self._new_graph()
         try:
-            # Warmup executes lazy initialisations outside capture.
+            # Warmup executes lazy initialisations outside capture (cuBLAS
+            # workspaces etc.); the native capture stream matches the stream
+            # capture will run on.
             fn(*sample_args)
             # Static input buffers must be allocated AND filled before the
             # capture window opens: a clone issued inside capture becomes a
             # captured node that would overwrite the staged replay inputs
             # with the sample values on every replay.  Allocating outside
             # also keeps them out of the graph-private pool, so their
-            # lifetime is independent of cuda_graph_destroy.  No ordering
-            # fence is needed here: nothing executes during capture, and at
-            # replay time the staging copies are enqueued on the launch
-            # stream ahead of the graph.
-            static_inputs = [_clone_static(a) for a in sample_args]
+            # lifetime is independent of graph reset.  No ordering fence is
+            # needed here: nothing executes during capture, and at replay
+            # time the staging copies are enqueued on the launch stream ahead
+            # of the graph.
+            static_inputs = [
+                a.clone() if hasattr(a, "clone") else a for a in sample_args
+            ]
             self.capturing = key
-            native.cuda_graph_begin_capture()
+            graph.capture_begin()
             outputs = fn(*static_inputs)
-            graph = native.cuda_graph_end_capture()
-            executable = native.cuda_graph_instantiate(graph)
+            graph.capture_end()
         finally:
             self.capturing = None
-            if restore_stream is not None:
-                native.cuda_stream_set_current(restore_stream)
         out_list = list(outputs) if isinstance(outputs, (list, tuple)) else [outputs]
-        entry = _GraphEntry(key, signature, executable, static_inputs, out_list)
+        entry = _GraphEntry(key, signature, graph, static_inputs, out_list)
         self._entries[key] = entry
         return entry
 
@@ -206,14 +153,23 @@ class CudaGraphManager:
             raise CudaGraphError(
                 f"entry {key!r} captured for {entry.signature}, replay args are {signature}"
             )
-        for dst, src in zip(entry.static_inputs, args):
-            _copy_into(dst, src)
-        self.native.cuda_graph_launch(entry.handle)
+        if entry.bulk:
+            entry.graph.stage_and_launch(entry.static_inputs, list(args))
+        else:
+            for dst, src in zip(entry.static_inputs, args):
+                dst.copy_(src)
+            entry.graph.replay()
         entry.replays += 1
         return list(entry.static_outputs)
 
     def clear(self, key: Optional[str] = None) -> None:
         if key is None:
+            entries = list(self._entries.values())
             self._entries.clear()
         else:
-            self._entries.pop(key, None)
+            entry = self._entries.pop(key, None)
+            entries = [] if entry is None else [entry]
+        for entry in entries:
+            reset = getattr(entry.graph, "reset", None)
+            if reset is not None:
+                reset()

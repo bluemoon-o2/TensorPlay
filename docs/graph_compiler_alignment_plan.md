@@ -438,3 +438,655 @@ TI build。嫌疑:AOT bw 图执行后遗留的悬垂形状/元数据被 TI 读�
 并发 ninja 时使用了全局 `pkill -f "ninja|nvcc"`,误杀了对方的构建进程
 (两树分属不同文件系统,本无文件冲突)。教训:共享机器上清理进程必须按
 cwd(/proc/PID/cwd)限定自己的树,禁止全局 pkill。
+
+## L5-M5 融合面扩展设计(2026-08-25,基于 torch/_inductor 双侧走读)
+
+决策:正面竞争,自研后端对标 Inductor;参考源码 = `third_party/pytorch`
+(commit 893b6406)。下文 torch 行号均相对 `torch/_inductor/`。
+
+### ⚠️ 先修地基:M5a sum 尾融合发射不完整(走读发现的真 bug)
+
+`codegen/triton.py` 的 reduction 分支:kernel 体计算 `reduced = tl.sum(...)`
+后**没有任何 store**(242-246 跳过了 store 循环),grid 仍是多 block
+(288),各 block 部分和既不落盘也不聚合——当前生成的标量输出缓冲是
+未初始化内存。test_fx_passes.py 只断言源码含 `"tl.sum("`/`"tp.empty(()"`,
+无数值验证。**任何纵向融合工作开始前必须先补齐并加数值 parity 测试。**
+
+### 我方现状盘点(可复用 vs 硬缺口)
+
+可复用:点算子后缀 program + CPU 向量核/Triton 直线发射双端执行器;
+反向程序构建器(adjoint+活跃度压缩);`_split_sum_epilogue` 检测框架;
+PointwiseFusionHint union-find 区域标注(**现无人消费,闲置资产**);
+autotuner 全套;codecache 内容寻址;AOT 双图管线;cuBLASLt bias epilogue
+半成品(CudaBlasGemm.cpp:210,344-415);前端形状特化保证 lowering 时形状静态。
+
+硬缺口:
+1. program 表示只有一维逐元素三元组,无 tile/归约轴描述(stax.py:100-120);
+2. 归约只能全量 sum 且必须在图尾;归约后不能再接 pointwise;
+3. 广播全路径被禁(Triton 入口 triton.py:105-118 同 shape 校验),bias/scale
+   场景直接不可行;
+4. mm 是 extern 黑盒,linear 被预展开 t+matmul+add 三节点(stax.py:1400-1412),
+   无可识别 epilogue 模式;Triton GEMM 发射层不存在;
+5. 训练与融合互斥(AOT 显式 use_fusion=False,stax.py:2246-2251;Triton 反向
+   无归约 VJP);
+6. dtype 单一 fp32 假设,无累加器语义;where/gt 缺位卡住 max 族;
+7. 前向强制单输出(argmax 受阻);fusion_hint 无消费者(判据漂移风险)。
+
+### torch 侧机制要点(移植锚点)
+
+- **IR**:Loops{ranges, reduction_ranges, inner_fn 闭包}(ir.py:1059,1399);
+  OpsHandler 六原语 load/store/reduction/store_reduction/masked/index_expr
+  (ops_handler.py:240-289);combine_fn 注册表含 argmax 平局规则(ir.py:1296-1396);
+  降级三连:rnumel==0/1→pw、unroll<8→pw(ir.py:1886-1921);
+  realize 闸门 has_large_inner_fn 防表达式爆炸(ir.py:10922-11000)。
+- **调度器**:SchedulerNode group=(numel,rnumel)(scheduler.py:2649-2683);
+  mutation 改名破环(:4702-4717,5339-5410);can_fuse_vertical =
+  exact-MemoryDep 匹配 + 剩余 dep 祖先检查(:9042-9113,9179-9233);
+  **pw→red 形状谓词 `numel_pw == numel_red*rnumel_red`**(simd.py:2438-2470);
+  red→pw 泛化路径禁止,只能走模板 epilogue 专用通道;贪心配对 + shared-dep
+  打分(scheduler.py:7513-7567,9474-9556)。
+- **prologue 免费拿**:Enable/DisableReduction 标记让 red 前的 pw 链进同一
+  kernel(simd.py:2636-2715,794-817);fits_in_main_body / fits_outside_reduction
+  (simd.py:2645-2653)。
+- **归约两态**:persistent(RBLOCK=next_pow2(rnumel) 静态化,triton.py:7694-7734,
+  阈值表 INNER:1024/其他:64,choices.py:448-513)+ IR 期 multilayer 两 kernel
+  workspace 拆分(num_splits,ir.py:1476-1689,2292-2338)。跳过 cooperative。
+- **config 数值直接抄**:pointwise bs=max(256,min(numel//128,1024)) 及 1D/2D
+  组合(triton_heuristics.py:4459,heuristics/reduction.py:29-115);reduction
+  按 hint 分流 5 配置(reduction.py:178-354);persistent XBLOCK∈{1,8,32,128}
+  cap rnumel*XBLOCK≤4096(reduction.py:356-498)。
+- **matmul 模板**:jinja + Config(BLOCK_M/N/K,GROUP_M swizzle)(kernel/mm.py:
+  87-98,triton_mm.py.jinja);epilogue 挂接 = store_output 钩子里把 epilogue
+  pw 节点的 LoopBody 在子图内重放(select_algorithm.py:1467-1704,1960-2025)
+  ——relu/gelu 复用标准 pw codegen,无需单独模板;bias 用 addmm_epilogue
+  (mm_common.py:99-107);cuBLASLt 仅一条路由:2D-bias(stride0==0)→extern
+  bias_addmm(kernel/mm.py:173-181,713-719)。
+- **buffer**:last_usage 反向累积 + free_buffers(scheduler.py:9802-9840);
+  inplace 谓词 read/write index 相等且 size 相等(:3008-3019)。
+
+### 执行阶段
+
+| 阶段 | 内容 | 验收 |
+|---|---|---|
+| M5a | 修复 sum epilogue 发射(单 block 收敛或两阶段);广播最小支持(输入 expand 视图进 Triton path) | mul/relu/sum、addcmul 型数值 parity vs eager;带 bias 广播用例 |
+| M5b | 表示层升级:program 增加 reduction 轴(dim/keepdim)+ 多输出;归约组合子注册(sum/max/amax,argmax 后置) | mean(dim)/amax(dim) 尾融合 parity;argmax 双输出骨架 |
+| M5c | Python 融合调度器:消费 fusion_hint 或替换之——依赖提取、group=(numel,rnumel)、can_fuse_vertical(exact dep 匹配简化版)、Enable/DisableReduction 标记 | pw→red→pw 图正确切成 ≤2 kernel;red 后断开语义与 torch 一致 |
+| M5d | Triton 归约 codegen:persistent + multilayer split 两态;fp32 累加器;config 候选照抄 torch 数值接进 stax_autotune | 大 reduce-to-scalar(split)与 rnumel≤1024(persistent)parity+性能 |
+| M5e | matmul epilogue:A 路线 cuBLASLt RELU/GELU epilogue 组合 + linear 不再预展开改模式匹配;B 路线 Triton GEMM jinja 模板 + store_output 子图重放 | linear+bias(+relu/gelu)单 kernel;vs extern mm 性能不回退 |
+| M5f | 训练态:sum VJP(tangent expand)进 _build_fused_gradient_graphs;或 aot.py 分区器与融合组联动 | train 态归约融合梯度 parity;AOT 不再一刀切关融合 |
+
+依赖序:M5a → M5b → M5c → M5d/M5e 并行 → M5f。M5a–M5d、M5f 纯 Python;
+M5e-A 路线动 CudaBlasGemm.cpp,需遵守 AGENTS.md 构建纪律。
+
+明确跳过(第一版):sympy 符号形状、allow_index_equivalence 宽松匹配、
+HOPs(scan/welford/online_softmax)、cooperative reduction、TMA/block ptr、
+foreach/combo 异构容器、NestedReduction/sub-parent staged epilogue、
+benchmark_fusion/autoheuristic 调优基建。
+
+### M5a 落地记录(2026-08-25)
+
+- **sum 尾融合修复**:`codegen/triton.py` 重写发射——归约输入 ≤1024 元素走
+  单 kernel 直写标量(grid=(1,), XBLOCK=next_pow2(numel));更大输入走两阶段
+  split(主 kernel 写 `ws_ptr[pid]` 部分和 + finalize kernel 掩码加载归约),
+  对齐 Inductor multilayer 拆分语义的迷你版。归约路径一律 config 钉死,
+  不再退回 @triton.autotune(workspace 尺寸随 config 烘焙);autotune 关闭/
+  失败时用静态默认配置 (256,4)。launcher 内嵌参考形状 numel 字面量。
+- **最小广播支持**:Triton 路径入口改按 torch 广播规则求 reference_shape;
+  广播输入以编译期 div/mod 偏移链寻址(stride-0 维折叠,numel-1 直接单次
+  load)。`_supports_runtime_inputs` 增加 reference_shape 参数。广播+训练态
+  显式回退(反向构建器尚无 sum-to-shape,M5f 解锁)。CPU 融合路径不动。
+- **清理**:删除迁移残留 `tensorplay/backends/triton.py`(无引用,且仍含
+  修复前的坏发射逻辑,易误导)。
+- **测试**:新增 test/test_triton_reduction.py——本地可跑的结构/偏移表达式/
+  广播规则单测 13 项;GPU 数值 parity 4 项(sum 单块/10 万元素 split/广播 bias
+  点算/广播链 sum)经 runtime_available() 门控,待远端 P4 执行;断言经
+  `_tensorplay_cache` 反查 `_tensorplay_codegen=="triton"`,防止解释回退假绿。
+  本地:test_fx_passes+test_stax_autotune+test_triton_reduction+
+  test_decompositions+test_codecache 64 passed;test_compile 15 passed。
+- ⚠️ 预存失败(与本工作无关):test_compile::
+  test_stax_fused_pointwise_extended_autograd_matches_eager 在原版代码同样
+  失败——ShapeProp 解释期 CPU eager 报 "Unsupported dtype",疑被进行中的
+  DType/TypePromotion 迁移波及(git status 大量 p10 dtype 文件未提交改动)。
+  待该迁移收敛后复核。
+
+## export 修复(2026-08-25 晚,3 处)
+
+test_export 8 例中 5 失败 → 全绿。三个独立根因:
+
+1. **is_compiling 归位到前端层**(架构修正):捕获标志 ContextVar 原在
+   api.py 由 `_compiler_context` 置位,但 `export.py` 直接调 `Tracer().trace()`
+   绕过了它 → batchnorm 的 `_check_input_dim`(已按 TP 惯例用
+   `tensorplay.compiler.is_compiling()` 守卫)在 Proxy 上做元数据控制流炸
+   GraphCaptureError。修法:标志与 `compiler_context()` 移入 graph.py
+   (依赖方向 api→graph,graph 不反依赖),`Tracer.trace` 执行用户代码段置位;
+   api 复用之。任何直接 Tracer 调用方(export/测试/未来前端)语义一致。
+   对照:torch 无此问题是因为 fx 默认把 torch.nn 子模块当 leaf(call_module)
+   不内联;我们选择内联(利于融合),故元数据守卫必须真实生效。
+2. **export dynamic_shapes 收紧**:去掉 str→Dim 宽松转换,test 规格要求对
+   非法 value(str/list 等)抛 TypeError("int or Dim");bool 显式排除
+   (bool 是 int 子类)。非法 key 的 ValueError 原本已有。
+3. **ExportedProgram.__call__ 兑底**:export(fn, x, offset=5.0) 后调用
+   program(x) 时 kwargs 丢失落回默认值。现按 placeholder 名序绑定实参,
+   未提供的从 example_inputs(导出期绑定)补全后再进 graph_module。
+
+回归:test_export 8/8;compile/fx_passes/stax_autotune/triton_reduction/
+decompositions/aot/codecache 共 105 passed;optim 7 passed。
+插曲:期间本地共享树被并行构建改写 libp10/_C 出现瞬时符号不一致,
+按 AGENTS.md 等待对方构建静默后复测。
+
+## L5-M5b 落地记录(2026-08-25 深夜)
+
+**program 表示升级:归约轴(dim/keepdim)+ mean/amax/max 全量族。**
+
+- `ReductionSpec`(op/dims/keepdim):`is_full`、`normalized_dims(rank)`、
+  `output_shape(ref)`(keepdim 折叠语义)、`reduction_numel(ref)`、逐 op 的
+  combine/neutral/finalize 映射表(sum|mean→tl.sum+add,amax|max→tl.max+
+  maximum,-inf 中立值);旧 `reduction="sum"` 字符串入参兼容映射。
+- **检测泛化**:`_split_sum_epilogue` → `_split_reduction_epilogue`,
+  `_reduction_spec_from_node` 解析 call_method 尾节点——⚠️ 关键坑:方法节点
+  args[0] 是接收者,解析前必须剥掉(否则 sum() 被当成 dim=Node 拒绝);
+  amax() 无轴、max(dim) 值索引对、dtype/out kwargs 显式拒绝回退;
+  `_split_sum_epilogue` 保留为全量 sum 兼容入口(test_fx_passes 不动)。
+- **发射四分支**:pointwise / 全量单块 / 全量两阶段 / **带轴 tile(M5b 新)**:
+  输出空间 XBLOCK × 归约空间 RBLOCK 二维 tile,内层 `tl.range` 逐块折叠,
+  掩码加载 other=中立值(-inf 防 max 被污染),mean 循环后乘 1/rnumel;
+  launcher 按 output_shape 分配 + 字面量 grid;v1 配置确定性
+  (`_dim_reduction_config`:XBLOCK≤256,RBLOCK≤512),autotune 接入留给 M5d。
+- **寻址正确性**:偏移表达式 = kept 维按输出平坦索引分解 × 输入 stride +
+  reduced 维按 rindex 分解 × stride;150 组 (op × dims × keepdim × ref)
+  配置对拍暴力坐标映射全过。修了三个真 bug:①坐标项缺括号(`%` 与
+  `[:, None]` 优先级);②单维折叠快捷分支漏乘 stride;③多维时末维不可折叠
+  (rindex 枚举整个归约空间而非该维)。
+- **测试**:test_triton_reduction.py 扩至 17 本地项 + 6 GPU 门控项
+  (sum(dim)/mean(dim 组)/amax(keepdim) parity 待 CUDA);本地全套
+  112 passed。
+- 远端状态:GPU parity 挂起,等待对方完成 CUDA 构建(唯一构建纪律,
+  我方不再发起构建;产物就绪后仅跑测试)。
+
+## L5-M5c 落地记录(2026-08-25 深夜续)
+
+**静态融合分段调度器上线(单一事实源)。**
+
+- 新模块 `compiler/scheduler.py`:`segment_graph(gm, *, is_pointwise,
+  classify_reduction)` —— 依赖倒置,调度器不 import backends/codegen(无环);
+  `Segment{nodes,kind,reduction}`、`describe`("pw+red -> pw")、
+  `annotate`(计划写 gm.meta["stax_segments"]);
+- 分段规则 = Inductor 垂直融合迷你版:pw 链合一段;pw 段可挂一个归约尾声
+  (pw→red 纵融);red 之后必断(red→pw 边界);red→red 相邻拆两段;
+  外部算子(mm/reshape 等)整图回退(v1 不做解释/编译拼接);
+- **接入**:codegen/triton.py 的 compile_graph_module 弃用直调
+  `_split_reduction_epilogue`,改走调度器——单段才编译,多段注记 meta 后
+  回退;旧检测函数保留为兼容入口。消除"fusion_hint 无消费者/判据漂移"
+  缺口(POINTWISE_FUSED_OP_NAMES 经注入谓词成为唯一判据);
+- 协作纪要:并行工作流在同文件落地了 argmax 索引归约(ReductionSpec.
+  tracks_indices + tl.argmax 发射 + dtype 门控),与本方 M5b/M5c 改动无冲突,
+  测试共绿(32 triton/fx 用例);
+- 测试:test_scheduler.py 7 项(pw 单段/纵融/red→pw 断开/red→red 拆分/
+  外部回退/裸输入归约/meta 注记);全套 compiler 相关 102 passed。
+- 下一步(M5c 续):按段发射——多段图逐段编译 + 运行期张量传递拼接,
+  让 `(x*w).relu().sum()*2+b` 类图从整体回退变为 2 kernel 编译执行。
+
+### M5c 续:按段发射落地(同日)
+
+多段图不再整体回退。`compile_graph_module` 重构为通用按段管线:
+
+- `_extract_segment_view`:把 Segment 节点克隆进独立子 Graph(跨段引用
+  自动变占位符),producer 是占位符时经 externals 解析(sum() 直连输入的
+  边界情形);
+- **接线验收门**(`_extern_sources`):每段只允许一个导出值=末节点
+  (内部 skip 连接留 v2 多输出);外部依赖仅限图占位符或**前序段的尾值**;
+  违例注记 meta 后回退;
+- 每段独立走 program 构建 + autotune(全量 sum 单块/两阶段、带轴 tile、
+  argmax 门控全部复用,零特判);编译期样本张量按来源合成
+  (占位符用真实输入;前序段输出 pw→ref 形状、red→标量);
+- `compiled()` 运行期按拓扑顺序喂段:`interm[i]=launch(feed)`,
+  标量中间值进入下一段时由广播偏移机制自然处理(numel-1 单次 load);
+- 训练态(any_grad)仍限单段(M5f 补分段 VJP);
+- 测试:+4 本地结构项(two_programs/scalar_feed/接线门/抽取边界)、
+  +2 GPU 门控 e2e(two-segment parity、scalar 链 sqrt);全套
+  **125 passed, 17 skipped**(GPU 项待远端)。
+
+## L5-M5d 落地记录(2026-08-25 续,性能轮)
+
+用户反馈"性能不如 torch",针对带轴归约发射路径做三项优化:
+
+### persistent 免循环形态(rnumel ≤ RBLOCK)
+
+- `_dim_reduction_config` 返回 4 元组 (XBLOCK, warps, RBLOCK, stages);
+  rnumel ≤ 512 时 RBLOCK=next_pow2(rnumel) → **单 tile 覆盖整个归约空间**,
+  发射免 for 循环体:rindex 直接 `tl.arange`,无 roffset/rmask 迭代、
+  无 tl.range 流水线开销;argmax 的 cwin 同步去掉 `+ roffset`。
+- 大归约空间仍走 `tl.range(..., num_stages=3)` 软件流水
+  (torch inductor 默认同款深度),launcher 端同步下发 num_stages。
+
+### 带轴 autotune 接入(补齐 M5d 计划缺口)
+
+- `_DIM_REDUCTION_CANDIDATES` 六档候选表 + `_STATIC_DIM_TRIPLE=(128,4,3)`
+  静态兜底;`_autotune_dims_program`:bench_launch 实测 → 最优持久化到
+  `default_cache("triton-autotune")`(决策键 = program digest + 归约 spec +
+  onumel/rnumel 桶 + device/value_dtype),二次编译零 bench 单 build 直取。
+- 决策缓存中毒防护:非法配置(不在候选表)忽略并重扫;全候选编译失败回退静态;
+  TP_DISABLE_STAX_AUTOTUNE=1 跳过扫描。
+
+- 测试:codegen 结构测试拆 persistent/loop 两形态断言;+4 autotune 单测
+  (持久化复用/禁用开关/全失败兜底/坏缓存重建),mock _compile_program 注入;
+  全套 1304 passed(2 个 conv eager 失败系他人未提交 C++ 改动,与编译器无关,
+  按 AGENTS.md 纪律不触碰)。GPU parity 待远端验证。
+
+## L5-M5e 落地记录(2026-08-25 深夜,融合范式对齐轮)
+
+用户判定"融合范式差距巨大"。排查发现两处结构性落后于 inductor 并当轮修复:
+
+### 1. 多段发射门被收窄(回归修复)
+
+`compile_graph_module` 的入口门仍是 v1 的 `len(segments) != 1 → fallback`:
+M5c 建好的按段管线(`_extern_sources`/`_extract_segment_view`/intermediates
+接线)全部处于死代码状态,pw→red→pw 实际整图回退 eager——结构层测试照过,
+GPU e2e 因回退也数值通过,问题被掩盖。现打开为任意段数,每段经
+`_extern_sources` 验收;跨段消费改认 `Segment.export_node`(含 epilogue 尾)。
+
+**每段局部 reference**:后续段的输入是中间张量,形状≠全局 reference。
+样本合成改为 `reduction.output_shape(reference_shape)`;每段以自身输入的
+broadcast 形状作为 codegen 的 reference(单块/split 阈值、dims tile、mean
+缩放全部按局部形状推导),段与段真正可组合。
+
+### 2. red→pw store epilogue(inductor 单 kernel 范式)
+
+- scheduler:归约后的纯 pw 节点若**传递依赖归约结果**(live = {red 尾} ∪
+  已并入节点,其余依赖只能是 placeholder)则并入同段 `Segment.epilogue`;
+  纯 placeholder 链不能并入(kernel 内已无 pre-reduction tile)。
+- codegen:`epilogue=(program, constants, esrc)` 三元组;acc 定稿(mean 缩放
+  之后)在寄存器内求值 epilogue 程序再 store。四种形态全支持:dims
+  persistent/looped、full 单块、split 的 finalize kernel。argmax(int64 流)
+  拒绝 epilogue。launcher 签名不变(unary epilogue 零新增参数);autotune
+  digest 含 epilogue 内容。
+- 效果:pw→red→pw 从 2 kernel → **1 kernel**,对齐 inductor 的
+  "reduction 结果不落地直接进后继 pointwise"范式。
+- 训练态仍限单段无 epilogue(M5f 补分段 VJP/归约梯度)。
+
+- 测试:scheduler +3(epilogue 合并/传递依赖门槛/annotate)、codegen +6
+  (四形态发射/mean 先缩放/argmax 拒绝)、计划层 +2(单段化+epilogue 程序
+  构建)、GPU 门控 e2e +3(pw→red→pw 单 kernel、标量链、双生产者跨段接线)。
+  编译器域全套绿;全库另有 ~17 个失败系并行方未完成重建(C++ 绑定变动,
+  与本域无关,按纪律未触碰)。GPU parity 待远端。
+
+## L5-M5b 收口记录(2026-08-25 深夜,argmax 双流归约 + conv 族配套)
+
+**argmax 索引流归约(M5b 收口件,与 reduction 轴线并行落地)。**
+
+- `ReductionSpec` 增 `"argmax"`(`tracks_indices`;要求显式 dims,flatten 形态
+  拒绝);
+- 发射双流:值流 acc(dtype 按输入烘焙 `_VALUE_TYPES` f32/f64)+ 索引流 acci
+  (int64);块内 `cval=tl.max(tile,axis=1)`、`cwin=tl.argmax(tile,axis=1)
+  +roffset`;合并 `take=(cval>acc)|(tl.isnan(cval)&~tl.isnan(acc))` ——
+  严格 `>` 保首现块(torch.argmax 平局取首),isnan 子句对齐 torch 的
+  NaN 视为最大序;
+- launcher 为 argmax 分配 int64 输出;`HAS_TL_ARGMAX` 特性探测门控折叠;
+  compile_graph_module 限 float32/float64;value_dtype 贯穿
+  _compile_program/_autotune_launch。
+- 测试:test_triton_reduction.py 检测/结构/f64/digest + GPU 门控 parity
+  (argmax、keepdim+平局、NaN 注入),本地 18 passed / 8 skipped。
+
+**conv 族配套修复(同轮):**
+
+- **int[] 标量维度归一化**:tools/codegen/gen_python.py 对 int[] 参数发射
+  `isinstance(x,int) and not isinstance(x,bool) → [x]`,重生成
+  functional.py——修 `x.amax(dim=-1)` TypeError,顺带点亮 conv
+  stride/padding/dilation 标量入参;生成物与手补字节级一致。
+- **pad backward**:PadKernels.cpp pad_scatter_kernel 外层序号 o 原用全张量
+  stride 解码(padded 维被折叠进 outer 坐标,outer>1 时写错位)→ 改用
+  new outer_strides 解码;CUDA 侧 flat dst + atomicAdd 本就正确未动。
+- **LazyConv**:_LazyConvXdMixin.__init__ 按位置传 _ConvNd 参数 → "got
+  multiple values for argument 'device'";改 kwargs 直通,六个 Lazy 类以
+  关键字传具体类参数;_infer_parameters 对齐 hook 协议。六类构造+前向全过。
+- **conv_tbc**:实现 torch 三维 weight (k,C_in,C_out) 契约
+  (weight.permute(2,1,0) + groups=1 conv1d),校验 dim==3 与 C_in 匹配。
+- **test_conv_alignment.py**:_grads_tp 共享 torch 侧随机切量(旧 13 失败
+  纯属 RNG 切量错配,非内核错误——conv_transpose grad_input/unfold/fold
+  内核经匹配切量验证全部正确);bf16 经 f32 往返;conv_tbc 权重 (3,3,5)、
+  fold 输入 L=12。独立跑 25/25。
+
+**amp-first flaky circular conv1d:根因实锤并收口(oneDNN 缓存两案)。**
+
+- 案 A(权重 reorder 缓存键失效):ConvKernels.cpp 训练路径以临时 unsqueeze
+  view 的 `TensorImpl*` 为缓存键,守卫仅 (data_ptr, version_counter)。
+  分配器回收后,新层可同时命中死层的 impl 槽位与参数存储地址 → 守卫全过,
+  静默用死层重排权重计算。DIAG 实锤:wsum==refwsum(权重拷贝无误)、
+  tp-vs-manual=False / torch-vs-manual=True、同输入连跑两次输出漂移 2.7、
+  版本 bump 后与 torch 精确一致。test_amp 先行时 ~75% 复现(堆布局敏感),
+  独立必绿。修复:缓存条目钉住源 Storage(存活期内地址不可回收,data_ptr
+  等值即真同源)+ map 256 上限防死键堆积。修复后 amp-first 组合 8/8 绿。
+- 案 B(conv2d_grad_weight_onednn 原地换底,test_conv_full bias.grad
+  75-vs-200 根因):该"优化"把共享 grad_output 的 storage 原地换成 blocked
+  格式缓冲并挂 md;autograd 按 input→weight→bias 求导,bias 内核随后按稠密
+  NCHW 读 blocked 字节([75×3≈600×3/8 正是 NChw8c 密度];grad_input 先行
+  未受污染、grad_weight 自读 md 故仅 bias 坏)。原换底还兼任局部缓冲寿命
+  延长(直接删会悬垂);改为自持有缓冲 `memory(md,eng)`(对齐 grad_input
+  路径既有修法),调用方张量不再被触碰;onednn_memory_cache 握手保留
+  (desc 校验 + 每 backward 新 impl,无跨步陈旧)。修复后 test_conv_full
+  8/8(含 conv3d scratchpad 连续 fwd+bwd 压力)。
+- 验证窗口备注:两案编译进 ConvKernels.cpp.o 并随 00:05 libp10.so 链接后
+  通过上述回归;随后并行绑定重构线(libtp_python 符号失配)令全库导入瞬时
+  中断,按共享树纪律待其收敛复测全量。
+
+遗留:GPU parity(argmax/pad 等)待远端 GPU;eager amax NaN 分歧登记于
+gap 文档(registered-not-fixed);M5c 调度器下一步为训练态分段 VJP。
+
+## L1-D1 执行式特化落地（2026-08-26）
+
+**范围**:D1 第一步——数据依赖控制流从"硬拒绝"升级为"具体值特化 + 数据守卫"。
+真正的断点续捕(子图切分)仍待后续;本步对齐 Dynamo 的
+`nb_bool → item() → 特化 + install_guard` 语义(tensor.py:369-380)。
+
+- `compiler/graph.py`:`Tracer(execute=True)` 混合执行模式(make_fx 式边录边执行,
+  no_grad 包裹、失败静默降级回符号模式);节点样本经 `_node_samples` 全图传播;
+  `Proxy.__bool__/__int__/__float__/__index__/__iter__` 消费样本并记录
+  `data_specializations`;张量容器的迭代仍拒绝(元素逃逸追踪面);
+  **捕获期**(DCE 前)盖戳 `meta["data_guard_params"]`——事后走查会被
+  DeadCodeElimination 删掉的条件子图骗过(实测踩坑)。
+- `compiler/api.py`:缓存键扩为三元组 `(输入签名, 形状守卫, 数据守卫)`;
+  数据守卫 = 喂给控制流门的占位符参数的 sha256 字节指纹(`_tensor_data_digest`);
+  身份快路径在存在数据守卫参数时禁用(原地变异不改身份只改字节);
+  提升失效逻辑与形状守卫提升同构。
+- `compiler/guards.py`:GuardChain 支持三元组件,explain/guards 渲染 data-guards。
+- 已知边界:①指纹 O(input-bytes),仅作用于真正喂门的参数;Dynamo 式标量表达式
+  重验 guard 需子图前缀切分,见下步。②execute 模式消耗 RNG(jit.trace 同款注意)。
+- ✅ **既有原生 bug 已修(同日)**:TensorBase 从未安装 nb_bool 槽(CPython 对无
+  真值协议类型恒真),`bool(t)` 与 `.item()` 分歧、所有数据依赖 eager if 静默走错。
+  现于 Tensor.cpp 绑定块实现 torch is_nonzero 原话语义(RuntimeError "no values /
+  more than one value is ambiguous");ninja -C build _C 重编,产物新鲜度核验,
+  全量测试 1408 绿。注:`__float__/__int__` 槽位由并行线同期补齐。
+
+### M5b 收口续:foreach/autograd 配套修复(2026-08-26 凌晨)
+
+并行 optimizer/amp 线落地 foreach SGD 后暴露两处共享基础设施缺口,当轮修复:
+
+- **validate_lists 可选态列表**:CPU/CUDA OptimizerKernels 的列表校验对
+  momentum_buffers 等可选态做无条件 size 检查,momentum==0 时调用方按 torch
+  契约传 `[]` 直接 ValueError。改为「required 或非空时才要求覆盖全参数」;
+  同时消除空列表下 `&first_state[i]` 的越界 UB(逐元素检查改为显式
+  require+非空双门)。test_optim、TestConv3dScratchpadRegression 随之转绿。
+- **AccumulateGrad 物化 strided grad**(tpx/include/AccumulateGrad.h):mm 经
+  `.t()` 反传的权重 grad 是非连续视图,tp 原样入账 → foreach 内核拒收。
+  torch 实测三类(linear/mm(a,m.t())/addmm)grad 全连续;照抄之,入账前
+  `contiguous()` 物化(与 torch AccumulateGrad 观察行为一致)。
+- 回归:amp/optim/conv_full/conv_alignment 四套 69 passed;全库
+  (除 audio)**1181 passed / 161 skipped / 2 failed**——仅剩
+  test_compile/test_control_flow 各一项 data-dependent-control-flow 缓存断言,
+  属编译器 data-guards 活跃线(3==2 特化缓存计数),未触碰待其收敛。
+
+## L5-CUDA 修复轮(2026-08-26 凌晨,远端 4090D 实测)
+
+目标"全部修复 + 性能超越 torch"。远端 scratch(/tmp/tp_m5e_check)独立构建,
+借用对方产物起步后按 .remote_build.md 配方自建(sm_89/MKL/cuDNN-frontend)。
+全量 CUDA 套件从 19F+2崩 → **全绿**(113 passed/2 skip + rnn 脚本 exit0):
+
+- CUDAGraph.capture_begin 预热全部库句柄(torch 模式:捕获内 Create 非法,
+  曾致 cusolverDnCreate error7 / cuBLASLt error13);
+- cuBLASLt 微自动调优在捕获期跳过并把该 plan 钉死 heuristic[0](捕获与
+  eager 算法位一致,replay 不漂移);事件记录在捕获流上会中止捕获;
+- 条件节点子流延迟到 reset() 销毁(体内外层张量的跨流 fence 对已毁流
+  EventRecord → libcuda SEGV);
+- debug_dump 恒保留模板图(exec 强转 cudaGraph_t 是 invalid argument);
+- 归约发射统一"先程序后重掩码":load neutral 经 pointwise 变换后不再是
+  neutral(sigmoid(0)=0.5 计入 sum),single/split/dims 三路在归约前
+  tl.where 回 neutral;argmax 用 NaN→+inf 优先级流实现 torch 的
+  "NaN 最大、首个 NaN 胜出"(tl.max 在部分 triton 版本忽略 NaN),
+  x!=x 写法规避 tl.isnan 兼容性;
+- 带轴归约逐输入偏移:广播输入不再误用全形寻址;
+- launcher 输出按编译期形状/xnumel 分配(输入序漂移曾致 empty_like 截断);
+  _CODEGEN_VERSION 盐入全部内核缓存键(发射器语义变更不回放旧源);
+- 池释放改挂起-延迟(reset 不再因静态张量存活而抛,张量死绝时 free 路径回收);
+- memory_stats 暴露 allocator 子字典(C++ 碎片化矩阵直通)+ torch 兼容扁平键;
+- make_graphed_callables backward 兼容引擎尾部 None 填充;测试侧两处契约
+  修正(nll_loss 单返回解包、graphed 参数须为 Module Parameter)。
+
+M5e GPU parity 同步验证:persistent/looped/单块/split 四形态 epilogue、
+argmax 三态、双生产者跨段接线全部数值对齐 eager。遗留:TP_STAX_DEBUG 门控
+打印暂留(定位回退门用);workspace_registry 进程级常驻已文档化。
+
+## L1-D1 第二步落地(2026-08-26 续):门 outcome 缓存键
+
+- 缓存键第三组件从"输入字节 sha256 指纹"改为**门结果重验**:
+  `Tracer._extract_guard_replay()` 在 DCE 前把条件子图拷贝为 mini-graph 存入
+  `meta["guard_replay"]`;api 用 `_make_gate_evaluator` 在每次调用时重放求值,
+  键 = ("gates", True/False/int...)。语义对齐 Dynamo guard-on-scalar:
+  **同分支不同数据共享特化**,翻转才重编——修复了旧指纹语义下训练循环每步新数据
+  烧穿 recompile_limit 后永久 eager 回退的问题。
+- guards.py:GuardChain 挂 gate_evaluator;渲染/解释改 "gate-guards"。
+- 测试:pos/neg/pos2 三调用 cache 收敛到 2(按分支);变异翻转正确;item/int 门同构。
+
+## 全库回归备注(同日)
+
+8 个失败均与本域无关,系并行线 11:13 重编 libp10 的 WIP:
+- test_op_parity(linear/conv2d)、test_autograd_function_parity×2:
+  `Kernel not found for op: zeros on backend: CUDA`(native 注册缺失);
+- test_amp×2:functional.py:1611 IndexError(生成层);
+- test_stax_autotune×2:benches 计数 7!=4(候选缓存计数)。
+本域(test_compile/graph/guards/aot/control_flow/tensor_methods)全绿。
+
+
+### 设计决议:为何没有独立的 UPV 类(2026-08-26)
+
+对齐走查结论:Dynamo 需要 VariableTracker 类层次是因为字节码域每个值都装箱;
+执行式追踪值域天然统一。故 UPV = 被 `symbolic_gate_nodes` 标记的原 Proxy
+(`compiler.gate()` 入口),不设第二类。曾试做 int/float 子类(GateValue)承载
+符号标量:CPython 对 `__int__` 返回子类发 DeprecationWarning(实测 3.10),
+且 `3 + n` 左字面量经 int.__add__ 成功返回基类、丢符号性——弃用。
+数值门两分支:`gate()` 路径值在图内符号流动、键不含其结果;
+裸 `int(x)`/`float(x)` 路径烘焙常量、结果必须进键(api evaluator 按
+symbolic 集合区分),两者混用同节点时以符号优先。
+
+## L1-D1 第三步落地(2026-08-26 深夜):compiler.gate() 原生 UPV 对齐
+
+- **设计对齐源码走读**:torch 的 UnspecializedPythonVariable(tensor.py:3417)
+  本质是"1-element 张量代理 + need_unwrap 标志",不是新类型。据此废弃
+  GateValue(int/float 子类)方案——CPython 对 `__int__` 返回子类发
+  DeprecationWarning(3.10 实测),且左字面量 `3+n` 经 int.__add__ 丢符号性。
+- **落地**:`compiler.gate(x.sum())` 标记节点入 `symbolic_gate_nodes` 并原样
+  返回 Proxy;值以张量广播在图内符号流动,DCE 不删,后端每次调用重算;
+  缓存键不含其具体值 → **变和值 10 次调用 cache=1**(test_control_flow)。
+  裸 `int()/float()` 消费仍特化烘焙且必须进键(evaluator 按 symbolic 集合
+  条件过滤——曾因无条件跳过致静默错分支复用,[5] 返回 [6],已修+回归)。
+- **修复**:首次捕获条目在 evaluator 提升前以空门组件入库的提升时序缺陷
+  (提升后重算三段键);误删 `_is_module` 的区间替换事故。
+- 全库 1423 绿;余 3 失败均系并行线 M5 WIP(codegen/triton.py ±1843 行、
+  CUDA zeros 注册),与本域无关。
+
+## L5-PERF 基准轮(2026-08-26,4090D vs torch/inductor)
+
+benchmark/benchmark_vs_torch.py 建立 11 例矩阵(CUDA events,中位数)。
+最安静窗口(run3)快照,best-vs-best:
+
+| 用例 | TP | torch | 备注 |
+|---|---|---|---|
+| matmul 4096³ fp32/fp16, 8192³ | ≥1.00x | — | 同为 cuBLAS |
+| layer_norm 8192×4096 fw | 1.07x | eager | 小形状 0.90x 待调 |
+| softmax 4096² | ~1.00x | eager | |
+| pw→sum(dim)*3+1 单kernel | **1.28x** | inductor | M5e epilogue 胜 |
+| full-sum sigmoid 链 | **1.07x** | inductor | split+finalize 循环化后反超 |
+| pw tanh/exp 链 | 0.86x | inductor | 差在向量化提示 |
+| sum full 16M | 0.28x | eager | L2 命中微场景+两launch开销 |
+| argmax dim=-1 | 0.93x | eager | warp-per-row 方案待做 |
+
+本轮改动:CANDIDATE_CONFIGS 扩至7档(含2048);_DIM 候选加小X大R四档;
+split finalize 改 FBLOCK≤2048 分块循环(16K 向量寄存器溢出修复);
+NaN 哨兵(1e38)替代二次 chnan 归约;argmax 广播输入门槛移除(逐输入偏移已覆盖);
+pick_config 决策键去掉 role 前缀与查询端对齐。
+
+**已知测量噪声**:对方 agent 的并行 nvcc/gcc 会拖慢一切短内核(连 torch 自身
+数值都漂 2x),基准必须在编译静默窗口跑。下一步路线(按杠杆排序):
+1. 整除免掩码发射(xnumel%XBLOCK==0 时去 xmask/rmask,inductor 同款),
+   预期惠及全部 pw 链/归约;
+2. argmax 改 warp-per-row 形态 + num_stages 扫描;
+3. sum-full 合一(atomic 或 last-block-done 标志),消 finalize launch;
+4. tl.max_contiguous/multiple_of 对齐提示。
+
+## 编译器热路径优化(2026-08-26 深夜续):调用指纹记忆化
+
+- cProfile 实测(2 万次稳态编译调用):`_quick_input_signature` 系占 40% 剖析
+  时间(每参数 shape/dtype/device 读 + 嵌套元组重建),门 evaluator 重放另计。
+- 落地:`_call_fingerprint`(张量 = id+_version+requires_grad,标量按值)→
+  命中则整体复用上次 (输入签名, 形状组件, 门组件),跳过全部元数据读与
+  条件子图重放。健全性:原地变异推 `_version` 必失效;提升清缓存同步清指纹
+  (键形状变了)。实测:门路径 27.1→24.0us/次;基线 31.4→30.2us。
+- **移交并行线的发现**:剩余大头在 `backends/stax.py.__call__ →
+  _eligible_inputs`(剖析 ~22us/次,all()+genexpr 每调用重查 autograd 资格)——
+  同款 id+version 记忆化可直接套用;该文件系 M5 WIP 未动。
+- 全库 1423 绿(余 3 失败仍为并行 M5 WIP:triton codegen 断言×1、CUDA zeros×2)。
+
+## stax 热路径记忆化(2026-08-26 收敛后)
+
+并行线 stax 收敛(+4/-1)后落地两处同款 (id,_version) 路由/绑定记忆化:
+- `_CpuFusedPointwiseLowering`:资格检查+autograd 路由按输入指纹缓存,
+  稳态跳过全部 shape/dtype/device/contiguous 探测;
+- `_NativeLowering._bind_inputs`:签名绑定+属性/常量拼装按指纹复用
+  (属性与常量进程稳定,用户输入由指纹覆盖)。
+- 实测(min-of-5):fused 无门 30.2→**19.4us**(-38%,两轮累计);
+  gated native ~25.6us(波动带内);eager mul 1.45us——剩余 ~18us 为
+  optimized→lowering→execute 三层 Python 派发结构成本,后续方向是
+  编译调用整体 C trampoline(对齐工厂族做法)。
+- 正确性:autograd 路由梯度对拍、原地变异版本失效、kwargs/形状回退全过。
+
+### M5c 训练态分段 VJP 落地(2026-08-26 上午)
+
+**多 kernel 训练图不再整体回退。** 原门 #5 把 any_grad 限制在单 pw 段;现
+改为按段局部 VJP 链:
+
+- **资格**:pw 段取逐元素 VJP 程序(既有 `_build_fused_gradient_graphs`);
+  sum/mean 的 pw+red 段复用同一机制——其 forward 程序本就以归约输入为
+  output_ref(`output_override=producer_new`),梯度程序即"给定归约输入
+  切量的前驱 VJP";切量经 reshape/expand 物化回 producer 形状(mean 再除
+  rnumel),对齐 torch 归约反向。epilogue、argmax/amax/max、段内广播仍回退
+  (M5f/M5d)。`_SegmentPlan` 扩展携带 program/constants/instructions/
+  output_ref/examples/needs_broadcast/tangent_plan/backward_launch。
+- **链式反向**:倒序扫描段;导出切量入该段 backward kernel,产出按
+  extern_sources 分流到 placeholder 桶与上游段桶并**累加**(扇出求和);
+  返回按 placeholder 序对齐(None 表无贡献)。入口切量按末段形状归一
+  (`_normalize_pointwise_grad_output`)。修复 `compiled()` 训练分支只看
+  单段 `backward_launch` 导致多段静默走推理路径丢梯度的接线缺口。
+- **顺手修**:functional.expand 给 C 方法传关键字 `size=` 报 TypeError
+  (_tensor.py 包装层改位置参数 + implicit 关键字透传;functional 调用点
+  同步)。
+- **测试**:新增 test_stax_segment_vjp.py——本地以假 launch 执行真数学验证
+  链式接线/切量展开/扇出累加/不可训归约回退(amax);GPU 门控 parity 在
+  RTX 4090 D 实测通过((x*w).relu().sum()+sigmoid(y*w).sum() 三段图,
+  forward+三输入梯度对拍 eager)。
+- **远端协作记录**:远端唯一树 /tmp/TensorPlay 曾出现 build/ 与 buildcuda/
+  并发链接写坏 libtpx(file too short),按 AGENTS.md 清理后由单方低并行
+  度重建;tar 同步保留源码 mtime 会早于远端既有 .o 致 ninja 漏编(表现为
+  新符号未导出),需 touch 强制全量。
+- 遗留登记(并行活跃线,未触碰):①fx_passes split-reduction 发射形态
+  变更后 test_sum_epilogue_detection_and_source 断言过期;②Engine 梯度
+  物化(Engine.cpp:425)对 dlpack 导入张量的 mm 反向把设备提示误标 CUDA
+  ("Kernel not found for op: zeros on backend: CUDA",test_op_parity
+  linear/conv2d 连带);③test_random/gemm_torch_parity 的 [cuda] 参数化
+  用例与 NCCL/dataloader 远端环境项。
+
+## L5-PERF 轮二(2026-08-26 续):整除免掩码落地
+
+- 发射器新增 divisible fast path:fixed_config 下 numel%XBLOCK==0(及 dims 的
+  rnumel%RBLOCK==0)时剥离 xmask/rmask/m2 与 load/store 谓词,pw/dims/split/
+  single 四路全覆盖;
+- argmax NaN 哨兵块重写为 div_r 感知版(exact tile 时省掉 last 重掩码);
+- 结构测试全面改断言到新规范形态(unmasked load/store);
+- bench 改 min-of-iters 抗调度噪声(实测跨轮 30% 抖动源于并行编译负载)。
+
+稳定基线(min,iters=60):GEMM≥1.01x,LN大 1.06x,softmax 0.99,
+**epilogue链 1.29x,sigmoid全和链 1.02x**,pw链 0.85x,sum-full 0.27x,
+argmax 0.96x;geomean 0.90,胜率 6/11。
+
+下一杠杆(按预期收益):① sum-full grid-stride persistent 形态
+(消 16K 程序调度税,目标贴 L2 带宽);② tl.max_contiguous/multiple_of
+对齐提示促向量化;③ argmax RBLOCK=4096 单迭代档位;④ LN 小形状 config。
+
+## 编译调用 C trampoline(2026-08-26 深夜二段)
+
+- **落地**:Stax.cpp 新增 `install_call_trampoline`(仿工厂族 capsule 模式):
+  METH_FASTCALL|KEYWORDS,稳态快路径 = 同对象+_version 未变+无梯度计划时,
+  C 层拼装输入向量直调 `Graph.execute`(零 Python 帧);任何偏差(新对象/
+  原地变异/kwargs/需 autograd)vectorcall 回 Python lowering 并刷新指纹。
+  `graph.execute` 返回 py::list——单输出按 Python 契约解包为 Tensor,
+  多输出转 tuple(初版只认 tuple 致类型错配,已修)。
+- **api 侧**:缓存命中优先走 `lowering._fast_call(*args)`;
+  `_attach_fast_call` 软失败静默降级(旧扩展无安装器即纯 Python 路径)。
+- **事故与修复**:①METH_FASTCALL 漏 KEYWORDS 位→调用约定不匹配 SIGSEGV;
+  ②fused 类在 _gradient_plan 赋值前 attach;③共享树冲突:api.py 记忆化块
+  被并行写入覆盖,已重放(状态变量幸存,仅热路径条件块重写);
+  ④一次与 -j16 构建撞车致 libp10 截断,按纪律全停后由对方 -j3 收敛。
+- **实测(min-of-5)**:no-gate 端到端 31.4→**5.0us**(6.3x);gated native
+  27→13.0us;eager mul 1.55us,编译开销降至 eager 的 ~3.2x。
+  trampoline 直调 2.41us vs Python 全链 26.2us(10.8x)。
+- 遗留:gated native 缓存值为绑定方法而非 lowering 对象,fast attach 未覆盖
+  该形态(本轮收益来自其内部 memo);后续把 attach 提升到 backend 返回点。
+
+## L5-PERF 轮三(2026-08-26 深夜):三项原生优化落地
+
+① **split 持久化 grid-stride**(新形态):fixed_config 三元组 (XBLOCK,warps,
+NPROG) 时主核改为固定 NPROG 程序跨步扫全量、向量累加、每程序仅写一个
+partial;finalize(循环分块版)合并 NPROG≤592 个 partial。消 16K 程序调度税。
+_SPLIT_CANDIDATES 混编 classic/persistent 两族交由 autotune 实测择优,
+bench 改 best-of-3×min 抗共享机器噪声。
+**实测:full-sum sigmoid 链 vs inductor 1.02x → 1.52x**(66us vs 101us)。
+
+② **tl.multiple_of 对齐提示**:xoffset≡0(mod XBLOCK) 全局标注,AxisInfo
+据此证明连续性解锁向量化 ld/st(inductor 同款注解)。
+
+③ argmax RBLOCK=4096 档位实测为 triton2.0 编译炸弹([8,4096] 巨 tile 分钟级
+编译),已裁撤,上限保持 2048;LN 前向自适应线程(ln_threads_for:N<512→64,
+<2048→128,否则 256;block_reduce 按 blockDim 自适配,安全)。
+
+决策缓存加固:_CODEGEN_VERSION 升级使旧决策全量失效;_autotune_split_program
+独立持久化键(|split| 盐)。远端套件 66 passed+1 xfail 全绿。
+
+遗留(下轮):pw 链对 inductor 仍 0.85-0.91x(需 evict policy/缓存修饰符与
+8-wide 强制向量化);argmax 与 torch 差距收敛到 ~3x 以内但未持平(warp 级
+shuffle 归约形态待做);所有结论须在编译静默窗口复核。
+
+## L5-PERF 轮四(2026-08-27): evict/.cg + packed argmax + 静默窗口复核
+
+### pw 链内核 parity 确认
+- profiler 拆解:`tp_stax` 与 `torch_compile`(inductor) 纯内核 GPU 时间
+  **145.0 vs 145.3 µs, 完全持平**。0.90x 差距全在 Python 启动器:TP
+  wrapper 闭包链(~19 µs/call) vs inductor 静态 launcher(~0)。
+- 改动:① `_load_lines` 参考布局无掩码加载加 `cache_modifier='.cg'`(Inductor
+  skip-L1 同款);② dims r-loop 与 split-persistent 内循环加载加
+  `eviction_policy='evict_first'`;③ 固定配置 launch 注入 literal grid +
+  `XBLOCK`/`num_warps` constexpr kwarg(消除 meta 解析税)。
+- 实测(shape 4096×4096, warmup=30, iters=200,min-of-window):
+  - pw gelu-ish tanh/exp chain: **0.90x**(vs inductor 0.162ms)
+  - epilogue chain sum(dim=1)*3+1: **1.47x**
+  - full-sum sigmoid: **1.44x**
+  - sum full 16M: 0.37x(噪声,需独占机器复核)
+
+### 原生 argmax packed warp-shuffle
+- `CUDAReduce.cuh` 新增 `PackedArgMaxOps`:将(float value, int64 index)
+  打包为单个 u64 `[key(32)|~index(32)]`,warp shuffle 层只做一次整数
+  max(5次 shuffles 替代原来 10次 + 分支 comparator)。IEEE 单调编码
+  含 NaN 归一化(+inf > finite,NaN 最高,首现 tie-break)。
+- `ReductionKernels.cu` argmax_same_dtype:float-family(num_inputs ≤ INT32_MAX)
+  自动走 packed 路径,half/BFloat16 通过 float 提升兼容。
+- 测试:`test/test_cuda_reductions.py` 8 例全绿(含 NaN 首现、±0、
+  ±inf、tie、4096-long 行 vec4 跨路径)。
+
+### 决策缓存盐
+- `stax_autotune.decision_key` 加入 `TUNING_VERSION="t7-evict8w"`,
+  消除 codegen 升级后旧决策长驻问题;CANDIDATE_CONFIGS 新增 (2048,4)
+  16-elem/thread 探子。
+
+### 遗留
+- pw 链仍 0.90x:核心瓶颈是 TP `compiled()` 闭包链 + triton JITFunction
+  每调用 dispatch(~19µs),inductor 静态 launcher 走 `c_wrapper` 直连。
+  需要 Inductor 同款 StaticTritonCompileResult 路径复现,范围超出本轮。
+- sum full / argmax 读数仍需独占机器复核。
+
+### 静默窗口复核结果(2026-08-28 cc RTX 4090 D)
+- 测试套件:`test_triton_reduction + test_stax_autotune + test_cuda_reductions`
+  **65 passed, 1 xfailed**(triton autotune 共享机器偶发,属已知噪声)。
+- argmax packed parity vs torch eager(shape 4096×4096 last-dim):
+  - 基本、tie(all-same)、NaN-first、±inf edge 全部 **match**。
+  - bench(tp min-of-200 vs torch min-of-200): tp=0.02µs torch=0.03µs
+    ratio=1.03x。**注意**:此为 kernel launch 级测量,实际 4096×4096
+    计算时间在 µs 量级,独占机器复核后才能给出有意义的速度比。
+- sum-full 16M 噪声读数 0.37x 未复核(共享机器仍有其他进程占用)。
+- pw 链 end-to-end 超越 inductor 仍需静态 launcher 路径复现,本轮未达成。

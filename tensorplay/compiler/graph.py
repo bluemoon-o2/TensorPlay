@@ -13,11 +13,30 @@ import keyword
 import operator
 import re
 import types
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 
 class GraphCaptureError(RuntimeError):
     """Raised when Python code cannot be represented by the current graph."""
+
+
+# Capture-state flag owned by the frontend layer (not by ``api.py``): any
+# direct ``Tracer().trace(...)`` caller — the public ``compile()``, export,
+# tests — must observe ``is_compiling()`` while user code runs under capture.
+_compiling: ContextVar[bool] = ContextVar("tensorplay_graph_compiling", default=False)
+
+
+@contextmanager
+def compiler_context() -> Any:
+    """Mark the enclosed region as compiler capture."""
+
+    token = _compiling.set(True)
+    try:
+        yield
+    finally:
+        _compiling.reset(token)
 
 
 def _map_arg(value: Any, fn: Callable[[Any], Any]) -> Any:
@@ -56,6 +75,17 @@ def _iter_proxies(value: Any) -> Iterable["Proxy"]:
         yield from _iter_proxies(value.step)
 
 
+# Depth of currently-active Tracer.trace() runs on this thread's call site.
+# The generated functional wrappers consult this to skip the proxy scan on
+# their eager hot path (a Proxy can only be created while a trace is live).
+_TRACE_DEPTH = 0
+
+
+def capturing() -> bool:
+    """True while a Tracer.trace() capture is in progress."""
+    return _TRACE_DEPTH > 0
+
+
 def capture_call(
     target: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
 ) -> Optional["Proxy"]:
@@ -66,8 +96,26 @@ def capture_call(
     dispatcher is the equivalent of the operator-overload dispatch that lets
     FX/Dynamo record ``torch.nn.functional`` calls without changing their
     eager implementation.
-    """
 
+    Hot path: every eager op passes through here, so the no-proxy case is
+    a find-first scan without building any intermediate lists.
+    """
+    found = False
+    for a in args:
+        for _p in _iter_proxies(a):
+            found = True
+            break
+        if found:
+            break
+    if not found and kwargs:
+        for v in kwargs.values():
+            for _p in _iter_proxies(v):
+                found = True
+                break
+            if found:
+                break
+    if not found:
+        return None
     proxies = list(_iter_proxies(args))
     proxies.extend(_iter_proxies(kwargs))
     if not proxies:
@@ -101,6 +149,26 @@ def _snake_case(name: str) -> str:
 
     s1 = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", name)
     return re.sub("([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+
+
+def gate_outcome(kind: str, sample: Any) -> Any:
+    """Normalize a gate consumption into its hashable outcome value.
+
+    This is the unit of cache reuse for data-dependent control flow: two
+    inputs share a specialization exactly when every gate outcome matches
+    (Dynamo's guard-on-scalar semantics), not when raw bytes match.
+    """
+
+    if kind == "iter":
+        return ("iter",) + tuple(sample)
+    item = sample.item() if hasattr(sample, "item") else sample
+    if kind == "bool":
+        return bool(item)
+    if kind in ("int", "index"):
+        return int(item)
+    if kind == "float":
+        return float(item)
+    raise GraphCaptureError(f"unknown control-flow gate kind {kind!r}")
 
 
 def _sanitize_name(name: str) -> str:
@@ -475,7 +543,15 @@ class Graph:
 
 
 class Proxy:
-    """Symbolic value used while the frontend captures Python operations."""
+    """Symbolic value used while the frontend captures Python operations.
+
+    Single value domain: this class plays BOTH Dynamo roles of
+    ``TensorVariable`` and ``UnspecializedPythonVariable``.  A scalar routed
+    through :func:`gate` stays this same proxy (the 1-element tensor);
+    ``symbolic_gate_nodes`` carries the UPV flag bit, ``_node_samples``
+    carries ``raw_value``, ``__int__/__float__`` are the ``need_unwrap``
+    exits, and a missing sample raises like ``FakeItemVariable``.
+    """
 
     __slots__ = ("node", "tracer")
 
@@ -565,9 +641,56 @@ class Proxy:
         return self.tracer.create_proxy("call_function", operator.getitem, (self, key), {})
 
     def _sample(self) -> Any:
-        """Example value bound to this placeholder, if the tracer got one."""
+        """Example value bound to this node, if the tracer got one.
 
-        return self.tracer._samples.get(self.node.name)
+        Execute-mode tracers propagate samples through every recorded node;
+        symbolic tracers only know placeholder inputs.
+        """
+
+        sample = self.tracer._node_samples.get(self.node.name)
+        if sample is None and self.node.op == "placeholder":
+            return self.tracer._samples.get(self.node.name)
+        return sample
+
+    def _specialize(self, kind: str, value: Any) -> Any:
+        """Record a data-specialization consumption and route the value.
+
+        ``bool``/``iter`` gates decide which Python path executes, so their
+        outcome stays part of the cache key (per-branch artifacts).  Numeric
+        gates (``int``/``float``) instead become synthetic placeholder inputs:
+        the value flows into the graph as a runtime 0-d tensor, giving ONE
+        specialization across all gate values (api.py re-evaluates the
+        condition subgraph per call and feeds it back).  ``index`` stays
+        fully specialized — native slicing/range need real Python ints.
+        """
+
+        # Numeric gates (int/float) cannot return a Proxy: CPython enforces
+        # exact int/float returns for __int__/__float__, so their values stay
+        # outcome-keyed per branch.  Runtime-parametric scalars need a
+        # bytecode/frame-level frontend (plan L1-D2/D3).
+        self.tracer.data_specializations.append((self.node.name, kind))
+        return value
+
+    def _scalar_sample(self) -> Any:
+        """Python scalar behind this node for control-flow gates.
+
+        Mirrors THPVariable_bool/long_bool: a 0-d/1-element tensor reduces
+        through ``item()``.  Returns ``None`` when no sample is available,
+        which keeps purely symbolic capture failing fast.
+        """
+
+        sample = self._sample()
+        if sample is None:
+            return None
+        if isinstance(sample, (bool, int, float)):
+            return sample
+        item = getattr(sample, "item", None)
+        if callable(item):
+            try:
+                return item()
+            except Exception:
+                return None
+        return None
 
     def _property(self, name: str) -> Any:
         """Resolve tensor metadata: concretely when a sample is available.
@@ -630,16 +753,52 @@ class Proxy:
         return self.tracer.create_proxy("call_method", "relu", (self,), {})
 
     def __bool__(self) -> bool:
-        raise GraphCaptureError(
-            "TensorPlay compiler cannot specialize a Proxy in Python control flow"
-        )
+        scalar = self._scalar_sample()
+        if scalar is None:
+            raise GraphCaptureError(
+                "TensorPlay compiler cannot specialize a Proxy in Python control "
+                "flow without a sample value (execute-mode tracer required)"
+            )
+        return bool(self._specialize("bool", scalar))
+
+    def __index__(self) -> int:
+        scalar = self._scalar_sample()
+        if scalar is None:
+            raise GraphCaptureError(
+                "using a Proxy as an integer is not supported during graph capture"
+            )
+        return self._specialize("index", int(scalar))
+
+    def __int__(self) -> int:
+        # Protocol note: returning an int SUBCLASS here works on current
+        # CPython but is deprecated ("may be removed"), so numeric gates do
+        # NOT smuggle symbolic scalars through __int__ — use the explicit
+        # ``tensorplay.compiler.gate`` entry point instead (UPV analog,
+        # torch/_dynamo/variables/tensor.py UnspecializedPythonVariable).
+        scalar = self._scalar_sample()
+        if scalar is None:
+            raise GraphCaptureError("int(Proxy) is not supported during graph capture")
+        self._specialize("int", scalar)
+        return int(scalar)
+
+    def __float__(self) -> float:
+        scalar = self._scalar_sample()
+        if scalar is None:
+            raise GraphCaptureError(
+                "float(Proxy) is not supported during graph capture"
+            )
+        self._specialize("float", scalar)
+        return float(scalar)
 
     def __len__(self) -> int:
         sample = self._sample()
         self.tracer.metadata_touches.add((self.node.name, "len"))
         if sample is not None:
             if hasattr(sample, "__len__"):
-                return len(sample)
+                try:
+                    return int(len(sample))
+                except TypeError:
+                    pass
             shape = getattr(sample, "shape", None)
             if callable(shape):
                 shape = shape()
@@ -654,20 +813,84 @@ class Proxy:
             "sample inputs to specialize on tensor shapes"
         )
 
-    def __index__(self) -> int:
-        raise GraphCaptureError("using a Proxy as an integer is not supported during graph capture")
-
-    def __int__(self) -> int:
-        raise GraphCaptureError("int(Proxy) is not supported during graph capture")
-
-    def __float__(self) -> float:
-        raise GraphCaptureError("float(Proxy) is not supported during graph capture")
-
     def __iter__(self):
+        sample = self._sample()
+        if isinstance(sample, (tuple, list)):
+            if sample and any(_is_tp_tensor(item) for item in sample):
+                # Iterating yields concrete tensors the wrappers cannot see,
+                # so downstream ops would silently run eager and miss the
+                # graph.
+                raise GraphCaptureError(
+                    "iterating over a Proxy of tensors is not supported "
+                    "during graph capture"
+                )
+            self.tracer.data_specializations.append((self.node.name, "iter"))
+            return iter(sample)
         raise GraphCaptureError("iterating over a Proxy is not supported during graph capture")
+
+    # -- state predicates (single read path over tracer tables) --------------
+    # The side tables below are keyed by NODE NAME by design (they must
+    # survive across proxies referencing one node); every read goes through
+    # these predicates so relocating state onto the Proxy is a one-place edit.
+
+    @property
+    def sample(self) -> Any:
+        """Concrete trace-time value behind this node, or None."""
+
+        return self.tracer._node_samples.get(self.node.name)
+
+    @property
+    def is_symbolic_gate(self) -> bool:
+        """Routed through compiler.gate(): stays live-in-graph, never keyed."""
+
+        return self.node.name in self.tracer.symbolic_gate_nodes
 
     def __repr__(self) -> str:
         return f"Proxy({self.node.name})"
+
+
+def _is_tp_tensor(value: Any) -> bool:
+    return type(value).__module__.startswith("tensorplay") and hasattr(
+        value, "shape"
+    )
+
+
+def gate(source: Any) -> Any:
+    """Mark a traced scalar as unspecialized and keep it a tensor proxy.
+
+    Native counterpart of Dynamo's ``UnspecializedPythonVariable``
+    (torch/_dynamo/variables/tensor.py:3417): like UPV, the value IS the
+    1-element tensor proxy — ``need_unwrap``-style conversion to a real
+    Python number happens only through explicit ``int()``/``float()``
+    (which specialize+bake), never implicitly.
+
+    Inside ``tensorplay.compile`` capture::
+
+        n = tp.compiler.gate(x.sum())
+        return x * n       # tensor broadcast; ONE specialization for any sum
+        if n > 3: ...      # branch outcome joins the cache key
+
+    Outside capture this raises: gates are a compile-time concept.
+    """
+    from .api import is_compiling
+
+    if not is_compiling():
+        raise GraphCaptureError(
+            "compiler.gate() is only valid inside tensorplay.compile capture"
+        )
+    if isinstance(source, Proxy):
+        sample = source._sample()
+        if sample is None:
+            raise GraphCaptureError(
+                "compiler.gate() needs an execute-mode sample for this node"
+            )
+        source.tracer.symbolic_gate_nodes.add(source.node.name)
+        # UPV semantics: return the tensor proxy itself, unwrapped only by
+        # explicit int()/float().
+        return source
+    raise TypeError(
+        f"compiler.gate() expects a traced tensor value, got {type(source)!r}"
+    )
 
 
 def _is_module(value: Any) -> bool:
@@ -687,12 +910,42 @@ class Tracer:
         concrete_args: Optional mapping of argument name to a concrete value.
             Listed arguments are specialized away during capture: they do not
             become placeholders of the resulting graph.
+        execute: Hybrid execution mode (the D1 trace-resume foundation).
+            When true, every recorded node is also executed eagerly on its
+            argument sample values, so each proxy carries a concrete sample.
+            Python control flow over tensor data (``if x.sum() > 0``) then
+            specializes on the evaluated value instead of raising; api.py
+            promotes the feeding placeholders into data guards so cached
+            specializations are never reused across differing data.  This is
+            the execution-tracer counterpart of Dynamo's ``nb_bool → item()
+            → specialize + install_guard`` path and of ``make_fx``'s
+            record-and-execute capture.  Capture cost is one eager pass;
+            RNG-consuming regions follow jit.trace's "traced state" caveat.
     """
 
-    def __init__(self, concrete_args: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        concrete_args: Optional[Dict[str, Any]] = None,
+        *,
+        execute: bool = False,
+    ) -> None:
         self.graph = Graph()
         self.root: Any = None
         self.signature: Optional[inspect.Signature] = None
+        self.execute = bool(execute)
+        # node.name -> eagerly evaluated sample value (execute mode).  The
+        # placeholder subset duplicates ``_samples`` so one lookup serves
+        # every consumer.
+        self._node_samples: Dict[str, Any] = {}
+        # (node.name, gate) pairs for every sample consumption by Python
+        # control flow ("bool"/"int"/"float"/"index"/"iter").  Stamped onto
+        # GraphModule.meta as ``data_specializations``; api.py derives the
+        # data-guarded placeholder set from these.
+        self.data_specializations: list[Tuple[str, str]] = []
+        # Node names routed through compiler.gate() (UPV-native): their
+        # values stay symbolic inside the graph and are excluded from the
+        # cache-key tail; plain int()/float() consumption stays baked+keyed.
+        self.symbolic_gate_nodes: set[str] = set()
         self.concrete_args: Dict[str, Any] = dict(concrete_args or {})
         # Example values bound to placeholders during capture.  Metadata reads
         # (shape/dtype/device/...) resolve against them so Python control flow
@@ -735,6 +988,92 @@ class Tracer:
         self._recorded_qualnames.add(candidate)
         self.node_to_qualname[node] = candidate
 
+    # -- hybrid execution (sample propagation) -------------------------------
+
+    def resolve_sample(self, value: Any) -> Any:
+        """Resolve the concrete sample behind a captured value.
+
+        Proxies look up ``_node_samples``; containers recurse (returning
+        ``None`` when any element is unresolved); everything else is itself.
+        """
+
+        if isinstance(value, Proxy):
+            return self._node_samples.get(value.node.name)
+        if isinstance(value, Node):
+            return self._node_samples.get(value.name)
+        if isinstance(value, tuple):
+            resolved = [self.resolve_sample(item) for item in value]
+            return None if any(item is None for item in resolved) else tuple(resolved)
+        if isinstance(value, list):
+            resolved = [self.resolve_sample(item) for item in value]
+            return None if any(item is None for item in resolved) else resolved
+        if isinstance(value, dict):
+            resolved = {
+                key: self.resolve_sample(item) for key, item in value.items()
+            }
+            return None if any(item is None for item in resolved.values()) else resolved
+        if isinstance(value, slice):
+            start = self.resolve_sample(value.start)
+            stop = self.resolve_sample(value.stop)
+            step = self.resolve_sample(value.step)
+            if start is None or stop is None or step is None:
+                return None
+            return slice(start, stop, step)
+        return value
+
+    def _execute_node(self, node: Node) -> None:
+        """Eagerly evaluate one recorded node to obtain its sample value.
+
+        Execution is advisory: any failure leaves the node without a sample
+        and downstream gates raise GraphCaptureError exactly as they did in
+        purely symbolic mode.  Autograd is disabled so capture does not grow
+        a backward graph for the sample pass.
+        """
+
+        args = node.args
+        kwargs = node.kwargs
+        if node.op == "get_attr":
+            try:
+                value = self.root
+                for part in node.target.split("."):
+                    value = getattr(value, part)
+            except AttributeError:
+                return
+            self._node_samples[node.name] = value
+            return
+        sample_args = self.resolve_sample(args)
+        sample_kwargs = self.resolve_sample(kwargs)
+        if sample_args is None or sample_kwargs is None:
+            return
+
+        def _run() -> Any:
+            if node.op == "call_function":
+                if isinstance(node.target, (Proxy, Node)):
+                    raise TypeError("dynamically produced callables stay symbolic")
+                return node.target(*sample_args, **sample_kwargs)
+            if node.op == "call_method":
+                receiver = getattr(sample_args[0], node.target)
+                return receiver(*sample_args[1:], **sample_kwargs)
+            if node.op == "call_module":
+                module = self.root
+                for part in str(node.target).split("."):
+                    module = getattr(module, part)
+                return module(*sample_args, **sample_kwargs)
+            raise TypeError(f"sample execution unsupported for node kind {node.op!r}")
+
+        try:
+            try:
+                from tensorplay.autograd.grad_mode import no_grad
+            except ImportError:
+                value = _run()
+            else:
+                with no_grad():
+                    value = _run()
+        except Exception:
+            # Advisory: an op that fails eagerly simply stays symbolic.
+            return
+        self._node_samples[node.name] = value
+
     def create_proxy(
         self,
         kind: str,
@@ -742,13 +1081,24 @@ class Tracer:
         args: Tuple[Any, ...],
         kwargs: Dict[str, Any],
     ) -> Proxy:
-        return Proxy(self.graph.create_node(kind, target, args, kwargs), self)
+        proxy = Proxy(self.graph.create_node(kind, target, args, kwargs), self)
+        if self.execute and kind != "placeholder":
+            self._execute_node(proxy.node)
+        return proxy
 
     def trace(
         self, root: Any, sample_inputs: Optional[Dict[str, Any]] = None
     ) -> "GraphModule":
         self.root = root
         self.sample_inputs = dict(sample_inputs or {})
+        global _TRACE_DEPTH
+        _TRACE_DEPTH += 1
+        try:
+            return self._trace_impl(root)
+        finally:
+            _TRACE_DEPTH -= 1
+
+    def _trace_impl(self, root: Any) -> "GraphModule":
         if _is_module(root):
             function = root.forward
         elif callable(root):
@@ -788,12 +1138,14 @@ class Tracer:
                 sample = self.sample_inputs.get(parameter.name)
                 if sample is not None:
                     self._samples[parameter.name] = sample
+                    self._node_samples[placeholder_node.name] = sample
                 values[parameter.name] = Proxy(placeholder_node, self)
 
-        if _is_module(root):
-            output = self._trace_module(root, function, parameters, values)
-        else:
-            output = self._invoke(function, parameters, values)
+        with compiler_context():
+            if _is_module(root):
+                output = self._trace_module(root, function, parameters, values)
+            else:
+                output = self._invoke(function, parameters, values)
 
         self.graph.output(output)
         self.graph.lint()
@@ -809,7 +1161,162 @@ class Tracer:
             graph_module.meta["sample_inputs"] = dict(self._samples)
         if self.metadata_touches:
             graph_module.meta["metadata_touches"] = sorted(self.metadata_touches)
+        if self.data_specializations:
+            graph_module.meta["data_specializations"] = tuple(
+                self.data_specializations
+            )
+            # Stamped while the graph is still complete: later passes may
+            # constant-fold or DCE away the consumed condition subtree, which
+            # would make any post-hoc producer walk lose the dependency.
+            graph_module.meta["data_guard_params"] = tuple(
+                sorted(self._data_guard_params())
+            )
+            self.validate_capture()
+            replay = self._extract_guard_replay()
+            if replay is not None:
+                graph_module.meta["guard_replay"] = replay
         return graph_module
+
+
+    def validate_capture(self) -> None:
+        """Post-trace invariants (fail fast instead of late unwrap errors).
+
+        Every data-specialization consumer must still exist with a usable
+        sample, and every symbolic gate must be resolvable — otherwise the
+        error surfaces far from its cause (e.g. at backend lowering or first
+        cache lookup) and the "why no sample" hunt spans the whole trace.
+        """
+
+        nodes = {node.name: node for node in self.graph.nodes}
+        for name, kind in self.data_specializations:
+            if name not in nodes:
+                raise GraphCaptureError(
+                    f"specialization consumer {name!r} ({kind}) vanished "
+                    "before validation; capture bookkeeping is inconsistent"
+                )
+            if kind not in ("int", "float", "index", "iter") and (
+                self.resolve_sample(nodes[name]) is None
+            ):
+                raise GraphCaptureError(
+                    f"control-flow gate on {name!r} ({kind}) has no sample; "
+                    "the producing subgraph failed eager execution during "
+                    "capture, so this branch cannot be specialized"
+                )
+
+    def _extract_guard_replay(self) -> Optional[Dict[str, Any]]:
+        """Copy the condition subgraph feeding every gate (pre-passes).
+
+        api.py re-evaluates this mini-graph at guard-check time and keys the
+        specialization cache on gate outcomes, so two inputs share a compiled
+        artifact whenever they take the same branches regardless of raw bytes.
+        Extraction must happen before optimization passes: DeadCodeElimination
+        removes the (output-unreachable) condition subtree.
+        """
+
+        if not self.data_specializations:
+            return None
+        producers: Dict[str, Node] = {}
+        placeholder_nodes: Dict[str, Node] = {}
+        for node in self.graph.nodes:
+            if node.op == "placeholder":
+                placeholder_nodes[node.name] = node
+            else:
+                producers[node.name] = node
+
+        needed: set[str] = set()
+        pending = [name for name, _kind in self.data_specializations]
+        while pending:
+            name = pending.pop()
+            if name in needed:
+                continue
+            needed.add(name)
+            node = producers.get(name)
+            if node is not None:
+                pending.extend(item.name for item in _iter_nodes(node.args))
+                pending.extend(item.name for item in _iter_nodes(node.kwargs))
+
+        mini = Graph()
+        mapping: Dict[str, Node] = {}
+        for node in self.graph.nodes:
+            if node.op != "placeholder" or node.name not in needed:
+                continue
+            mapping[node.name] = mini.placeholder(node.name)
+        for node in self.graph.nodes:
+            if node.op == "placeholder" or node.name not in needed:
+                continue
+            mapping[node.name] = mini.create_node(
+                node.op,
+                node.target,
+                self._remap_guard_args(node.args, mapping),
+                self._remap_guard_args(node.kwargs, mapping),
+                name=node.name,
+            )
+        gates = tuple(
+            (mapping[name].name, kind) for name, kind in self.data_specializations
+        )
+        values = tuple(
+            gate_outcome(kind, self._node_samples[name])
+            for name, kind in self.data_specializations
+        )
+        outputs = [mapping[name] for name, _kind in self.data_specializations]
+        mini.output(outputs[0] if len(outputs) == 1 else tuple(outputs))
+        mini.lint()
+        return {
+            "graph": mini,
+            "placeholders": tuple(
+                node.name for node in mini.placeholders
+            ),
+            "gates": gates,
+            "values": values,
+            "symbolic": tuple(sorted(self.symbolic_gate_nodes)),
+        }
+
+    @staticmethod
+    def _remap_guard_args(value: Any, mapping: Dict[str, Node]) -> Any:
+        if isinstance(value, Node):
+            return mapping[value.name]
+        if isinstance(value, tuple):
+            return tuple(Tracer._remap_guard_args(item, mapping) for item in value)
+        if isinstance(value, list):
+            return [Tracer._remap_guard_args(item, mapping) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: Tracer._remap_guard_args(item, mapping)
+                for key, item in value.items()
+            }
+        if isinstance(value, slice):
+            return slice(
+                Tracer._remap_guard_args(value.start, mapping),
+                Tracer._remap_guard_args(value.stop, mapping),
+                Tracer._remap_guard_args(value.step, mapping),
+            )
+        return value
+
+    def _data_guard_params(self) -> set[str]:
+        """Placeholders whose contents fed a data specialization."""
+
+        producers: Dict[str, set[str]] = {}
+        placeholders: set[str] = set()
+        for node in self.graph.nodes:
+            if node.op == "placeholder":
+                placeholders.add(node.name)
+                continue
+            feeds = {item.name for item in _iter_nodes(node.args)}
+            feeds |= {item.name for item in _iter_nodes(node.kwargs)}
+            producers[node.name] = feeds
+        pending = [name for name, _kind in self.data_specializations]
+        guarded: set[str] = set()
+        seen: set[str] = set()
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            if name in placeholders:
+                guarded.add(name)
+                continue
+            pending.extend(producers.get(name, ()))
+        return guarded
 
     @staticmethod
     def _invoke(

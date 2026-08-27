@@ -5,18 +5,17 @@ Behavioral alignment with ``torch.utils.data`` as vendored in
 _utils/collate.py, dataloader.py). Same public names, same validation
 order, same error messages; built on ``tensorplay.Tensor``.
 
-Known deviations:
-- tensorplay's random ops (``randperm``/``randint``/``multinomial``) draw from
-  the process-global generator and cannot consume a ``tp.Generator``, so
-  samplers that receive a ``generator`` re-seed the global generator from
-  ``generator.initial_seed()``. Epochs with the same generator therefore repeat
-  the same sequence instead of advancing the generator state.
+The implementation also has native batch-fetch hooks for TensorPlay-backed
+datasets. They keep the public PyTorch ``__getitems__`` contract while allowing
+the default collate path to return a single indexed batch instead of creating
+one Python tensor view per sample.
 """
 
 from __future__ import annotations
 
 import bisect
 import copy
+import contextlib
 import itertools
 import math
 import multiprocessing
@@ -61,6 +60,27 @@ __all__ = [
 
 _T_co = TypeVar("_T_co", covariant=True)
 _T = TypeVar("_T")
+
+
+# A private sentinel used by dataset wrappers to say that their zero-copy
+# batch path cannot represent the requested batch.  The fetcher then falls back
+# to the public PyTorch ``__getitems__``/``__getitem__`` contract.
+_FAST_BATCH_UNAVAILABLE = object()
+
+
+def _make_batch_index(indices, tensor: Tensor) -> Tensor:
+    """Build an index tensor on the same device as ``tensor``.
+
+    Keep batch indices in an explicit int64 tensor so the dataset fast paths
+    use one ``index_select`` on both CPU and CUDA.  This avoids constructing a
+    Python tensor view for every sample even though Tensor now also supports
+    the public ``tensor[[...]]`` spelling.
+    """
+    if isinstance(indices, Tensor):
+        values = indices.tolist()
+    else:
+        values = [int(index) for index in indices]
+    return tp.tensor(values, dtype=tp.int64, device=tensor.device)
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +143,26 @@ class TensorDataset(Dataset[tuple[Tensor, ...]]):
         self.tensors = tensors
 
     def __getitem__(self, index):
+        if isinstance(index, list):
+            return tuple(
+                tp.index_select(tensor, 0, _make_batch_index(index, tensor))
+                for tensor in self.tensors
+            )
         return tuple(tensor[index] for tensor in self.tensors)
+
+    def _tp_get_batch(self, indices):
+        """Return the default-collated batch without per-row Python views."""
+        return [
+            tp.index_select(tensor, 0, _make_batch_index(indices, tensor))
+            for tensor in self.tensors
+        ]
+
+    def __getitems__(self, indices: list[int]):
+        # Keep the public torch contract (a list of samples).  DataLoader's
+        # default-collate path uses ``_tp_get_batch`` above to avoid rebuilding
+        # this list and stacking it a second time.
+        batch = self._tp_get_batch(indices)
+        return [tuple(tensor[i] for tensor in batch) for i in range(len(indices))]
 
     def __len__(self) -> int:
         return self.tensors[0].size(0)
@@ -212,6 +251,31 @@ class StackDataset(Dataset[_T]):
         tuple_batch: list[tuple] = [tuple(sample) for sample in list_batch]
         return tuple_batch
 
+    def _tp_get_batch(self, indices):
+        """Compose native batches from children when every child supports it."""
+        if isinstance(self.datasets, dict):
+            result = {}
+            for key, dataset in self.datasets.items():
+                getter = getattr(dataset, "_tp_get_batch", None)
+                if not callable(getter):
+                    return _FAST_BATCH_UNAVAILABLE
+                batch = getter(indices)
+                if batch is _FAST_BATCH_UNAVAILABLE:
+                    return _FAST_BATCH_UNAVAILABLE
+                result[key] = batch
+            return result
+
+        result = []
+        for dataset in self.datasets:
+            getter = getattr(dataset, "_tp_get_batch", None)
+            if not callable(getter):
+                return _FAST_BATCH_UNAVAILABLE
+            batch = getter(indices)
+            if batch is _FAST_BATCH_UNAVAILABLE:
+                return _FAST_BATCH_UNAVAILABLE
+            result.append(batch)
+        return result
+
     def __len__(self) -> int:
         return self._length
 
@@ -251,6 +315,10 @@ class ConcatDataset(Dataset[_T_co]):
         return self.cumulative_sizes[-1]
 
     def __getitem__(self, idx):
+        dataset_idx, sample_idx = self._resolve_index(idx)
+        return self.datasets[dataset_idx][sample_idx]
+
+    def _resolve_index(self, idx):
         if idx < 0:
             if -idx > len(self):
                 raise ValueError(
@@ -258,11 +326,67 @@ class ConcatDataset(Dataset[_T_co]):
                 )
             idx = len(self) + idx
         dataset_idx = bisect.bisect_right(self.cumulative_sizes, idx)
+        if dataset_idx >= len(self.datasets):
+            # Match the natural IndexError raised by the scalar path while
+            # giving the batch path a useful, deterministic failure.
+            raise IndexError("list index out of range")
         if dataset_idx == 0:
             sample_idx = idx
         else:
             sample_idx = idx - self.cumulative_sizes[dataset_idx - 1]
-        return self.datasets[dataset_idx][sample_idx]
+        return dataset_idx, sample_idx
+
+    def __getitems__(self, indices: list[int]):
+        """Fetch a batch while grouping requests by child dataset.
+
+        This preserves the order of the caller's indices, but lets child
+        datasets use their own batch-aware ``__getitems__`` implementation.
+        It removes a Python-level binary search and dispatch for every child
+        sample in the common concatenated-dataset case.
+        """
+        if not indices:
+            return []
+
+        grouped: dict[int, list[tuple[int, int]]] = {}
+        for output_position, index in enumerate(indices):
+            dataset_idx, sample_idx = self._resolve_index(index)
+            grouped.setdefault(dataset_idx, []).append((output_position, sample_idx))
+
+        result = [None] * len(indices)
+        for dataset_idx, positions in grouped.items():
+            child = self.datasets[dataset_idx]
+            child_indices = [sample_idx for _, sample_idx in positions]
+            getter = getattr(child, "__getitems__", None)
+            if callable(getter):
+                child_items = getter(child_indices)
+                if len(child_items) != len(child_indices):
+                    raise ValueError(
+                        "Nested dataset's output size mismatch."
+                        f" Expected {len(child_indices)}, got {len(child_items)}"
+                    )
+            else:
+                child_items = [child[index] for index in child_indices]
+            for (output_position, _), item in zip(positions, child_items, strict=True):
+                result[output_position] = item
+        return result
+
+    def _tp_get_batch(self, indices):
+        # A batch crossing a child boundary needs structure-aware merging.  The
+        # public __getitems__ path handles that case; keep the direct native
+        # path for the frequent single-child batch where it is unambiguous.
+        if not indices:
+            return _FAST_BATCH_UNAVAILABLE
+        dataset_idx, sample_idx = self._resolve_index(indices[0])
+        local_indices = [sample_idx]
+        for index in indices[1:]:
+            next_dataset_idx, next_sample_idx = self._resolve_index(index)
+            if next_dataset_idx != dataset_idx:
+                return _FAST_BATCH_UNAVAILABLE
+            local_indices.append(next_sample_idx)
+        getter = getattr(self.datasets[dataset_idx], "_tp_get_batch", None)
+        if not callable(getter):
+            return _FAST_BATCH_UNAVAILABLE
+        return getter(local_indices)
 
     @property
     def cummulative_sizes(self):
@@ -351,19 +475,61 @@ class Subset(Dataset[_T_co]):
         else:
             return [self.dataset[self.indices[idx]] for idx in indices]
 
+    def _tp_get_batch(self, indices):
+        # Never bypass a subclass' explicitly customized fetch contract.
+        if type(self) is not Subset:
+            return _FAST_BATCH_UNAVAILABLE
+        getter = getattr(self.dataset, "_tp_get_batch", None)
+        if not callable(getter):
+            return _FAST_BATCH_UNAVAILABLE
+        return getter([self.indices[idx] for idx in indices])
+
     def __len__(self) -> int:
         return len(self.indices)
 
 
-def _set_global_seed(generator: Optional["tp.Generator"]) -> None:
-    """Bridge a ``tp.Generator`` onto tensorplay's global-RNG ops.
+_GENERATOR_LOCK = threading.RLock()
 
-    tensorplay's random ops draw from the process-global generator and cannot
-    consume a ``Generator``. To honour a passed generator we re-seed the global
-    generator from ``generator.initial_seed()``.
+
+@contextlib.contextmanager
+def _use_generator(generator: Optional["tp.Generator"]):
+    """Run TensorPlay's global-generator kernels against ``generator``.
+
+    The native random operators currently consume the process-global CPU
+    generator.  Swapping its complete serialized state (and restoring it in a
+    ``finally`` block) gives DataLoader samplers the same semantics as torch's
+    explicit-generator APIs: the supplied generator advances, while the
+    process-global generator is left untouched.  A foreign generator object
+    is retained as a compatibility fallback and is seeded by ``initial_seed``
+    when its state tensor cannot be exchanged with TensorPlay.
     """
-    if generator is not None:
-        tp.manual_seed(generator.initial_seed())
+    if generator is None:
+        yield
+        return
+
+    with _GENERATOR_LOCK:
+        global_state = tp.get_rng_state()
+        try:
+            generator_state = generator.get_state()
+            if not isinstance(generator_state, Tensor):
+                raise TypeError("generator state is not a TensorPlay Tensor")
+            tp.set_rng_state(generator_state)
+        except (AttributeError, TypeError, RuntimeError):
+            # Keep the old best-effort behavior for foreign Generator-like
+            # objects.  Most callers use tp.Generator, for which the branch
+            # above is fully stateful.
+            tp.manual_seed(generator.initial_seed())
+            try:
+                yield
+            finally:
+                tp.set_rng_state(global_state)
+            return
+
+        try:
+            yield
+        finally:
+            generator.set_state(tp.get_rng_state())
+            tp.set_rng_state(global_state)
 
 
 def random_split(
@@ -411,8 +577,8 @@ def random_split(
             "Sum of input lengths does not equal the length of the input dataset!"
         )
 
-    _set_global_seed(generator)
-    indices = tp.randperm(sum(lengths)).tolist()
+    with _use_generator(generator):
+        indices = tp.randperm(sum(lengths)).tolist()
     return [
         Subset(dataset, indices[offset - length : offset])
         for offset, length in zip(itertools.accumulate(lengths), lengths, strict=True)
@@ -509,18 +675,25 @@ class RandomSampler(Sampler[int]):
             # Fresh random seed per epoch, drawn from the global generator
             # (mirrors torch's ``torch.empty((), dtype=torch.int64).random_()``).
             seed = int(tp.empty((), dtype=tp.int64).random_(0, 2**63 - 1).item())
-            tp.manual_seed(seed)
+            generator = tp.Generator()
+            generator.manual_seed(seed)
         else:
-            tp.manual_seed(self.generator.initial_seed())
+            generator = self.generator
 
-        if self.replacement:
-            for _ in range(self.num_samples // 32):
-                yield from tp.randint(0, n, (32,)).tolist()
-            yield from tp.randint(0, n, (self.num_samples % 32,)).tolist()
-        else:
-            for _ in range(self.num_samples // n):
-                yield from tp.randperm(n).tolist()
-            yield from tp.randperm(n).tolist()[: self.num_samples % n]
+        # Materialize before yielding so the global-generator swap never
+        # remains active while a caller pauses a partially consumed sampler.
+        with _use_generator(generator):
+            if self.replacement:
+                indices = []
+                for _ in range(self.num_samples // 32):
+                    indices.extend(tp.randint(0, n, (32,)).tolist())
+                indices.extend(tp.randint(0, n, (self.num_samples % 32,)).tolist())
+            else:
+                indices = []
+                for _ in range(self.num_samples // n):
+                    indices.extend(tp.randperm(n).tolist())
+                indices.extend(tp.randperm(n).tolist()[: self.num_samples % n])
+        yield from indices
 
     def __len__(self) -> int:
         return self.num_samples
@@ -541,9 +714,9 @@ class SubsetRandomSampler(Sampler[int]):
         self.generator = generator
 
     def __iter__(self) -> Iterator[int]:
-        _set_global_seed(self.generator)
-        for i in tp.randperm(len(self.indices)).tolist():
-            yield self.indices[i]
+        with _use_generator(self.generator):
+            permutation = tp.randperm(len(self.indices)).tolist()
+        yield from (self.indices[i] for i in permutation)
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -598,11 +771,12 @@ class WeightedRandomSampler(Sampler[int]):
         self.generator = generator
 
     def __iter__(self) -> Iterator[int]:
-        _set_global_seed(self.generator)
-        rand_tensor = tp.multinomial(
-            self.weights, self.num_samples, self.replacement
-        )
-        yield from iter(rand_tensor.tolist())
+        with _use_generator(self.generator):
+            rand_tensor = tp.multinomial(
+                self.weights, self.num_samples, self.replacement
+            )
+            indices = rand_tensor.tolist()
+        yield from indices
 
     def __len__(self) -> int:
         return self.num_samples
@@ -762,8 +936,8 @@ class DistributedSampler(Sampler[_T_co]):
             # deterministically shuffle based on epoch and seed
             g = tp.Generator()
             g.manual_seed(self.seed + self.epoch)
-            _set_global_seed(g)
-            indices = tp.randperm(len(self.dataset)).tolist()
+            with _use_generator(g):
+                indices = tp.randperm(len(self.dataset)).tolist()
         else:
             indices = list(range(len(self.dataset)))
 
@@ -1208,8 +1382,19 @@ class _IterableDatasetFetcher(_BaseDatasetFetcher):
 class _MapDatasetFetcher(_BaseDatasetFetcher):
     def fetch(self, possibly_batched_index):
         if self.auto_collation:
-            if hasattr(self.dataset, "__getitems__") and self.dataset.__getitems__:
-                data = self.dataset.__getitems__(possibly_batched_index)
+            # TensorPlay-backed datasets can return the already-collated
+            # result of a batch index_select.  This is deliberately gated on
+            # the stock collate function: a user collate_fn must still receive
+            # the exact list-of-samples prescribed by torch.
+            fast_getter = getattr(self.dataset, "_tp_get_batch", None)
+            if self.collate_fn is default_collate and callable(fast_getter):
+                data = fast_getter(possibly_batched_index)
+                if data is not _FAST_BATCH_UNAVAILABLE:
+                    return data
+
+            getitems = getattr(self.dataset, "__getitems__", None)
+            if callable(getitems):
+                data = getitems(possibly_batched_index)
             else:
                 data = [self.dataset[idx] for idx in possibly_batched_index]
         else:
@@ -1477,8 +1662,8 @@ def _default_multiprocessing_context():
 
 def _new_base_seed(generator: Optional["tp.Generator"]) -> int:
     # Mirrors torch's ``torch.empty((), dtype=torch.int64).random_(generator=...)``.
-    _set_global_seed(generator)
-    return int(tp.empty((), dtype=tp.int64).random_(0, 2**63 - 1).item())
+    with _use_generator(generator):
+        return int(tp.empty((), dtype=tp.int64).random_(0, 2**63 - 1).item())
 
 
 def _cpu_count() -> Optional[int]:
@@ -1538,14 +1723,35 @@ class _BaseDataLoaderIter:
         self._IterableDataset_len_called = loader._IterableDataset_len_called
         self._auto_collation = loader._auto_collation
         self._drop_last = loader.drop_last
+        self._index_sampler = loader._index_sampler
+        self._sampler_iter = iter(self._index_sampler)
+        self._num_workers = loader.num_workers
         self._num_yielded = 0
 
-        if loader.pin_memory and not tp.cuda.is_available():
-            warnings.warn(
-                "'pin_memory' argument is set as true but no accelerator is found, "
-                "then device pinned memory won't be used.",
-                stacklevel=2,
-            )
+        # Match torch's two pin-memory modes.  With no explicit device, pin
+        # memory is enabled only when an accelerator exists.  An explicit
+        # device opts into the requested allocator and therefore keeps the
+        # flag even when the current process has no default accelerator.
+        if not loader.pin_memory_device:
+            if loader.pin_memory and not tp.cuda.is_available():
+                warnings.warn(
+                    "'pin_memory' argument is set as true but no accelerator is found, "
+                    "then device pinned memory won't be used.",
+                    stacklevel=2,
+                )
+            self._pin_memory = bool(loader.pin_memory and tp.cuda.is_available())
+            self._pin_memory_device = None
+        else:
+            if not loader.pin_memory:
+                warnings.warn(
+                    "'pin_memory_device' is set but 'pin_memory' argument is not set, "
+                    "then device pinned memory won't be used."
+                    "please set 'pin_memory' to true, if you need to use the device pin memory",
+                    stacklevel=2,
+                )
+            self._pin_memory = bool(loader.pin_memory)
+            self._pin_memory_device = loader.pin_memory_device
+        self._base_seed = _new_base_seed(loader.generator)
 
     def __iter__(self) -> "_BaseDataLoaderIter":
         return self
@@ -1579,8 +1785,6 @@ class _BaseDataLoaderIter:
 class _SingleProcessDataLoaderIter(_BaseDataLoaderIter):
     def __init__(self, loader: "DataLoader"):
         super().__init__(loader)
-        index_sampler = loader.batch_sampler if loader._auto_collation else loader.sampler
-        self._sampler_iter = iter(index_sampler)
         self._dataset_fetcher = _DatasetKind.create_fetcher(
             loader._dataset_kind,
             loader.dataset,
@@ -1639,7 +1843,6 @@ class _MultiProcessDataLoaderIter(_BaseDataLoaderIter):
             multiprocessing_context = loader.multiprocessing_context
 
         self._worker_init_fn = loader.worker_init_fn
-        self._base_seed = _new_base_seed(loader.generator)
 
         self._worker_result_queue = multiprocessing_context.Queue()
         self._shutdown = False
@@ -1675,7 +1878,7 @@ class _MultiProcessDataLoaderIter(_BaseDataLoaderIter):
             self._index_queues.append(index_queue)
             self._workers.append(w)
 
-        if loader.pin_memory and tp.cuda.is_available():
+        if self._pin_memory:
             self._pin_memory_thread_done_event = threading.Event()
 
             # The pin thread consumes the worker result queue and feeds a
@@ -1698,9 +1901,8 @@ class _MultiProcessDataLoaderIter(_BaseDataLoaderIter):
         self._reset(loader, first_iter=True)
 
     def _reset(self, loader: "DataLoader", first_iter: bool = False) -> None:
-        self._sampler_iter = iter(
-            loader.batch_sampler if loader._auto_collation else loader.sampler
-        )
+        self._index_sampler = loader._index_sampler
+        self._sampler_iter = iter(self._index_sampler)
         self._IterableDataset_len_called = loader._IterableDataset_len_called
         self._send_idx = 0  # idx of the next task to be sent to workers
         self._rcvd_idx = 0  # idx of the next task to be returned in __next__
@@ -1984,6 +2186,9 @@ class DataLoader(Generic[_T_co]):
             not shut down the worker processes after a dataset has been
             consumed once. This allows to maintain the workers `Dataset`
             instances alive. (default: ``False``)
+        pin_memory_device (str, optional): Deprecated device spelling kept for
+            PyTorch API compatibility. TensorPlay uses its current CUDA
+            accelerator for pinned host allocations. (default: ``""``)
         in_order (bool, optional): If ``False``, the data loader will not
             enforce that batches returned from multiprocessing workers are
             provided in the order the sampler produced them. This enables
@@ -1996,10 +2201,12 @@ class DataLoader(Generic[_T_co]):
     batch_size: Optional[int]
     num_workers: int
     pin_memory: bool
+    pin_memory_device: str
     drop_last: bool
     timeout: float
     sampler: Sampler | Iterable
     generator: Optional["tp.Generator"]
+    __initialized = False
 
     def __init__(
         self,
@@ -2019,6 +2226,7 @@ class DataLoader(Generic[_T_co]):
         *,
         prefetch_factor: Optional[int] = None,
         persistent_workers: bool = False,
+        pin_memory_device: str = "",
         in_order: bool = True,
         device: Optional[str] = None,
     ) -> None:
@@ -2048,6 +2256,7 @@ class DataLoader(Generic[_T_co]):
         self.num_workers = num_workers
         self.prefetch_factor = prefetch_factor
         self.pin_memory = pin_memory
+        self.pin_memory_device = pin_memory_device
         self.timeout = timeout
         self.worker_init_fn = worker_init_fn
         self.multiprocessing_context = multiprocessing_context
@@ -2133,6 +2342,11 @@ class DataLoader(Generic[_T_co]):
 
         self._iterator = None
 
+        # Match torch's post-construction immutability for fields that define
+        # the sampler/data stream.  Mutating these while a worker iterator is
+        # alive can otherwise silently mix epochs or strand queued indices.
+        self.__initialized = True
+
         self.check_worker_number_rationality()
 
     def check_worker_number_rationality(self) -> None:
@@ -2199,6 +2413,21 @@ class DataLoader(Generic[_T_co]):
                     "multiprocessing (num_workers > 0)"
                 )
         self.__multiprocessing_context = multiprocessing_context
+
+    def __setattr__(self, attr, value):
+        if self.__initialized and attr in (
+            "batch_size",
+            "batch_sampler",
+            "sampler",
+            "drop_last",
+            "dataset",
+            "persistent_workers",
+        ):
+            raise ValueError(
+                f"{attr} attribute should not be set after "
+                f"{self.__class__.__name__} is initialized"
+            )
+        super().__setattr__(attr, value)
 
     def _get_iterator(self):
         if self.num_workers == 0:

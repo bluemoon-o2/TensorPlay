@@ -19,14 +19,29 @@ import json
 import os
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
-# (XBLOCK, num_warps) candidates, mirroring the configs emitted for the
-# @triton.autotune decorator path.
+# (XBLOCK, num_warps) candidates.  Beyond the classic Inductor table this
+# probes the 8-wide geometry (2048 elements / 256 threads = two vectorized
+# 16B accesses per thread) and the 16-wide extreme — transcendental-heavy
+# pointwise chains gain ILP from fewer, busier threads even at halved
+# occupancy; the tuner discards them wherever spills dominate.
 CANDIDATE_CONFIGS: Tuple[Tuple[int, int], ...] = (
     (128, 4),
     (256, 4),
+    (512, 4),
     (512, 8),
+    (1024, 4),
     (1024, 8),
+    (2048, 8),
+    (2048, 4),
 )
+
+# Salt folded into every persisted decision (pointwise ``decision_key`` and
+# the dims/split reduction keys in ``codegen.triton``).  ``program_digest``
+# hashes only the kernel program — it cannot see emitter or candidate-table
+# changes — so without this bump a decision cached by an older compiler
+# generation short-circuits benchmarking forever and pins yesterday's
+# geometry.
+TUNING_VERSION = "t8-redsplit"
 
 _DISABLE_ENV = "TP_DISABLE_STAX_AUTOTUNE"
 
@@ -69,7 +84,9 @@ def _decision_cache():
 
 
 def decision_key(digest: str, bucket: int, device: str) -> str:
-    h = hashlib.sha256(f"{digest}|{bucket}|{device}".encode())
+    h = hashlib.sha256(
+        f"{TUNING_VERSION}|{digest}|{bucket}|{device}".encode()
+    )
     return h.hexdigest()[:24]
 
 
@@ -99,27 +116,43 @@ def store_decision(digest: str, bucket: int, device: str,
 
 
 def bench_launch(launch: Callable[[list], Any], args: list,
-                 *, warmup: int = 2, iters: int = 10) -> float:
-    """Average wall time (ms) of ``iters`` launches measured with CUDA events.
+                 *, warmup_ms: float = 3.0, iters: int = 20) -> float:
+    """Minimum per-iteration latency (ms) over warmup + timed launches.
 
-    Mirrors Inductor's do_bench: synchronize before starting, warm up caches
-    and JIT paths outside the timed window, then time the whole loop with
-    device events and divide.
+    Mirrors the benchmark harness (``_time_tp``): CUDA events around EACH
+    launch with a device sync, best-of.  Two Inductor-benchmarker lessons
+    (``torch/_inductor/runtime/benchmarking.py::benchmark_gpu``):
+
+    * A pipelined average measures the Python launch floor (~25-35us) once
+      kernels drop below it, flattening the ranking; per-iteration latency
+      is what callers actually pay.
+    * Candidates are JIT-compiled immediately before their window, so the
+      GPU idles into a down-clock and a short timed loop never ramps back
+      (Inductor runs ``memory_warmup_iters=100`` busy iterations first).
+      We warm up by running the kernel itself for ``warmup_ms`` wall time
+      before recording, which also settles L2 into the steady state the
+      harness measures.
     """
+
+    import time
 
     import tensorplay as tp
 
-    for _ in range(warmup):
-        launch(args)
-    tp.cuda.synchronize()
-    start = tp.cuda.Event(enable_timing=True)
-    end = tp.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iters):
-        launch(args)
-    end.record()
-    tp.cuda.synchronize()
-    return start.elapsed_time(end) / iters
+    best = float("inf")
+    for _ in range(3):
+        deadline = time.perf_counter() + warmup_ms / 1000.0
+        while time.perf_counter() < deadline:
+            launch(args)
+        tp.cuda.synchronize()
+        for _ in range(iters):
+            start = tp.cuda.Event(enable_timing=True)
+            end = tp.cuda.Event(enable_timing=True)
+            start.record()
+            launch(args)
+            end.record()
+            tp.cuda.synchronize()
+            best = min(best, start.elapsed_time(end))
+    return best
 
 
 def pick_config(

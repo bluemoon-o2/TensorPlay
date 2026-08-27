@@ -54,3 +54,24 @@ test_op_parity / test_dtype_alignment。
   ForeachMultiTensor.cuh(.template)、IndexingKernels(Utils.h/.stream()/fp8 atomic CAS)、
   SpectralKernels(<functional>/is_complex)、OptimizerKernels 占位 SpectralKernels.cu、
   TierOpsReduceKernels(tuple get/删除重复 kernel 模板)。
+
+## AMP/autocast 对齐(完成)
+文件结构 1:1 映射(vendored torch 2.13):
+
+| torch | tensorplay | 说明 |
+|---|---|---|
+| `aten/src/ATen/autocast_mode.h` | `tpx/include/autocast_cast.h` | CastPolicy/is_eligible/promote_type/set_opt_dtype;cached_cast 声明 |
+| `aten/src/ATen/autocast_mode.cpp`(TLS/cache) | `p10/include,src/autocast_mode.{h,cpp}` | 纯状态+缓存(无 ATen autograd 依赖,对应 c10 层);cache 为 thread-local+版本校验(torch 为全局 mutex) |
+| `aten/src/ATen/autocast_mode.cpp`(KERNEL_* 注册块) | `tools/codegen/gen_autocast.py` → `AutocastGenerated.cpp` | 上游手写宏展开 → 本仓库生成;CUDA=AT_FORALL_* 宏集,CPU=独立 KERNEL_CPU 手写列表(逐条复刻),BCE:CUDA=banned/CPU=fp32 |
+| `torch/csrc/autocast_mode.cpp` | `src/bindings/python/autocast_mode.cpp` | python 绑定(is/set_autocast_*,nesting,cache,融合 _autocast_enter/_exit) |
+| `torch/amp/{__init__,autocast_mode,grad_scaler}.py` | `tensorplay/amp/*` 同名 | autocast CM/custom_fwd/custom_bwd/_cast/_enter/_exit;__all__ 与 torch 一致 |
+| `test/test_autocast.py` + `test/test_amp.py` | `test/test_amp.py` | 含 bf16 输入的 CPU 列表 parity 用例 |
+
+语义对齐要点(均以 bf16 输入对 torch 实测验证):
+- CPU 不走通用宏:softmax/cumsum/pow/layer_norm/addmv/addr/mv/einsum 在 CPU
+  **不包裹**(低精度进出),与 torch CPU 行为一致;CUDA 侧仍按通用宏。
+- CPU fp32 族按 KERNEL_CPU 复刻(kl_div/l1/smooth_l1/huber/BCEWithLogits/
+  mse/nll_loss/polar/trace/view_as_complex/stft/fft_fft/fft_ifft/svd/
+  triangular_solve/linalg_solve 等 ∩ tp op 面);promote=stack/cat/index_copy。
+- norm 的上游 fp32_append_dtype(DIFFERENT_REDISPATCH_SIGNATURE)在 tp 以普通
+  fp32 cast 近似(tp norm 无 dtype 参数),双后端一致。

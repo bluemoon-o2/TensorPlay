@@ -383,7 +383,11 @@ Tensor imag_cuda(const Tensor& self) {
 
 Tensor conj_cuda(const Tensor& self) {
     if (!is_cplx(self.dtype())) return self.clone();
-    Tensor out = self.clone();
+    if (self.dtype() != DType::ComplexFloat &&
+        self.dtype() != DType::ComplexDouble)
+        TP_THROW(NotImplementedError,
+                 "CUDA conj: half complexes are not supported yet");
+    Tensor out = detail::contiguous_clone(self);
     int64_t n = out.numel();
     if (n == 0) return out;
     auto stream = getCurrentCUDAStream();
@@ -447,6 +451,14 @@ Tensor polar_cuda(const Tensor& abs_, const Tensor& angle_) {
 }
 
 
+// ATen native_functions.yaml: adjoint(Tensor(a) self) is transpose(-2,-1)
+// composed with conj(); ndim <= 1 is plain conj.  conj_cuda materializes the
+// conjugate for complex inputs and aliases real ones.
+Tensor adjoint_cuda(const Tensor& self) {
+    if (self.dim() <= 1) return conj_cuda(self);
+    return conj_cuda(self.transpose(-2, -1));
+}
+
 TENSORPLAY_LIBRARY_IMPL(CUDA, Tier5OpsKernels) {
     m.impl("addbmm", addbmm_cuda);
     m.impl("addmv", addmv_cuda);
@@ -466,6 +478,7 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, Tier5OpsKernels) {
     m.impl("real", real_cuda);
     m.impl("imag", imag_cuda);
     m.impl("conj", conj_cuda);
+    m.impl("adjoint", adjoint_cuda);
     m.impl("complex", complex_cuda);
     m.impl("polar", polar_cuda);
 }
