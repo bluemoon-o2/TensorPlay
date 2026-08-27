@@ -1,6 +1,6 @@
-"""Copied semantics from torchaudio/_internal/module_utils.py.
+"""Copied semantics from tensorplay.audio/_internal/module_utils.py.
 
-Torchaudio marks optional-dependency functions with these decorators so that
+Upstream marks optional-dependency functions with these decorators so that
 importing the module never fails; calling an unavailable function raises a
 helpful error. TensorPlay audio has no optional native deps, so ``no_op``
 is a passthrough and ``fail_with_message`` always raises.
