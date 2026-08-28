@@ -3,16 +3,16 @@
         <img src="../docs/images/banner%20(4).png" alt="TensorPlay Banner">
     </p>
 
-[![stars](https://img.shields.io/github/stars/TensorPlay?color=ccf)](https://github.com/bluemoon-o2/TensorPlay)
+[![stars](https://img.shields.io/github/stars/TensorPlay?color=ccf)](https://github.com/lexing-2026/TensorPlay)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/tensorplay?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLUE&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/tensorplay)
 ![PyPI - Downloads](https://img.shields.io/pypi/dm/TensorPlay?labelColor=blue)
-![GitHub last commit](https://img.shields.io/github/last-commit/bluemoon-o2/TensorPlay?labelColor=teal)
+![GitHub last commit](https://img.shields.io/github/last-commit/lexing-2026/TensorPlay?labelColor=teal)
 
 ![python](https://img.shields.io/badge/python-3.8~3.11-aff.svg)
 ![os](https://img.shields.io/badge/os-win%2C%20linux%2C%20mac-pink.svg)
 ![hardware](https://img.shields.io/badge/hardware-cpu-red.svg)
 [![License](https://img.shields.io/badge/license-MIT-green)](../LICENSE)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/bluemoon-o2/TensorPlay)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/lexing-2026/TensorPlay)
 
 **TensorPlay is a learner-friendly, DIY-ready deep learning framework designed for educational purposes and small-scale experiments.**
 </div>
@@ -191,6 +191,6 @@ Contributions are welcome! Feel free to open issues for bugs or feature requests
 This project is released under the [MIT license](../LICENSE).  
 
 ## 🔗Links
-* [Source code and issue tracker](https://github.com/bluemoon-o2/TensorPlay)
+* [Source code and issue tracker](https://github.com/lexing-2026/TensorPlay)
 * [PyPI release](https://pypi.org/project/TensorPlay/)
 * [Documentation](https://www.welog.me/article/TensorPLay)

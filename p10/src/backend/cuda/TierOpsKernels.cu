@@ -553,10 +553,10 @@ Tensor erfinv_cuda(const Tensor& self) {
     return float_math_cuda(self, [] __device__ (double x) { return tensorplay::special_math::calc_erfinv(x); }, "erfinv");
 }
 Tensor logit_cuda(const Tensor& self, std::optional<Scalar> eps) {
-    double e = eps.has_value() ? eps->toDouble() : 0.0;
+    double e = eps.has_value() ? eps->toDouble() : -1.0;
     return float_math_cuda(self,
                            [e] __device__ (double p) {
-                               if (e > 0) p = ::fmin(::fmax(p, e), 1.0 - e);
+                               if (e >= 0) p = ::fmin(::fmax(p, e), 1.0 - e);
                                return ::log(p / (1.0 - p));
                            },
                            "logit");
@@ -791,25 +791,96 @@ Tensor celu_cuda(const Tensor& self, Scalar alpha) {
 }
 Tensor hardshrink_cuda(const Tensor& self, Scalar lambd) {
     double l = lambd.toDouble();
+    // ATen ActivationHardshrinkKernel.cu: (a >= -l && a <= l) ? 0 : a
+    // (NaN fails both comparisons and passes through, matching ATen).
+    // lambd is rounded to the element dtype first, like ATen's
+    // lambd.to<scalar_t>(), so float32 boundary values compare exactly.
     return dtype_unary_cuda(self,
                             [l] __device__ (auto x) -> decltype(x) {
                                 using T = decltype(x);
+                                const double lt = static_cast<double>(static_cast<T>(l));
                                 double v = static_cast<double>(x);
-                                return (v > l || v < -l) ? static_cast<T>(x) : static_cast<T>(0);
+                                return (v >= -lt && v <= lt) ? static_cast<T>(0) : x;
                             },
                             "hardshrink");
 }
 Tensor softshrink_cuda(const Tensor& self, Scalar lambd) {
     double l = lambd.toDouble();
+    // ATen ActivationSoftshrinkKernel.cu: isnan(a) ? a : (a > l ? a-l :
+    // (a < -l ? a+l : 0)); the v*0 middle branch keeps NaN propagating.
     return dtype_unary_cuda(self,
                             [l] __device__ (auto x) -> decltype(x) {
                                 using T = decltype(x);
+                                const double lt = static_cast<double>(static_cast<T>(l));
                                 double v = static_cast<double>(x);
-                                if (v > l) return static_cast<T>(v - l);
-                                if (v < -l) return static_cast<T>(v + l);
-                                return static_cast<T>(0);
+                                if (v > lt) return static_cast<T>(v - lt);
+                                if (v < -lt) return static_cast<T>(v + lt);
+                                return static_cast<T>(v * 0.0);
                             },
                             "softshrink");
+}
+// ATen ActivationSoftshrinkKernel.cu shrink_backward_kernel (shared by
+// hard/soft): grad passes through where self is outside the inclusive
+// [-lambd, lambd] band.
+Tensor hardshrink_backward_cuda(const Tensor& grad_out, const Tensor& self, Scalar lambd) {
+    double l = lambd.toDouble();
+    return binary_same_cuda(grad_out, self,
+                            [l] __device__ (auto g, auto s) -> decltype(g) {
+                                using T = decltype(g);
+                                const double lt = static_cast<double>(static_cast<T>(l));
+                                double v = static_cast<double>(s);
+                                return (v >= -lt && v <= lt) ? static_cast<T>(0) : g;
+                            },
+                            "hardshrink_backward");
+}
+Tensor softshrink_backward_cuda(const Tensor& grad_output, const Tensor& self, Scalar lambd) {
+    double l = lambd.toDouble();
+    return binary_same_cuda(grad_output, self,
+                            [l] __device__ (auto g, auto s) -> decltype(g) {
+                                using T = decltype(g);
+                                const double lt = static_cast<double>(static_cast<T>(l));
+                                double v = static_cast<double>(s);
+                                return (v >= -lt && v <= lt) ? static_cast<T>(0) : g;
+                            },
+                            "softshrink_backward");
+}
+Tensor sigmoid_backward_cuda(const Tensor& grad_output, const Tensor& output) {
+    return binary_same_cuda(grad_output, output,
+                            [] __device__ (auto g, auto o) -> decltype(g) {
+                                using T = decltype(o);
+                                return g * o * (static_cast<T>(1) - o);
+                            },
+                            "sigmoid_backward");
+}
+Tensor tanh_backward_cuda(const Tensor& grad_output, const Tensor& output) {
+    return binary_same_cuda(grad_output, output,
+                            [] __device__ (auto g, auto o) -> decltype(g) {
+                                using T = decltype(o);
+                                return g * (static_cast<T>(1) - o * o);
+                            },
+                            "tanh_backward");
+}
+// ATen BinaryMiscBackwardOpsKernels.cu logit_backward_kernel_cuda: without
+// eps (eps<0) the gradient is dy/(x(1-x)) inside [0,1] and NaN outside; with
+// eps>=0 values outside [eps, 1-eps] (compared in the element dtype) are
+// masked to zero. Exact 0/1 fall through to the division (dy/0 -> inf).
+Tensor logit_backward_cuda(const Tensor& grad_output, const Tensor& self, std::optional<Scalar> eps) {
+    double e = eps.has_value() ? eps->toDouble() : -1.0;
+    return binary_same_cuda(grad_output, self,
+                            [e] __device__ (auto g, auto s) -> decltype(g) {
+                                using T = decltype(s);
+                                const T zero = static_cast<T>(0);
+                                const T one = static_cast<T>(1);
+                                if (e < 0) {
+                                    if (s < zero || s > one) return std::numeric_limits<T>::quiet_NaN();
+                                    return g / (s * (one - s));
+                                }
+                                const T lo = static_cast<T>(e);
+                                const T hi = one - lo;
+                                if (s < lo || s > hi) return zero;
+                                return g / (s * (one - s));
+                            },
+                            "logit_backward");
 }
 Tensor threshold_cuda(const Tensor& self, Scalar threshold, Scalar value) {
     double t = threshold.toDouble(), val = value.toDouble();
@@ -1375,7 +1446,12 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, TierOpsKernels) {
     m.impl("selu", selu_cuda);
     m.impl("celu", celu_cuda);
     m.impl("hardshrink", hardshrink_cuda);
+    m.impl("hardshrink_backward", hardshrink_backward_cuda);
     m.impl("softshrink", softshrink_cuda);
+    m.impl("softshrink_backward", softshrink_backward_cuda);
+    m.impl("sigmoid_backward", sigmoid_backward_cuda);
+    m.impl("tanh_backward", tanh_backward_cuda);
+    m.impl("logit_backward", logit_backward_cuda);
     m.impl("threshold", threshold_cuda);
     m.impl("prelu", prelu_cuda);
     // Index/scatter complements

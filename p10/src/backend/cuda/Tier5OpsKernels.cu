@@ -13,6 +13,7 @@
 #include "CUDARuntime.h"
 #include "RNNCudaKernels.h"
 #include "TypePromotion.h"
+#include "GradMode.h"
 #include "Utils.h"
 
 #include <cuda_runtime.h>
@@ -207,17 +208,30 @@ inline Tensor rnn_row_gates(const Tensor& x2d, const Tensor& w,
     return g;
 }
 
+// The rnn autograd wrapper attaches the RNN backward nodes to the outputs and
+// those replay the forward themselves (RNNBackward.h); the graph the per-op
+// wrappers would build inside rnn_cuda_impl is never consumed.  Suppress it.
+struct RnnForwardNoGrad {
+    RnnForwardNoGrad() : prev_(GradMode::is_enabled()) { GradMode::set_enabled(false); }
+    ~RnnForwardNoGrad() { GradMode::set_enabled(prev_); }
+    bool prev_;
+};
+
 static std::tuple<Tensor, Tensor, Tensor> rnn_cuda_impl(
     int kind,  // 0=lstm, 1=gru, 2=tanh, 3=relu
     const Tensor& input, const std::vector<Tensor>& hx,
     const std::vector<Tensor>& params, bool has_biases, int64_t num_layers,
     bool bidirectional, bool batch_first) {
+    RnnForwardNoGrad no_grad_guard;
     using tensorplay::cuda::rnn::fused_gru_cell;
     using tensorplay::cuda::rnn::fused_lstm_cell;
 
     Tensor x = batch_first ? input.transpose(0, 1).contiguous() : input.contiguous();
     const int64_t T = x.size(0), N = x.size(1);
     if (hx.empty()) TP_THROW(RuntimeError, "rnn: hx required");
+    // ATen RNN.cpp parity: lstm indexes hx[1] for c0 (torch: "lstm expects
+    // two hidden states"); an undersized hx would read past the vector.
+    if (kind == 0 && hx.size() != 2) TP_THROW(RuntimeError, "lstm expects two hidden states");
     const int64_t L = num_layers;
     const int64_t dirs = bidirectional ? 2 : 1;
     const int64_t H = hx[0].size(-1);

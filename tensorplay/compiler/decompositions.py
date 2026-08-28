@@ -339,17 +339,11 @@ class DecomposePass(PassBase):
             rule = _DECOMP_METHODS.get(name)
             if rule is None:
                 continue
-            # Replacement sub-chains must precede the replaced node's users,
-            # but create_node appends. Capture what the rule added and move
-            # those nodes just before the original site.
-            start = len(graph.nodes)
-            replacement = rule(graph, node)
-            created = graph.nodes[start:]
-            if created:
-                pos = graph.nodes.index(node)
-                for offset, new_node in enumerate(created):
-                    graph.nodes.remove(new_node)
-                    graph.nodes.insert(pos + offset, new_node)
+            # Replacement sub-chains must precede the replaced node's users:
+            # create them directly before the original site.  inserting_before
+            # keeps creation order, mirroring torch.fx subgraph rewriting.
+            with graph.inserting_before(node):
+                replacement = rule(graph, node)
             node.replace_all_uses_with(replacement)
             changed = True
         if not changed:

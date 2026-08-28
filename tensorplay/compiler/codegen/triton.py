@@ -41,7 +41,7 @@ from ..scheduler import segment_graph
 # EMITTER changes semantics (masking, NaN handling, launcher allocation,
 # load cache annotations) so stale generated sources cannot be replayed
 # against a new compiler.
-_CODEGEN_VERSION = "m7-2026-08-28-redsplit"
+_CODEGEN_VERSION = "m8-2026-08-28-fastlaunch"
 from ...backends.stax import (
     _CPU_FUSED_AUTOGRAD_OPS,
     _CPU_FUSED_OPS,
@@ -356,38 +356,51 @@ def runtime_available() -> bool:
     return _runtime_probe_ok
 
 
+_TENSOR_TYPE: Any = None
+
+
 def _supports_runtime_inputs(
     example_inputs: list[Any],
     *,
     allow_grad: bool = False,
     reference_shape: tuple[int, ...] | None = None,
 ) -> bool:
+    # Per-call dispatch guard on the compiled wrapper: must stay cheap.
     if not example_inputs:
         return False
-    try:
-        import tensorplay
+    global _TENSOR_TYPE
+    if _TENSOR_TYPE is None:
+        try:
+            import tensorplay
 
-        tensor_type = tensorplay.Tensor
-    except (AttributeError, ImportError):
-        return False
-    if any(not isinstance(value, tensor_type) for value in example_inputs):
-        return False
-    if any(
-        not value.device.is_cuda()
-        or not value.is_contiguous()
-        or (value.requires_grad and not allow_grad)
-        for value in example_inputs
-    ):
-        return False
+            _TENSOR_TYPE = tensorplay.Tensor
+        except (AttributeError, ImportError):
+            return False
+    tensor_type = _TENSOR_TYPE
+    for value in example_inputs:
+        if not isinstance(value, tensor_type):
+            return False
+        if (
+            not value.device.is_cuda()
+            or not value.is_contiguous()
+            or (value.requires_grad and not allow_grad)
+        ):
+            return False
     first = example_inputs[0]
-    shapes = [tuple(int(dim) for dim in value.shape) for value in example_inputs]
+    shapes = [tuple([int(dim) for dim in value.shape]) for value in example_inputs]
     # Without a compiled-in reference the historic contract applies: every
     # input must share one shape.  With one, inputs may broadcast to it.
+    # The exact-match case (every compiled shape) skips the broadcast math.
     if reference_shape is None:
         if any(shape != shapes[0] for shape in shapes[1:]):
             return False
-    elif _broadcast_reference_shape(shapes) != tuple(reference_shape):
-        return False
+    elif any(shape == reference_shape for shape in shapes):
+        if any(shape != reference_shape for shape in shapes):
+            if _broadcast_reference_shape(shapes) != tuple(reference_shape):
+                return False
+    else:
+        if _broadcast_reference_shape(shapes) != tuple(reference_shape):
+            return False
     return all(
         value.dtype == first.dtype and value.device == first.device
         for value in example_inputs[1:]
@@ -1153,7 +1166,9 @@ class TritonProgramCodegen:
         source = (
             "import triton\n"
             "import triton.language as tl\n"
-            "import triton.language.extra.cuda.libdevice as libdevice\n\n"
+            "import triton.language.extra.cuda.libdevice as libdevice\n"
+            "import tensorplay as tp\n"
+            "from tensorplay.compiler.runtime import fastlaunch as _fl\n\n"
         )
         if self.reduction_spec is None and fixed_config is None:
             source += "@triton.autotune(\n"
@@ -1171,17 +1186,56 @@ class TritonProgramCodegen:
         source += textwrap.indent("\n".join(body), "    ") + "\n\n"
 
         if single_reduction:
+            call_args = [*(f"inputs[{index}]" for index in range(self.input_count)), "out"]
+            args_txt = ", ".join(call_args)
+            ptrs = " | ".join(
+                [
+                    *(f"inputs[{i}].data_ptr()" for i in range(self.input_count)),
+                    "out.data_ptr()",
+                ]
+            )
+            guard = f"({ptrs}) % 16 == 0"
+            source += "_rec = None\n\n"
             source += "def kernel_launch(inputs):\n"
-            source += "    import tensorplay as tp\n"
+            source += "    global _rec\n"
             source += (
                 "    out = tp.empty((), dtype=inputs[0].dtype, "
                 "device=inputs[0].device)\n"
             )
-            call_args = [*(f"inputs[{index}]" for index in range(self.input_count)), "out"]
+            source += f"    xnumel = {xnumel_source}\n"
+            # Fast path (fastlaunch): replay the recorded CompiledKernel.run
+            # directly — same call shape JITFunction.run uses — once the
+            # pointer alignment / scalar specialization matches the recorded
+            # binary.  Any miss (or profiling hooks) drops to the dispatch
+            # below, which re-specializes and can re-record.
+            source += "    _r = _rec\n"
             source += (
-                f"    {kernel_name}[(1,)]({', '.join(call_args)}, "
-                f"{xnumel_source}, XBLOCK={block}, num_warps={warps})\n"
+                f"    if _r is not None and {guard} and _fl.hooks_clear() "
+                "and _r[3] == xnumel:\n"
             )
+            source += "        try:\n"
+            source += "            _s = _fl.current_stream()\n"
+            source += (
+                f"            _r[0](1, 1, 1, _s, _r[1], _r[2], None, None, "
+                f"None, {args_txt}, xnumel, {block})\n"
+            )
+            source += "            _fl.bump()\n"
+            source += "            return out\n"
+            source += "        except Exception:\n"
+            source += "            _rec = None\n"
+            source += "    _snap = -1\n"
+            source += (
+                f"    if _r is None and _fl.hooks_clear() and {guard}:\n"
+            )
+            source += f"        _snap = _fl.cache_size({kernel_name})\n"
+            source += (
+                f"    {kernel_name}[(1,)]({args_txt}, "
+                f"xnumel, XBLOCK={block}, num_warps={warps})\n"
+            )
+            source += "    if _snap >= 0:\n"
+            source += f"        _g = _fl.take_kernel({kernel_name}, _snap)\n"
+            source += "        if _g is not None:\n"
+            source += "            _rec = _g + (xnumel,)\n"
             source += "    return out\n"
         elif dims_reduction:
             assert self.reference_shape is not None and spec is not None
@@ -1193,21 +1247,56 @@ class TritonProgramCodegen:
             # Index reductions always materialize int64 indices regardless of
             # the value-stream dtype.
             out_dtype = "tp.int64" if spec.tracks_indices else "inputs[0].dtype"
+            call_args = [*(f"inputs[{index}]" for index in range(self.input_count)), "out"]
+            args_txt = ", ".join(call_args)
+            ptrs = " | ".join(
+                [
+                    *(f"inputs[{i}].data_ptr()" for i in range(self.input_count)),
+                    "out.data_ptr()",
+                ]
+            )
+            guard = f"({ptrs}) % 16 == 0"
+            source += "_rec = None\n\n"
             source += "def kernel_launch(inputs):\n"
-            source += "    import tensorplay as tp\n"
+            source += "    global _rec\n"
             source += (
                 f"    out = tp.empty({out_shape!r}, dtype={out_dtype}, "
                 "device=inputs[0].device)\n"
             )
-            call_args = [*(f"inputs[{index}]" for index in range(self.input_count)), "out"]
+            # Fast path: see the single-reduction branch; the scalar arg is
+            # the compile-time output numel, so the guard is exact.
+            source += "    _r = _rec\n"
+            source += (
+                f"    if _r is not None and {guard} and _fl.hooks_clear() "
+                f"and _r[3] == {onumel}:\n"
+            )
+            source += "        try:\n"
+            source += "            _s = _fl.current_stream()\n"
+            source += (
+                f"            _r[0]({grid_size}, 1, 1, _s, _r[1], _r[2], "
+                f"None, None, None, {args_txt}, {onumel}, {block}, {rblock})\n"
+            )
+            source += "            _fl.bump()\n"
+            source += "            return out\n"
+            source += "        except Exception:\n"
+            source += "            _rec = None\n"
+            source += "    _snap = -1\n"
+            source += (
+                f"    if _r is None and _fl.hooks_clear() and {guard}:\n"
+            )
+            source += f"        _snap = _fl.cache_size({kernel_name})\n"
             stages_kw = (
                 "" if persistent else f", num_stages={stages}"
             )
             source += (
-                f"    {kernel_name}[({grid_size},)]({', '.join(call_args)}, "
+                f"    {kernel_name}[({grid_size},)]({args_txt}, "
                 f"{onumel}, XBLOCK={block}, RBLOCK={rblock}, "
                 f"num_warps={warps}{stages_kw})\n"
             )
+            source += "    if _snap >= 0:\n"
+            source += f"        _g = _fl.take_kernel({kernel_name}, _snap)\n"
+            source += "        if _g is not None:\n"
+            source += f"            _rec = _g + ({onumel},)\n"
             source += "    return out\n"
         elif split_reduction:
             assert spec is not None
@@ -1269,16 +1358,19 @@ class TritonProgramCodegen:
             # entries before the finalize reads them, and the returned
             # scalar `out` stays fresh.  Per-call allocation was ~10-20us of
             # CPU that also drowned the tuner's ranking of fast candidates.
-            source += "_ws = None\n\n"
+            source += "_ws = None\n"
+            source += "_rec = None\n\n"
             source += "def kernel_launch(inputs):\n"
-            source += "    global _ws\n"
-            source += "    import tensorplay as tp\n"
+            source += "    global _ws, _rec\n"
             source += "    xnumel = " + xnumel_source + "\n"
             if persistent_split:
                 # main grid is the fixed program count, not cdiv
                 source += f"    wsn = {fixed_config[2]}\n"
+                fb = min(_next_power_of_two(fixed_config[2]), 2048)
             else:
                 source += f"    wsn = triton.cdiv(xnumel, {block})\n"
+                source += "    fb = min(triton.next_power_of_2(wsn), 2048)\n"
+                fb = "fb"
             source += (
                 "    out = tp.empty((), dtype=inputs[0].dtype, "
                 "device=inputs[0].device)\n"
@@ -1290,18 +1382,67 @@ class TritonProgramCodegen:
             )
             source += "    ws = _ws\n"
             call_args = [*(f"inputs[{index}]" for index in range(self.input_count)), "ws"]
+            args_txt = ", ".join(call_args)
+            ptrs = " | ".join(
+                [
+                    *(f"inputs[{i}].data_ptr()" for i in range(self.input_count)),
+                    "ws.data_ptr()",
+                    "out.data_ptr()",
+                ]
+            )
+            guard = f"({ptrs}) % 16 == 0"
+            # Fast path (fastlaunch): two direct CompiledKernel.run calls —
+            # the main sweep and the finalize — with the recorded grid,
+            # function handle and packed metadata, instead of two full
+            # JITFunction dispatches (~20us of binder/spec-key Python each).
+            # Guards: divisibility-16 alignment of every tensor arg (the
+            # recorded binary is the aligned specialization), xnumel equal
+            # to the recorded value (int ==1 / %16 specialization and the
+            # literal loop bound are both pinned to it) and no profiling
+            # hooks.  Any miss falls through to the dispatches below.
+            source += "    _r = _rec\n"
             source += (
-                f"    {kernel_name}[(wsn,)]({', '.join(call_args)}, "
+                f"    if _r is not None and {guard} and _fl.hooks_clear() "
+                "and _r[6] == xnumel:\n"
+            )
+            source += "        try:\n"
+            source += "            _s = _fl.current_stream()\n"
+            source += (
+                f"            _r[0](wsn, 1, 1, _s, _r[1], _r[2], None, None, "
+                f"None, {args_txt}, xnumel, {block})\n"
+            )
+            source += (
+                f"            _r[3](1, 1, 1, _s, _r[4], _r[5], None, None, "
+                f"None, ws, out, wsn, {fb})\n"
+            )
+            source += "            _fl.bump()\n"
+            source += "            return out\n"
+            source += "        except Exception:\n"
+            source += "            _rec = None\n"
+            source += "    _s0 = _s1 = -1\n"
+            source += (
+                f"    if _r is None and _fl.hooks_clear() and {guard}:\n"
+            )
+            source += f"        _s0 = _fl.cache_size({kernel_name})\n"
+            source += f"        _s1 = _fl.cache_size({finalize_name})\n"
+            source += (
+                f"    {kernel_name}[(wsn,)]({args_txt}, "
                 f"xnumel, XBLOCK={block}, num_warps={warps})\n"
             )
             source += (
                 f"    {finalize_name}[(1,)](ws, out, wsn, "
-                f"FBLOCK=min(triton.next_power_of_2(wsn), 2048), num_warps=4)\n"
+                f"FBLOCK={fb}, num_warps=4)\n"
             )
+            source += "    if _s0 >= 0:\n"
+            source += f"        _g0 = _fl.take_kernel({kernel_name}, _s0)\n"
+            source += f"        _g1 = _fl.take_kernel({finalize_name}, _s1)\n"
+            source += "        if _g0 is not None and _g1 is not None:\n"
+            source += "            _rec = _g0 + _g1 + (xnumel,)\n"
             source += "    return out\n"
         else:
+            source += "_rec = None\n\n"
             source += "def kernel_launch(inputs):\n"
-            source += "    import tensorplay as tp\n"
+            source += "    global _rec\n"
             if self.reference_shape is not None:
                 # Compile-time output numel: the runtime feed order may put
                 # a broadcast operand first, whose numel would truncate the
@@ -1345,6 +1486,54 @@ class TritonProgramCodegen:
                     f", XBLOCK={fixed_config[0]}, "
                     f"num_warps={fixed_config[1]}"
                 )
+            if fixed_config is not None:
+                ptrs = " | ".join(
+                    [
+                        *(
+                            f"inputs[{i}].data_ptr()"
+                            for i in range(self.input_count)
+                        ),
+                        *(
+                            f"outputs[{i}].data_ptr()"
+                            for i in range(len(self.output_refs))
+                        ),
+                    ]
+                )
+                guard = f"({ptrs}) % 16 == 0"
+                # Fast path (fastlaunch): see the reduction branches.  The
+                # grid is recomputed from the guarded xnumel when the shape
+                # is not compile-time, so the recorded binary always sees
+                # the geometry it was compiled for.
+                if self.reference_shape is not None:
+                    grid_src = repr(
+                        -(-_prod(self.reference_shape) // fixed_config[0])
+                    )
+                else:
+                    grid_src = f"-(-xnumel // {fixed_config[0]})"
+                source += "    _r = _rec\n"
+                source += (
+                    f"    if _r is not None and {guard} and "
+                    "_fl.hooks_clear() and _r[3] == xnumel:\n"
+                )
+                source += "        try:\n"
+                source += "            _s = _fl.current_stream()\n"
+                source += (
+                    f"            _r[0]({grid_src}, 1, 1, _s, _r[1], _r[2], "
+                    f"None, None, None, {call_args_txt}, "
+                    f"{fixed_config[0]})\n"
+                )
+                source += "            _fl.bump()\n"
+                if len(self.output_refs) == 1:
+                    source += "            return outputs[0]\n"
+                else:
+                    source += "            return outputs\n"
+                source += "        except Exception:\n"
+                source += "            _rec = None\n"
+                source += "    _snap = -1\n"
+                source += (
+                    f"    if _r is None and _fl.hooks_clear() and {guard}:\n"
+                )
+                source += f"        _snap = _fl.cache_size({kernel_name})\n"
             if fixed_config is not None and self.reference_shape is not None:
                 # Pinned config: the grid is a compile-time constant, so emit
                 # it literally instead of paying triton's per-call
@@ -1360,6 +1549,13 @@ class TritonProgramCodegen:
                     "(triton.cdiv(xnumel, meta['XBLOCK']),)\n"
                     f"    {kernel_name}[grid]({call_args_txt}{constexpr_kw})\n"
                 )
+            if fixed_config is not None:
+                source += "    if _snap >= 0:\n"
+                source += (
+                    f"        _g = _fl.take_kernel({kernel_name}, _snap)\n"
+                )
+                source += "        if _g is not None:\n"
+                source += "            _rec = _g + (xnumel,)\n"
             if len(self.output_refs) == 1:
                 source += "    return outputs[0]\n"
             else:
@@ -1558,17 +1754,9 @@ def _autotune_dims_program(
     if disabled_autotune():
         return build(_STATIC_DIM_TRIPLE)
 
-    best_config: tuple[int, ...] | None = None
-    best_launch: Any = None
-    best_time = float("inf")
-    for candidate in _DIM_REDUCTION_CANDIDATES:
-        try:
-            launch = build(candidate)
-            timing = stax_autotune.bench_launch(launch, list(example_inputs))
-        except Exception:  # noqa: BLE001 - candidate disqualification
-            continue
-        if timing < best_time:
-            best_config, best_launch, best_time = candidate, launch, timing
+    best_config, best_launch, best_time = stax_autotune.bench_candidates(
+        build, _DIM_REDUCTION_CANDIDATES, list(example_inputs)
+    )
     if best_config is None:
         return build(_STATIC_DIM_TRIPLE)
     try:
@@ -1653,17 +1841,9 @@ def _autotune_split_program(
     if disabled_autotune():
         return build(_STATIC_REDUCTION_CONFIG)
 
-    best_cfg = None
-    best_launch = None
-    best_time = float("inf")
-    for candidate in _SPLIT_CANDIDATES:
-        try:
-            launch = build(candidate)
-            timing = stax_autotune.bench_launch(launch, list(example_inputs))
-        except Exception:  # noqa: BLE001 - candidate disqualification
-            continue
-        if timing < best_time:
-            best_cfg, best_launch, best_time = tuple(candidate), launch, timing
+    best_cfg, best_launch, best_time = stax_autotune.bench_candidates(
+        build, _SPLIT_CANDIDATES, list(example_inputs)
+    )
     if best_cfg is None:
         return build(
             _STATIC_SPLIT_PERSISTENT

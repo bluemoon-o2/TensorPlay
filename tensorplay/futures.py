@@ -88,7 +88,10 @@ class Future:
         """Adds a callback mapped over this future; returns the new future.
 
         The callback receives *this* future and its return value becomes the
-        derived future's result (torch ``Future.then`` contract).
+        derived future's result (torch ``Future.then`` contract). Waiting on
+        the derived future drives *this* future (and therefore the underlying
+        async collective) to completion, matching torch's wait-propagation
+        through ``.then()`` chains.
         """
 
         def _run_cb(_fut: "Future") -> None:
@@ -98,6 +101,11 @@ class Future:
                 derived.set_result(e)
 
         derived = Future()
+        # Drive the base future to completion when the derived future is
+        # first waited on. Without this the lazily-invoked base completer
+        # (e.g. the CUDA-event sync behind a collective Work) would never
+        # run and the derived future would block forever.
+        derived._completer = self.wait
         self.add_done_callback(_run_cb)
         return derived
 

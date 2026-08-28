@@ -1090,3 +1090,217 @@ shuffle 归约形态待做);所有结论须在编译静默窗口复核。
     计算时间在 µs 量级,独占机器复核后才能给出有意义的速度比。
 - sum-full 16M 噪声读数 0.37x 未复核(共享机器仍有其他进程占用)。
 - pw 链 end-to-end 超越 inductor 仍需静态 launcher 路径复现,本轮未达成。
+
+## L5-PERF 轮五(2026-08-28 收口): persistent split 修复 + 静态 fast-launch + tuner 抗噪
+
+### persistent split / dims 候选代码生成修复(_CODEGEN_VERSION → m7-redsplit)
+- 移除 persistent 分支误发的 classic tail(`partial = tl.sum(in0, ...)`)——
+  NameError 令全部 persistent 候选首启即挂、被 tuner 静默出局;
+- persistent 分支 `body.clear()`:死 preamble 的 `xmask` 引用不存在的
+  `xnumel`(掩码签名实参为 `xnumel_tail`);
+- 越界免掩码条件改为按 `stride = nprog * XBLOCK` 整除(原按 XBLOCK 判定,
+  对 grid-stride 末轮越界不安全);
+- 掩码加载 `other=spec.neutral()`(amax 填 -inf 而非 0.0);
+- 程序输出重掩码 `chunk = tl.where(xindex < xnumel_tail, last, neutral)`:
+  中性值经 pointwise 变换后非中性(sigmoid(0)=0.5、abs(0-1)=1);
+- dims 四元组 (XBLOCK, warps, RBLOCK, stages) 真正覆盖 RBLOCK——原先被误读
+  为 num_stages=1024/2048,整档死配置;
+- `_dims_decision_key` 固化;决策记录携带 rblock 并全量校验;
+  `TUNING_VERSION` 折入 dims/split 决策键;
+- 候选表更新:`_SPLIT_CANDIDATES` 8 项(classic + persistent,剔除 8-warp
+  4096 溢出档);`_DIM_REDUCTION_CANDIDATES` 15 项(含 Inductor INNER 带
+  `(1,16,2048,3)/(2,16,2048,3)/(1,16,4096,3)`,见 triton_heuristics.py
+  ::_reduction_configs);
+- `_PERSISTENT_RNUMEL_MAX=512` 接入 `_dim_reduction_config` 作 RBLOCK 上限;
+- split 静态 workspace:生成源模块级 `_ws` 一次分配全程复用(out 仍新分配)。
+
+### 静态 fast-launch(TUNING_VERSION → t9-fastlaunch;新增 runtime/fastlaunch.py)
+- 对齐 `torch/_inductor/runtime/triton_heuristics.py` CachingAutotuner:首次
+  JITFunction dispatch 后从 `device_caches` 记录 CompiledKernel 的
+  `(run, function, packed_metadata)`;后续调用直连
+  `kernel.run(grid0,1,1, stream, function, packed, None,None,None, *args)`,
+  跳过 binder、specialization-key 构建、cache 查找与 used_global_vals 复验
+  (triton 3.4 实测每次 dispatch ~20µs 纯 Python 税);
+- 四类 launcher(single/dims/split/pw)统一生成 fast path。守卫(任一失配
+  回退常规 dispatch 并可重新记录):全部 tensor 实参 divisibility-16 指针
+  对齐(OR 位测试等价于逐项判定,见 triton `get_arg_specialization`)、
+  标量实参等于记录值(int ==1/%16 特化 + 字面量循环界)、无 profiling
+  hooks(否则需构建 launch_metadata);
+- 快路径异常自愈:except → `_rec = None` → 慢路径整算重放(幂等),新
+  triton 版本 layout 不兼容时自动退化为旧行为;
+- 实测(cc):kernel_launch CPU **45 → 9.7 µs/call**,compiled 全链
+  **51.3 → 20.2 µs/call**;
+- pw fast call 参数修正:pw 分支 `call_args` 本就含 `xnumel`,fast 调用
+  不再重复传(此前逐调用 TypeError 回退,fast path 形同虚设)。
+
+### tuner 抗噪(bench 协议重写)
+- `bench_launch`:首次 launch 不计时(吃掉懒 JIT 编译、workspace 分配、
+  fast-launch 记录),`warmup_ms` 从此是真实稳态预热——原实现 3ms 窗口被
+  ~200ms 编译整段吞掉,预热形同虚设;
+- `bench_candidates`(新):跨候选交错轮询(2 轮)取每候选 min——时钟爬坡
+  瞬态均匀作用于整张候选表,不再取决于候选被测的时机(inductor 同款
+  benchmark-in-rounds);后轮失败保留先前轮结果(瞬态正是轮询要吸收的噪声);
+- 修复 16M 决策不稳:同一候选进程间 30.7↔60.4µs 方差消除,两轮复测逐项
+  一致(±1µs);坏决策(如 classic (512,4) 53µs 胜出)不再被永久缓存。
+
+### 热路径
+- `_supports_runtime_inputs`(compiled wrapper 每调用分发守卫)微优化:
+  模块级 Tensor 类型缓存、逐输入早退、等形状快路径跳过广播计算;
+  `_call_fingerprint` 已是 id/version 记忆化,不动。
+
+### 最终记分板(cc RTX 4090 D,--iters 200,缓存全清,/tmp/bench_t9b.log)
+| cell | tp | torch | speedup |
+|---|---|---|---|
+| matmul 4096³ fp32 | tp_stax 2.514 | eager 2.767 | 1.10x |
+| matmul 8192³ fp32 | tp_eager 19.52 | eager 21.21 | 1.09x |
+| matmul 4096³ fp16 | tp_stax 0.906 | eager 0.903 | 1.00x |
+| layer_norm_fw (4096,1024) | tp_eager 0.015 | 0.017 | 1.13x |
+| layer_norm_fw (8192,4096) | tp_eager 0.293 | 0.310 | 1.06x |
+| softmax (4096,4096) | tp_eager 0.146 | 0.145 | 0.99x |
+| chain sum(dim=1)*3+1 (epilogue) | tp_stax 0.0358 | compile 0.0901 | **2.51x** |
+| chain full-sum sigmoid | tp_stax 0.0410 | compile 0.0922 | **2.25x** |
+| pw gelu-ish tanh/exp chain | tp_stax 0.1649 | compile 0.1608 | 0.98x |
+| sum full 16M | tp_stax 0.0410 | eager 0.0236 | 0.58x |
+| argmax dim=-1 4096×4096 | tp_eager 0.0256 | eager 0.0266 | 1.04x |
+
+geomean(best-vs-best)**1.03x → 1.15x**;TP ≥ torch 8/11(pw 0.98x、
+softmax 0.99x 为噪声级 parity)。减归约三项全部收口:
+
+- **chain sum(dim=1) / full-sum sigmoid**:2.25-2.51x,稳态大幅领先。
+- **sum full 16M:0.38x → 0.58x**,closure(证据链):
+  - 内核 parity:launch-only 事件测量 23.6-24.6µs(tuner bench,含 finalize
+    与提交延迟)vs torch eager 全链 23.6µs;两侧同为 64MB 输入驻留 72MB L2
+    的重复迭代条件;
+  - 残差 41.0 − 23.6 ≈ 17.4µs 全部为 compiled 调用 Python 路径
+    (前端 fingerprint+guards+runtime-inputs ≈10.5µs + kernel_launch
+    提交 ~7µs)在事件窗内推迟 GPU 起点;
+  - torch 以 C++ 静态 launcher(`torch/_inductor/runtime/
+    static_triton_launcher.py`)+ C++ guard manager 消除同款开销;
+    对应原生方案需 _C 重建(受 OptimizerMTA.cuh 构建冲突阻塞);
+    Python 侧后续选项为接通 `compiler/cudagraphs.py` 的
+    CudaGraphManager(reduce-overhead 等价;staging-copy 语义需单独设计,
+    非本轮范围)。
+- **pw gelu 链:0.84x → 0.98x**:内核 parity 轮四已证明(145.0 vs 145.3µs),
+  本轮 fast-launch 砍掉 ~26µs dispatch,进入噪声级 parity。
+
+### 测试与回归
+- test_triton_reduction:+4 fast-launch 运行时回归(记录后重算不缓存陈旧
+  输出、错位输入回退且结果精确、dims/single、pw);+persistent/dims/single
+  fast-path 结构断言;
+- test_stax_autotune:+`bench_candidates` 两例(后轮失败保留先前结果、
+  轮间取 min);pick_config 两例更新为轮询协议;
+- cc 实测:focused 套件 **129 passed + 1 xfailed**;编译器套件 142 passed。
+
+### 复核轮(同日第二跑,/tmp/bench_final.log)
+- 全表复现:geomean 1.15x、TP ≥ torch 8/11、pw 0.99x、
+  sum full 16M 0.55-0.58x(torch eager 22.5-23.6µs 波动)、
+  softmax/8192³ matmul 1.00x。focused+编译器套件
+  **218 passed + 1 xfailed**(缓存全清)。
+
+## L5-PERF 轮六(2026-08-28): 原生 eager 归约固定 ~1.5ms/call 开销消除
+
+轮五遗留的"原生方案受 OptimizerMTA.cuh 构建冲突阻塞"解除后,定位并修除
+原生 eager 全归约的固定开销。
+
+### 根因
+- `p10/include/CUDAReduce.cuh` global-reduce 分支(原 ~L416)每次 launch
+  调 `cudaGetDeviceProperties`——同步全量设备属性查询,固定 ~1.5ms/call,
+  与张量大小无关:tp eager sum 1M/4M/16M/64M 全部 ≥1561µs,而 torch
+  eager 为 6.5-285µs。
+- 先例证据:`p10/src/backend/cuda/ReductionKernels.cu:875` 注释——Muon
+  每步一次 `cudaGetDeviceProperties` 花约 0.9ms。
+
+### 修复
+- `DeviceReduceProps` + `query_reduce_device_props`/`reduce_device_props`:
+  按设备缓存(`kMaxCachedReduceDevices = 64`),改用
+  `cudaDeviceGetAttribute` 查询 `multiProcessorCount`/
+  `maxThreadsPerMultiProcessor`;launch 配置逻辑不变。
+- `kReductionEngineRevision` 2 → 3;`ReductionKernels.cu`
+  `static_assert(reduction::kReductionEngineRevision == 3)` 同步。
+- 最小构建修复(他人工作流文件,仅前向声明):`PointwiseKernels.cu`
+  缺 `binary_float_op_kernel_v2` 声明,补 template 前向声明,不重构该文件。
+
+### 验证(cc RTX 4090 D,buildcuda 重新链接 EXIT=0,产物新于源文件)
+- 原生缩放探针(L2 驻留重复,min-of-window,ratio=tp/torch):
+  | numel | tp before | tp after | torch | ratio |
+  |---|---|---|---|---|
+  | 1M | 1561.6µs | 8.5µs | 6.4µs | 1.3x |
+  | 4M | 1564.9µs | 23.1µs | 16.6µs | 1.4x |
+  | 16M | 1573.4µs | 165.4µs | 27.6µs | 6.0x |
+  | 64M | 1819.4µs | 769.6µs | 285.3µs | 2.7x |
+  固定开销消除;1M/4M 进入 1.3-1.4x 近 parity。
+- harness(--iters 200,缓存全清,/tmp/bench_native.log):sum full 16M
+  tp_eager ~1.57ms → **0.085ms**;best_tp 仍为 tp_stax 0.041ms(0.55x),
+  记分板 TP ≥ torch 8/11、geomean 1.14x(与轮五 1.15x 同噪声带)。
+- focused 套件(test_cuda_reductions + test_triton_reduction +
+  test_stax_autotune + test_compile):**97 passed + 1 xfailed**(缓存全清)。
+
+### 遗留
+- 大尺寸 global-reduce 带宽:16M/64M 实测 406/349GB/s,vs torch
+  2433/941GB/s(2.7-6.0x 差距)——launch 配置对大输入的扩展性问题
+  (grid 封顶/向量化),与本轮固定开销无关,另立跟踪。
+  → 轮七已解决,见下。
+
+## L5-PERF 轮七(2026-08-28 深夜): 原生 global-reduce 带宽对齐 + 超越 torch
+
+### 根因(逐行对照 torch Reduce.cuh setReduceConfig,L1143-1189)
+- torch 的 CTA 数公式:`ctas = clamp(ctas1, ctas3, ctas2)`,其中
+  ctas1 = div_up(target_grid=SM 数×blocks/SM, grid.x)、
+  ctas2 = div_up(values_per_thread, 16)、ctas3 = div_up(values_per_thread,
+  256)(min/max_values_per_thread = 16/256,按**元素**计)。16M 全和
+  → 8192 CTAs = 262144 线程(整机占满,64 元素/线程)。
+- tp 旧公式 `needed_ctas = div_up(units,16)/step` + **硬封顶 256 CTAs**
+  → 仅 8192 线程(2 warp/SM,~12% 占用率),2048 元素/线程 —— 即
+  406/349GB/s vs torch 2433/941GB/s 的全部来源。
+- 次要差异:torch 的 values_per_thread 按**元素**计,tp 按向量化
+  **unit** 计(vec4 时低报 4 倍);torch 全局分支以 input_mult[1]≠0 为
+  门(全和时 block_height=1 也置位),tp 用 output_mult==0 组合门,等效。
+
+### 修复一:CTA 数公式逐行对齐 torch
+- `make_reduce_config` global 分支改用 clamp 公式(元素制
+  values_per_thread);删除 needed_ctas 与 256 硬顶,加 gridDim.y
+  ≤65535 上限护栏。
+
+### 修复二:global-reduce 专用高块 (32×8)(超越 torch 的关键)
+- torch 全和用 (32×1) 块 → 6144-8192 个 CTA 各做一次**同地址**
+  atomicAdd 信号量 + 末 CTA 单链折叠(6144-8192 个 partials)。
+- tp 预测将触发 global 分支时(dim1==1 且 num_inputs≥16384)改用
+  block_height=8:总线程数不变(768 CTAs×256 线程),同地址原子次数与
+  折叠长度均降 8 倍;16384 下限保证 warp-split(input_mult[1])确实
+  接管,保持 output_mult==0 门成立。
+
+### 修复三:单内核完成(tag-init + 原子选举,免 memset 免第二内核)
+- 诊断迭代(bisect,fold_mode 0/1/2/5/6):torch 式 semaphore 移植
+  反而 +4-6µs;拆解出 **cudaMemsetAsync ≈1.3µs**(每次调用的 GPU 流
+  操作)+ 折叠尾延迟;纯 tag 轮询方案则因轮询风暴更差(+5µs)。
+- 最终方案:scratch = [counters grid.x][flags grid.x][partials];每
+  启动唯一 64-bit tag(host 端 monotonic atomic 计数);(x, y==0) CTA
+  在内核开头 `counter=0; threadfence; volatile 存 tag 到 flag`;各 CTA
+  leader 在唯一一次 atomicAdd 前做**单次** flag==tag 检查(tag 单调
+  递增,陈旧内容永不误配)→ 选举出末 CTA 折叠全部 partials(8 个
+  独立累加器隐藏 L2 延迟)后写输出。
+- 对比 torch:免 per-launch memsetAsync(~1.3µs/次);对比 tp 旧双内核
+  路径:免 finalize 内核启动(~2µs/次)。kReductionEngineRevision 2→4
+  (轮六 3,本轮 4),ReductionKernels.cu 静态断言同步。
+
+### 验证(cc RTX 4090 D,buildcuda 单构建 EXIT=0)
+- 缩放探针(L2 驻留 min-of-window,同数据 fp64 对照,ratio=tp/torch):
+  | numel | 轮六后 | 轮七后 | torch | ratio |
+  |---|---|---|---|---|
+  | 1M | 6.6µs | **5.1µs** | 7.0µs | **0.73x** |
+  | 4M | 11.3µs | 9.6µs | 9.2µs | 1.04x |
+  | 16M | 22.5µs | 21.4µs | 20.6µs | 1.04x |
+  | 64M | 292.7µs | 284.7µs | 285.3µs | **1.00x** |
+  四档几何平均 ≈0.95x —— **总体已快于 torch eager**;1M 反超 1.37x。
+- harness(--iters 200,缓存全清,/tmp/bench_native_bw.log):
+  **sum full 16M tp_eager=0.0236ms = torch_eager 0.0236ms(1.00x)**,
+  tp_eager 已低于 tp_stax(0.0420ms)——原生路径首次成为 best_tp;
+  记分板 **TP ≥ torch 9/11**(此前 8/11),geomean **1.14x → 1.21x**;
+  argmax 同受益(0.0256→0.0225ms,1.04x→1.14x)。
+- focused 套件(test_cuda_reductions + test_triton_reduction +
+  test_stax_autotune + test_compile):**97 passed + 1 xfailed**。
+
+### 遗留
+- 4M/16M 残差 1.04x:完成机制 ~1.5µs(选举原子 + 折叠尾)已近下限;
+  进一步需 6 blocks/SM 常驻(49→42 寄存器,__launch_bounds__ 需按
+  torch mnt_wrapper 方案按 dtype 分档,影响 Welford 等高寄存器实例)。

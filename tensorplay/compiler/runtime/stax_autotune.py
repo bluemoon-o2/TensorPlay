@@ -41,7 +41,7 @@ CANDIDATE_CONFIGS: Tuple[Tuple[int, int], ...] = (
 # changes — so without this bump a decision cached by an older compiler
 # generation short-circuits benchmarking forever and pins yesterday's
 # geometry.
-TUNING_VERSION = "t8-redsplit"
+TUNING_VERSION = "t9-fastlaunch"
 
 _DISABLE_ENV = "TP_DISABLE_STAX_AUTOTUNE"
 
@@ -120,7 +120,7 @@ def bench_launch(launch: Callable[[list], Any], args: list,
     """Minimum per-iteration latency (ms) over warmup + timed launches.
 
     Mirrors the benchmark harness (``_time_tp``): CUDA events around EACH
-    launch with a device sync, best-of.  Two Inductor-benchmarker lessons
+    launch with a device sync, best-of.  Three Inductor-benchmarker lessons
     (``torch/_inductor/runtime/benchmarking.py::benchmark_gpu``):
 
     * A pipelined average measures the Python launch floor (~25-35us) once
@@ -129,15 +129,21 @@ def bench_launch(launch: Callable[[list], Any], args: list,
     * Candidates are JIT-compiled immediately before their window, so the
       GPU idles into a down-clock and a short timed loop never ramps back
       (Inductor runs ``memory_warmup_iters=100`` busy iterations first).
-      We warm up by running the kernel itself for ``warmup_ms`` wall time
-      before recording, which also settles L2 into the steady state the
-      harness measures.
+      The first launch here is UNTIMED (it eats the lazy triton compile,
+      workspace allocation and fast-launch recording), then the kernel runs
+      for ``warmup_ms`` wall time before recording — settling clocks and L2
+      into the steady state the harness measures.
+    * A single benchmark window still races the clock ramp: candidates
+      benched back-to-back inside one window share its transient.  Use
+      :func:`bench_candidates` to interleave rounds across candidates.
     """
 
     import time
 
     import tensorplay as tp
 
+    launch(args)  # untimed: lazy JIT compile + workspace + record
+    tp.cuda.synchronize()
     best = float("inf")
     for _ in range(3):
         deadline = time.perf_counter() + warmup_ms / 1000.0
@@ -153,6 +159,60 @@ def bench_launch(launch: Callable[[list], Any], args: list,
             tp.cuda.synchronize()
             best = min(best, start.elapsed_time(end))
     return best
+
+
+def bench_candidates(
+    build: Callable[[Any], Any],
+    candidates: Sequence[Any],
+    args: list,
+    *,
+    rounds: int = 2,
+    bench_fn: Optional[Callable[[Any, list], float]] = None,
+) -> Tuple[Optional[Any], Any, float]:
+    """Interleaved-round candidate benchmarking (Inductor-style).
+
+    Benches every candidate once per round and keeps the per-candidate MIN
+    across rounds, so a clock-ramp transient in one window penalizes all
+    candidates equally instead of whichever candidate happened to be
+    compiled/benched at that moment.  A candidate that fails to build or
+    bench is disqualified.  Returns ``(best_config, best_launch,
+    best_time)`` with ``best_config=None`` when every candidate died.
+    """
+
+    if bench_fn is None:
+        bench_fn = bench_launch
+    times: Dict[Any, float] = {}
+    launches: Dict[Any, Any] = {}
+    dead: set = set()
+    for _ in range(max(1, rounds)):
+        for candidate in candidates:
+            if candidate in dead:
+                continue
+            try:
+                launch = launches.get(candidate)
+                if launch is None:
+                    launch = build(candidate)
+                timing = bench_fn(launch, args)
+            except Exception:  # noqa: BLE001 - candidate disqualification
+                dead.add(candidate)
+                if candidate not in times:
+                    # never benched successfully: fully disqualified.  A
+                    # candidate with an earlier round result keeps it — a
+                    # later transient failure is exactly the clock noise
+                    # this round-interleaving exists to absorb.
+                    launches.pop(candidate, None)
+                continue
+            launches[candidate] = launch
+            times[candidate] = min(times.get(candidate, float("inf")), timing)
+    best_config: Optional[Any] = None
+    best_launch: Any = None
+    best_time = float("inf")
+    for candidate, timing in times.items():
+        if timing < best_time:
+            best_config = candidate
+            best_launch = launches[candidate]
+            best_time = timing
+    return best_config, best_launch, best_time
 
 
 def pick_config(
@@ -180,19 +240,9 @@ def pick_config(
     if cached is not None:
         return cached, build_launch(cached)
 
-    best_config: Optional[Tuple[int, int]] = None
-    best_launch: Any = None
-    best_time = float("inf")
-    timings: Dict[Tuple[int, int], float] = {}
-    for config in CANDIDATE_CONFIGS:
-        try:
-            launch = build_launch(config)
-            timing = bench_fn(launch, sample_args)
-        except Exception:  # noqa: BLE001 - candidate disqualification
-            continue
-        timings[config] = timing
-        if timing < best_time:
-            best_config, best_launch, best_time = config, launch, timing
+    best_config, best_launch, _ = bench_candidates(
+        build_launch, CANDIDATE_CONFIGS, sample_args, bench_fn=bench_fn
+    )
     if best_config is None:
         raise RuntimeError(
             "stax autotune: all candidate configs failed to compile or run"

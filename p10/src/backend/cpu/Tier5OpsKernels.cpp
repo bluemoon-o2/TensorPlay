@@ -24,6 +24,7 @@
 #include "Exception.h"
 #include "Parallel.h"
 #include "TypePromotion.h"
+#include "GradMode.h"
 #include "tensorplay/ops/TensorRedispatchGenerated.h"
 
 #include <vector>
@@ -835,6 +836,97 @@ const Tensor& param_at(const std::vector<Tensor>& params, size_t idx, bool has_b
     return params[idx];
 }
 
+// The rnn autograd wrapper attaches RnnTanhBackward & co. to the outputs and
+// those nodes replay the forward themselves (RNNBackward.h); the graph the
+// per-op wrappers would build inside rnn_impl is never consumed.  Suppress it
+// so the sequence loop does not pay node/saved-variable overhead per op.
+struct RnnForwardNoGrad {
+    RnnForwardNoGrad() : prev_(GradMode::is_enabled()) { GradMode::set_enabled(false); }
+    ~RnnForwardNoGrad() { GradMode::set_enabled(prev_); }
+    bool prev_;
+};
+
+// ---------------------------------------------------------------------------
+// Fused CPU cells.  CPU port of the CUDA fused-cell kernels (RNNKernels.cu),
+// which are themselves ports of ATen _thnn_fused_lstm_cell / _thnn_fused_gru_cell
+// (aten/src/ATen/native/RNN.cpp).  ATen's CPU cell keeps the per-step cost low
+// with chunk-views + in-place gate updates; here we collapse the same math into
+// a single parallel_for over N*H elements so the inner loop dispatches one
+// kernel (and allocates one output) instead of ~15-20 decomposed ops.  N*H is
+// below GRAIN_SIZE for typical shapes, so the cell runs serially on the calling
+// thread -- the low-overhead regime the decomposition was missing.  Gate math is
+// bit-for-bit the decomposed rnn_impl formulas (biases folded identically), so
+// numerics are unchanged.  Accumulate in opmath (float for fp16/bf16).
+template <typename T> struct RnnAcc { using type = T; };
+template <> struct RnnAcc<Half> { using type = float; };
+template <> struct RnnAcc<BFloat16> { using type = float; };
+
+template <typename M> inline M rnn_sig(M x) { return M(1) / (M(1) + std::exp(-x)); }
+
+// LSTM cell: ig/hg are (N,4H) with b_ih/b_hh already folded in by the caller.
+// Returns (hy, cy).
+template <typename T>
+static std::tuple<Tensor, Tensor> fused_lstm_cell_fwd(
+        const Tensor& ig, const Tensor& hg, const Tensor& cx) {
+    using M = typename RnnAcc<T>::type;
+    const int64_t N = ig.size(0), H = ig.size(1) / 4;
+    Tensor hy = Tensor::empty({N, H}, ig.dtype(), ig.device());
+    Tensor cy = Tensor::empty({N, H}, ig.dtype(), ig.device());
+    const T* igp = ig.data_ptr<T>();
+    const T* hgp = hg.data_ptr<T>();
+    const T* cxp = cx.data_ptr<T>();
+    T* hyp = hy.data_ptr<T>();
+    T* cyp = cy.data_ptr<T>();
+    parallel_for(0, N * H, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
+        for (int64_t li = begin; li < end; ++li) {
+            const int64_t off = (li / H) * 4 * H + li % H;
+            const M i_ = rnn_sig<M>(M(igp[off]) + M(hgp[off]));
+            const M f_ = rnn_sig<M>(M(igp[off + H]) + M(hgp[off + H]));
+            const M g_ = std::tanh(M(igp[off + 2 * H]) + M(hgp[off + 2 * H]));
+            const M o_ = rnn_sig<M>(M(igp[off + 3 * H]) + M(hgp[off + 3 * H]));
+            const M cv = f_ * M(cxp[li]) + i_ * g_;
+            cyp[li] = T(cv);
+            hyp[li] = T(o_ * std::tanh(cv));
+        }
+    });
+    return {hy, cy};
+}
+
+// GRU cell: ig is (N,3H) with b_ih folded in; hg is (N,3H) WITHOUT b_hh (the
+// decomposed path adds the three b_hh segments per-gate, reproduced here).
+// Returns hy.
+template <typename T>
+static Tensor fused_gru_cell_fwd(
+        const Tensor& ig, const Tensor& hg, const Tensor& hx, const Tensor& b_hh) {
+    using M = typename RnnAcc<T>::type;
+    const int64_t N = ig.size(0), H = ig.size(1) / 3;
+    Tensor hy = Tensor::empty({N, H}, ig.dtype(), ig.device());
+    const T* igp = ig.data_ptr<T>();
+    const T* hgp = hg.data_ptr<T>();
+    const T* hxp = hx.data_ptr<T>();
+    const T* bp = b_hh.defined() ? b_hh.data_ptr<T>() : nullptr;
+    T* hyp = hy.data_ptr<T>();
+    parallel_for(0, N * H, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
+        for (int64_t li = begin; li < end; ++li) {
+            const int64_t col = li % H;
+            const int64_t off = (li / H) * 3 * H + col;
+            const M br = bp ? M(bp[col]) : M(0);
+            const M bz = bp ? M(bp[H + col]) : M(0);
+            const M bn = bp ? M(bp[2 * H + col]) : M(0);
+            const M r_ = rnn_sig<M>(M(igp[off]) + M(hgp[off]) + br);
+            const M z_ = rnn_sig<M>(M(igp[off + H]) + M(hgp[off + H]) + bz);
+            const M hn_lin = M(hgp[off + 2 * H]) + bn;
+            const M n_ = std::tanh(M(igp[off + 2 * H]) + r_ * hn_lin);
+            hyp[li] = T(n_ + z_ * (M(hxp[li]) - n_));
+        }
+    });
+    return hy;
+}
+
+// Dispatch helper: true if the fused path handled the cell (fp32/fp64 only for
+// now; fp16/bf16 keep the decomposed loop, which already beats torch).
+enum : int { FUSED_NONE = 0, FUSED_DID = 1 };
+
 } // anonymous namespace
 
 static std::tuple<Tensor, Tensor, Tensor> rnn_impl(
@@ -842,17 +934,23 @@ static std::tuple<Tensor, Tensor, Tensor> rnn_impl(
     const Tensor& input, const std::vector<Tensor>& hx,
     const std::vector<Tensor>& params, bool has_biases, int64_t num_layers,
     bool bidirectional, bool batch_first) {
+    RnnForwardNoGrad no_grad_guard;
     // Vectorized port of at::native RNN loops (aten/src/ATen/native/RNN.cpp).
-    // Compute happens in the input dtype (fp32 stays fp32); input-side gates
-    // for a whole direction are produced by a single GEMM and gate math is
-    // expressed with tensor ops so the pointwise kernels do the element work.
+    // Compute happens in the input dtype, mirroring ATen's native path
+    // (FullLayer::operator() runs one sequence-wide linear_ih GEMM, then
+    // per-step cells); reduced dtypes round per op exactly like ATen because
+    // the element kernels widen to fp32 internally (opmath parity).
     const DType dt = input.dtype();
-    if (dt != DType::Float32 && dt != DType::Float64) {
-        TP_THROW(RuntimeError, "rnn: only Float32/Float64 inputs are supported");
+    if (dt != DType::Float32 && dt != DType::Float64 &&
+        dt != DType::Float16 && dt != DType::BFloat16) {
+        TP_THROW(RuntimeError, "rnn: only Float16/BFloat16/Float32/Float64 inputs are supported");
     }
     Tensor x = batch_first ? input.transpose(0, 1).contiguous() : input.contiguous();
     const int64_t T = x.size(0), N = x.size(1);
     if (hx.empty()) TP_THROW(RuntimeError, "rnn: hx required");
+    // ATen RNN.cpp parity: lstm indexes hx[1] for c0; an undersized hx would
+    // read past the vector (torch: "lstm expects two hidden states").
+    if (kind == 0 && hx.size() != 2) TP_THROW(RuntimeError, "lstm expects two hidden states");
     const int64_t L = num_layers;
     const int64_t dirs = bidirectional ? 2 : 1;
     const int64_t H = hx[0].size(-1);
@@ -906,40 +1004,60 @@ static std::tuple<Tensor, Tensor, Tensor> rnn_impl(
                 // gru handles the three bias segments separately below.
                 if (kind != 1 && b_hh.defined()) hg = hg.add(b_hh);
 
+                // Fused-cell fast path (fp32/fp64): one kernel per step instead
+                // of the decomposed op sequence below.  Bit-for-bit same math.
+                const bool fused = (dt == DType::Float32 || dt == DType::Float64);
+
                 if (kind == 0) {
-                    auto gate = [&](int64_t off, Tensor (*fn)(const Tensor&)) -> Tensor {
-                        return fn(ig.narrow(1, off, H).add(hg.narrow(1, off, H)));
-                    };
-                    Tensor i_ = gate(0, [](const Tensor& v) { return v.sigmoid(); });
-                    Tensor f_ = gate(H, [](const Tensor& v) { return v.sigmoid(); });
-                    Tensor g_ = gate(2 * H, [](const Tensor& v) { return v.tanh(); });
-                    Tensor o_ = gate(3 * H, [](const Tensor& v) { return v.sigmoid(); });
-                    c = f_.mul(c).add(i_.mul(g_));
-                    h = o_.mul(c.tanh());
+                    if (fused) {
+                        if (dt == DType::Float32) {
+                            auto r = fused_lstm_cell_fwd<float>(ig, hg, c);
+                            h = std::get<0>(r); c = std::get<1>(r);
+                        } else {
+                            auto r = fused_lstm_cell_fwd<double>(ig, hg, c);
+                            h = std::get<0>(r); c = std::get<1>(r);
+                        }
+                    } else {
+                        auto gate = [&](int64_t off, Tensor (*fn)(const Tensor&)) -> Tensor {
+                            return fn(ig.narrow(1, off, H).add(hg.narrow(1, off, H)));
+                        };
+                        Tensor i_ = gate(0, [](const Tensor& v) { return v.sigmoid(); });
+                        Tensor f_ = gate(H, [](const Tensor& v) { return v.sigmoid(); });
+                        Tensor g_ = gate(2 * H, [](const Tensor& v) { return v.tanh(); });
+                        Tensor o_ = gate(3 * H, [](const Tensor& v) { return v.sigmoid(); });
+                        c = f_.mul(c).add(i_.mul(g_));
+                        h = o_.mul(c.tanh());
+                    }
                 } else if (kind == 1) {
                     // torch GRUCell:
                     //   r = sigmoid(ir + hr), z = sigmoid(iz + hz)
                     //   n = tanh(in + r * (hn + b_hn))
                     //   h' = (1 - z) * n + z * h
-                    Tensor b_r, b_z, b_n;
-                    if (b_hh.defined()) {
-                        b_r = b_hh.narrow(0, 0, H);
-                        b_z = b_hh.narrow(0, H, H);
-                        b_n = b_hh.narrow(0, 2 * H, H);
+                    if (fused) {
+                        h = (dt == DType::Float32)
+                            ? fused_gru_cell_fwd<float>(ig, hg, h, b_hh)
+                            : fused_gru_cell_fwd<double>(ig, hg, h, b_hh);
+                    } else {
+                        Tensor b_r, b_z, b_n;
+                        if (b_hh.defined()) {
+                            b_r = b_hh.narrow(0, 0, H);
+                            b_z = b_hh.narrow(0, H, H);
+                            b_n = b_hh.narrow(0, 2 * H, H);
+                        }
+                        Tensor r_ = ig.narrow(1, 0, H)
+                                        .add(b_r.defined() ? b_r.add(hg.narrow(1, 0, H))
+                                                           : hg.narrow(1, 0, H))
+                                        .sigmoid();
+                        Tensor z_ = ig.narrow(1, H, H)
+                                        .add(b_z.defined() ? b_z.add(hg.narrow(1, H, H))
+                                                           : hg.narrow(1, H, H))
+                                        .sigmoid();
+                        Tensor hn_lin = hg.narrow(1, 2 * H, H);
+                        if (b_n.defined()) hn_lin = hn_lin.add(b_n);
+                        Tensor n_ = ig.narrow(1, 2 * H, H).add(r_.mul(hn_lin)).tanh();
+                        Tensor one_minus_z = z_.neg().add(Scalar(1));
+                        h = one_minus_z.mul(n_).add(z_.mul(h));
                     }
-                    Tensor r_ = ig.narrow(1, 0, H)
-                                    .add(b_r.defined() ? b_r.add(hg.narrow(1, 0, H))
-                                                       : hg.narrow(1, 0, H))
-                                    .sigmoid();
-                    Tensor z_ = ig.narrow(1, H, H)
-                                    .add(b_z.defined() ? b_z.add(hg.narrow(1, H, H))
-                                                       : hg.narrow(1, H, H))
-                                    .sigmoid();
-                    Tensor hn_lin = hg.narrow(1, 2 * H, H);
-                    if (b_n.defined()) hn_lin = hn_lin.add(b_n);
-                    Tensor n_ = ig.narrow(1, 2 * H, H).add(r_.mul(hn_lin)).tanh();
-                    Tensor one_minus_z = z_.neg().add(Scalar(1));
-                    h = one_minus_z.mul(n_).add(z_.mul(h));
                 } else {
                     Tensor pre = ig.add(hg);
                     h = (kind == 2) ? pre.tanh() : pre.relu();
@@ -1000,7 +1118,9 @@ std::tuple<Tensor, Tensor, Tensor> lstm_cpu(const Tensor& input, const std::vect
 // ===========================================================================
 // Remaining nn losses (mean reduction). ATen anchors: Loss.cpp families
 // (l1/smooth_l1/huber/kl_div/bce/cosine_embedding/soft_margin/
-//  triplet_margin/poisson_nll/multi_margin/multilabel_*).
+//  triplet_margin/poisson_nll/multilabel_soft_margin).
+// multi_margin_loss / multilabel_margin_loss live in MarginLossKernels.cpp
+// with ATen-aligned signatures.
 // ctc_loss / gaussian_nll_loss intentionally omitted (heavy DP / different
 // signature surface) — noted for a later pass.
 // ===========================================================================
@@ -1031,36 +1151,6 @@ Tensor l1_loss_cpu(const Tensor& input, const Tensor& target) {
     return scalar_from(n ? total / n : 0.0, input.dtype(), input.device());
 }
 
-Tensor smooth_l1_loss_cpu(const Tensor& input, const Tensor& target, Scalar beta) {
-    auto pr = bcast2(input, target);
-    Tensor a = pr.first, b = pr.second;
-    double bt = beta.toDouble();
-    int64_t n = a.numel();
-    const double* ap = a.data_ptr<double>();
-    const double* bp = b.data_ptr<double>();
-    double total = 0;
-    for (int64_t i = 0; i < n; ++i) {
-        double d = std::fabs(ap[i] - bp[i]);
-        total += d < bt ? 0.5 * d * d / bt : d - 0.5 * bt;
-    }
-    return scalar_from(n ? total / n : 0.0, input.dtype(), input.device());
-}
-
-Tensor huber_loss_cpu(const Tensor& input, const Tensor& target, Scalar delta) {
-    auto pr = bcast2(input, target);
-    Tensor a = pr.first, b = pr.second;
-    double dl = delta.toDouble();
-    int64_t n = a.numel();
-    const double* ap = a.data_ptr<double>();
-    const double* bp = b.data_ptr<double>();
-    double total = 0;
-    for (int64_t i = 0; i < n; ++i) {
-        double d = std::fabs(ap[i] - bp[i]);
-        total += d < dl ? 0.5 * d * d : dl * (d - 0.5 * dl);
-    }
-    return scalar_from(n ? total / n : 0.0, input.dtype(), input.device());
-}
-
 Tensor kl_div_cpu(const Tensor& input, const Tensor& target) {
     // input log-probs; target probs; mean(t*(log t - x)).
     auto pr = bcast2(input, target);
@@ -1071,21 +1161,6 @@ Tensor kl_div_cpu(const Tensor& input, const Tensor& target) {
     double total = 0;
     for (int64_t i = 0; i < n; ++i)
         if (tp[i] > 0) total += tp[i] * (std::log(tp[i]) - xp[i]);
-    return scalar_from(n ? total / n : 0.0, input.dtype(), input.device());
-}
-
-Tensor binary_cross_entropy_cpu(const Tensor& input, const Tensor& target) {
-    auto pr = bcast2(input, target);
-    Tensor x = pr.first, t = pr.second;
-    constexpr double kEps = 1e-12;
-    int64_t n = x.numel();
-    const double* xp = x.data_ptr<double>();
-    const double* tp = t.data_ptr<double>();
-    double total = 0;
-    for (int64_t i = 0; i < n; ++i) {
-        double xv = std::min(std::max(xp[i], kEps), 1.0 - kEps);
-        total += -(tp[i] * std::log(xv) + (1.0 - tp[i]) * std::log(1.0 - xv));
-    }
     return scalar_from(n ? total / n : 0.0, input.dtype(), input.device());
 }
 
@@ -1171,30 +1246,6 @@ Tensor poisson_nll_loss_cpu(const Tensor& input, const Tensor& target, bool log_
     return scalar_from(n ? total / n : 0.0, input.dtype(), input.device());
 }
 
-Tensor multi_margin_loss_cpu(const Tensor& input, const Tensor& target, Scalar margin,
-                             double p) {
-    Tensor x = input.contiguous().to(DType::Float64);
-    Tensor tg = target.contiguous().to(DType::Float64);
-    int64_t N = x.size(0), C = x.size(1);
-    const double* xp = x.data_ptr<double>();
-    const double* gp = tg.data_ptr<double>();
-    double mg = margin.toDouble();
-    double total = 0;
-    for (int64_t i = 0; i < N; ++i) {
-        int64_t y = static_cast<int64_t>(gp[i]);
-        if (y < 0 || y >= C)
-            TP_THROW(RuntimeError, "multi_margin_loss: label out of range");
-        double row = 0;
-        for (int64_t k2 = 0; k2 < C; ++k2) {
-            if (k2 == y) continue;
-            double v = mg - xp[i * C + y] + xp[i * C + k2];
-            if (v > 0) row += (p == 2) ? v * v : v;
-        }
-        total += row / C;
-    }
-    return scalar_from(N ? total / N : 0.0, input.dtype(), input.device());
-}
-
 Tensor multilabel_soft_margin_loss_cpu(const Tensor& input, const Tensor& target) {
     auto pr = bcast2(input, target);
     Tensor x = pr.first, t = pr.second;
@@ -1209,29 +1260,6 @@ Tensor multilabel_soft_margin_loss_cpu(const Tensor& input, const Tensor& target
             row += tv * -softplus(-xv) + (1.0 - tv) * -softplus(xv);
         }
         total += -row / C;
-    }
-    return scalar_from(N ? total / N : 0.0, input.dtype(), input.device());
-}
-
-Tensor multilabel_margin_loss_cpu(const Tensor& input, const Tensor& target, Scalar margin) {
-    Tensor x = input.contiguous().to(DType::Float64);
-    Tensor tg = target.contiguous().to(DType::Float64);
-    int64_t N = x.size(0), C = x.size(1);
-    const double* xp = x.data_ptr<double>();
-    const double* tp = tg.data_ptr<double>();
-    double mg = margin.toDouble();
-    double total = 0;
-    for (int64_t i = 0; i < N; ++i) {
-        double row = 0;
-        for (int64_t c = 0; c < C; ++c) {
-            if (tp[i * C + c] != 1.0) continue;
-            for (int64_t k2 = 0; k2 < C; ++k2) {
-                if (tp[i * C + k2] != 0.0) continue;
-                double v = mg - xp[i * C + c] + xp[i * C + k2];
-                if (v > 0) row += v;
-            }
-        }
-        total += row / C;
     }
     return scalar_from(N ? total / N : 0.0, input.dtype(), input.device());
 }
@@ -1268,17 +1296,12 @@ TENSORPLAY_LIBRARY_IMPL(CPU, Tier5OpsKernelsB) {
 
 TENSORPLAY_LIBRARY_IMPL(CPU, Tier5LossesKernels) {
     m.impl("l1_loss", l1_loss_cpu);
-    m.impl("smooth_l1_loss", smooth_l1_loss_cpu);
-    m.impl("huber_loss", huber_loss_cpu);
     m.impl("kl_div", kl_div_cpu);
-    m.impl("binary_cross_entropy", binary_cross_entropy_cpu);
     m.impl("cosine_embedding_loss", cosine_embedding_loss_cpu);
     m.impl("soft_margin_loss", soft_margin_loss_cpu);
     m.impl("triplet_margin_loss", triplet_margin_loss_cpu);
     m.impl("poisson_nll_loss", poisson_nll_loss_cpu);
-    m.impl("multi_margin_loss", multi_margin_loss_cpu);
     m.impl("multilabel_soft_margin_loss", multilabel_soft_margin_loss_cpu);
-    m.impl("multilabel_margin_loss", multilabel_margin_loss_cpu);
 }
 
 } // namespace cpu

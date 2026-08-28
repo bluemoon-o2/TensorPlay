@@ -1,0 +1,41 @@
+name: pr-title
+
+# Validates that the PR title follows the Conventional Commits schema enforced
+# for commit messages (tools/commit_schema.py). The PR title becomes the
+# squash-commit subject on merge, so keeping it conformant keeps `cz changelog`
+# drafts and the release-notes label buckets meaningful.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    name: pr-title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          show-progress: false
+          sparse-checkout: |
+            tools/commit_schema.py
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate the PR title
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python tools/commit_schema.py --message "$PR_TITLE"

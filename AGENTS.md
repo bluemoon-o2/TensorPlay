@@ -28,6 +28,20 @@ ps -eo pid,etime,args | grep -E "ninja|cmake --build|make.*-j|nvcc|cc1plus|cicc"
    （本机 30GB 内存，`-j` 全开 + nvcc 会 OOM kill，报错 137 即此因）。
 6. 大 `-j` 前先 `free -g` 确认可用内存。
 
+## 提交规范（Conventional Commits）
+
+- 提交标题格式：`type(scope): subject`（≤100 字符，结尾不加句号）。
+  type ∈ build | chore | ci | docs | feat | fix | perf | refactor | revert | style | test。
+- **feat/fix 必须带 scope**；scope ∈ frontend | autograd | compiler | kernels | cuda | build | docs，
+  与 `release notes: *` 标签族 1:1 对应（见 .github/labels.yml）。
+- 破坏性变更：标题加 `!`（如 `feat(frontend)!: ...`），并在 footer 写 `BREAKING CHANGE: ...`。
+- 校验器是 tools/commit_schema.py（commit-msg 钩子、pr-title 工作流共用）；
+  本地启用：`pre-commit install --hook-type pre-commit --hook-type commit-msg`。
+- PR 标题同样按此规范校验（合并后成为 squash commit 标题）。
+- **版本不用 cz bump**：版本号遵循 torch 规则（version.txt + tools/generate_tensorplay_version.py；
+  nightly 为 X.Y.0.dev<UTC日期>[+cuXXX|+cpu]）。commitizen 仅用于 `cz changelog` 草稿。
+- 合并提交、`Revert ...`、fixup!/squash! 提交不受规范约束。
+
 ## 其他注意事项
 
 - 本仓库常有多方未提交改动并存。遇到与己无关的文件编译失败（缩进、缺 include、

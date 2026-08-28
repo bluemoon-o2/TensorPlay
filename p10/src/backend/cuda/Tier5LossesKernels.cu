@@ -6,7 +6,8 @@
 // D2H copy. ATen anchors (third_party/pytorch 2.15.0a0): Loss.cpp families
 // l1/smooth_l1/huber/kl_div/bce/bce_with_logits/cosine_embedding/
 // hinge_embedding/margin_ranking/soft_margin/triplet_margin/poisson_nll/
-// multi_margin/multilabel_*.
+// multilabel_soft_margin. (multi_margin_loss / multilabel_margin_loss live
+// in MarginLossKernels.cu with ATen-aligned signatures.)
 #include "Tensor.h"
 #include "Dispatcher.h"
 #include "Scalar.h"
@@ -87,41 +88,11 @@ __global__ void l1_elem_kernel(int64_t n, const double* a, const double* b, doub
     for (; i < n; i += st) o[i] = ::fabs(a[i] - b[i]);
 }
 
-__global__ void smooth_l1_elem_kernel(int64_t n, const double* a, const double* b,
-                                      double beta, double* o) {
-    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    int64_t st = static_cast<int64_t>(blockDim.x) * gridDim.x;
-    for (; i < n; i += st) {
-        double d = ::fabs(a[i] - b[i]);
-        o[i] = d < beta ? 0.5 * d * d / beta : d - 0.5 * beta;
-    }
-}
-
-__global__ void huber_elem_kernel(int64_t n, const double* a, const double* b,
-                                  double delta, double* o) {
-    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    int64_t st = static_cast<int64_t>(blockDim.x) * gridDim.x;
-    for (; i < n; i += st) {
-        double d = ::fabs(a[i] - b[i]);
-        o[i] = d < delta ? 0.5 * d * d : delta * (d - 0.5 * delta);
-    }
-}
-
 __global__ void kl_div_elem_kernel(int64_t n, const double* x, const double* t, double* o) {
     int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t st = static_cast<int64_t>(blockDim.x) * gridDim.x;
     for (; i < n; i += st)
         o[i] = t[i] > 0 ? t[i] * (::log(t[i]) - x[i]) : 0.0;
-}
-
-__global__ void bce_elem_kernel(int64_t n, const double* x, const double* t, double* o) {
-    constexpr double kEps = 1e-12;
-    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    int64_t st = static_cast<int64_t>(blockDim.x) * gridDim.x;
-    for (; i < n; i += st) {
-        double xv = ::fmin(::fmax(x[i], kEps), 1.0 - kEps);
-        o[i] = -(t[i] * ::log(xv) + (1.0 - t[i]) * ::log(1.0 - xv));
-    }
 }
 
 __device__ inline double dsp(double y) {
@@ -215,23 +186,6 @@ __global__ void triplet_row_kernel(int64_t N, int64_t D, const double* a, const 
     }
 }
 
-__global__ void multi_margin_row_kernel(int64_t N, int64_t C, const double* x,
-                                        const double* g, double margin, double pw,
-                                        double* o) {
-    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    int64_t st = static_cast<int64_t>(blockDim.x) * gridDim.x;
-    for (; i < N; i += st) {
-        int64_t y = static_cast<int64_t>(g[i]);
-        double row = 0;
-        for (int64_t k2 = 0; k2 < C; ++k2) {
-            if (k2 == y || y < 0 || y >= C) continue;
-            double v = margin - x[i * C + y] + x[i * C + k2];
-            if (v > 0) row += (pw == 2) ? v * v : v;
-        }
-        o[i] = row / C;
-    }
-}
-
 __global__ void mlsm_row_kernel(int64_t N, int64_t C, const double* x, const double* t,
                                 double* o) {
     // -1/C sum_c [t*logsig(x) + (1-t)*logsig(-x)]; logsig(u) = -dsp(-u)
@@ -244,24 +198,6 @@ __global__ void mlsm_row_kernel(int64_t N, int64_t C, const double* x, const dou
             row += tv * -dsp(-xv) + (1.0 - tv) * -dsp(xv);
         }
         o[i] = -row / C;
-    }
-}
-
-__global__ void mlm_row_kernel(int64_t N, int64_t C, const double* x, const double* t,
-                               double margin, double* o) {
-    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    int64_t st = static_cast<int64_t>(blockDim.x) * gridDim.x;
-    for (; i < N; i += st) {
-        double row = 0;
-        for (int64_t c = 0; c < C; ++c) {
-            if (t[i * C + c] != 1.0) continue;
-            for (int64_t k2 = 0; k2 < C; ++k2) {
-                if (t[i * C + k2] != 0.0) continue;
-                double v = margin - x[i * C + c] + x[i * C + k2];
-                if (v > 0) row += v;
-            }
-        }
-        o[i] = row / C;
     }
 }
 
@@ -285,34 +221,6 @@ Tensor l1_loss_cuda(const Tensor& input, const Tensor& target) {
     return mean_from_elems(elems, n, input.dtype(), input.device());
 }
 
-Tensor smooth_l1_loss_cuda(const Tensor& input, const Tensor& target, Scalar beta) {
-    auto pr = pair_f64_dev(input, target);
-    Tensor elems = Tensor::empty(shape_of(pr.first), DType::Float64, input.device());
-    int64_t n = elems.numel();
-    if (n) {
-        auto stream = getCurrentCUDAStream().stream();
-        smooth_l1_elem_kernel<<<loss_grid(n), kThreads, 0, stream>>>(
-            n, pr.first.data_ptr<double>(), pr.second.data_ptr<double>(), beta.toDouble(),
-            elems.data_ptr<double>());
-        CUDA_CHECK(cudaGetLastError());
-    }
-    return mean_from_elems(elems, n, input.dtype(), input.device());
-}
-
-Tensor huber_loss_cuda(const Tensor& input, const Tensor& target, Scalar delta) {
-    auto pr = pair_f64_dev(input, target);
-    Tensor elems = Tensor::empty(shape_of(pr.first), DType::Float64, input.device());
-    int64_t n = elems.numel();
-    if (n) {
-        auto stream = getCurrentCUDAStream().stream();
-        huber_elem_kernel<<<loss_grid(n), kThreads, 0, stream>>>(
-            n, pr.first.data_ptr<double>(), pr.second.data_ptr<double>(), delta.toDouble(),
-            elems.data_ptr<double>());
-        CUDA_CHECK(cudaGetLastError());
-    }
-    return mean_from_elems(elems, n, input.dtype(), input.device());
-}
-
 Tensor kl_div_cuda(const Tensor& input, const Tensor& target) {
     auto pr = pair_f64_dev(input, target);
     Tensor elems = Tensor::empty(shape_of(pr.first), DType::Float64, input.device());
@@ -320,20 +228,6 @@ Tensor kl_div_cuda(const Tensor& input, const Tensor& target) {
     if (n) {
         auto stream = getCurrentCUDAStream().stream();
         kl_div_elem_kernel<<<loss_grid(n), kThreads, 0, stream>>>(
-            n, pr.first.data_ptr<double>(), pr.second.data_ptr<double>(),
-            elems.data_ptr<double>());
-        CUDA_CHECK(cudaGetLastError());
-    }
-    return mean_from_elems(elems, n, input.dtype(), input.device());
-}
-
-Tensor binary_cross_entropy_cuda(const Tensor& input, const Tensor& target) {
-    auto pr = pair_f64_dev(input, target);
-    Tensor elems = Tensor::empty(shape_of(pr.first), DType::Float64, input.device());
-    int64_t n = elems.numel();
-    if (n) {
-        auto stream = getCurrentCUDAStream().stream();
-        bce_elem_kernel<<<loss_grid(n), kThreads, 0, stream>>>(
             n, pr.first.data_ptr<double>(), pr.second.data_ptr<double>(),
             elems.data_ptr<double>());
         CUDA_CHECK(cudaGetLastError());
@@ -460,22 +354,6 @@ Tensor triplet_margin_loss_cuda(const Tensor& anchor, const Tensor& positive,
     return mean_from_elems(elems, N, anchor.dtype(), anchor.device());
 }
 
-Tensor multi_margin_loss_cuda(const Tensor& input, const Tensor& target, Scalar margin,
-                              double p) {
-    int64_t N = input.size(0), C = input.size(1);
-    Tensor x = input.contiguous().to(DType::Float64);
-    Tensor tg = target.contiguous().to(DType::Float64);
-    Tensor elems = Tensor::empty({N}, DType::Float64, input.device());
-    if (N) {
-        auto stream = getCurrentCUDAStream().stream();
-        multi_margin_row_kernel<<<loss_grid(N), kThreads, 0, stream>>>(
-            N, C, x.data_ptr<double>(), tg.data_ptr<double>(), margin.toDouble(), p,
-            elems.data_ptr<double>());
-        CUDA_CHECK(cudaGetLastError());
-    }
-    return mean_from_elems(elems, N, input.dtype(), input.device());
-}
-
 Tensor multilabel_soft_margin_loss_cuda(const Tensor& input, const Tensor& target) {
     int64_t N = input.size(0), C = input.size(1);
     auto pr = pair_f64_dev(input, target);
@@ -490,26 +368,9 @@ Tensor multilabel_soft_margin_loss_cuda(const Tensor& input, const Tensor& targe
     return mean_from_elems(elems, N, input.dtype(), input.device());
 }
 
-Tensor multilabel_margin_loss_cuda(const Tensor& input, const Tensor& target, Scalar margin) {
-    int64_t N = input.size(0), C = input.size(1);
-    auto pr = pair_f64_dev(input, target);
-    Tensor elems = Tensor::empty({N}, DType::Float64, input.device());
-    if (N) {
-        auto stream = getCurrentCUDAStream().stream();
-        mlm_row_kernel<<<loss_grid(N), kThreads, 0, stream>>>(
-            N, C, pr.first.data_ptr<double>(), pr.second.data_ptr<double>(),
-            margin.toDouble(), elems.data_ptr<double>());
-        CUDA_CHECK(cudaGetLastError());
-    }
-    return mean_from_elems(elems, N, input.dtype(), input.device());
-}
-
 TENSORPLAY_LIBRARY_IMPL(CUDA, Tier5LossesKernels) {
     m.impl("l1_loss", l1_loss_cuda);
-    m.impl("smooth_l1_loss", smooth_l1_loss_cuda);
-    m.impl("huber_loss", huber_loss_cuda);
     m.impl("kl_div", kl_div_cuda);
-    m.impl("binary_cross_entropy", binary_cross_entropy_cuda);
     m.impl("binary_cross_entropy_with_logits", binary_cross_entropy_with_logits_cuda);
     m.impl("cosine_embedding_loss", cosine_embedding_loss_cuda);
     m.impl("hinge_embedding_loss", hinge_embedding_loss_cuda);
@@ -517,9 +378,7 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, Tier5LossesKernels) {
     m.impl("soft_margin_loss", soft_margin_loss_cuda);
     m.impl("triplet_margin_loss", triplet_margin_loss_cuda);
     m.impl("poisson_nll_loss", poisson_nll_loss_cuda);
-    m.impl("multi_margin_loss", multi_margin_loss_cuda);
     m.impl("multilabel_soft_margin_loss", multilabel_soft_margin_loss_cuda);
-    m.impl("multilabel_margin_loss", multilabel_margin_loss_cuda);
 }
 
 } // namespace cuda

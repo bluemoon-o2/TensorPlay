@@ -39,12 +39,21 @@ using namespace tensorplay::parallel;
 namespace {
 
 inline int64_t wrap_dim(int64_t dim, int64_t ndim) {
-    if (dim < 0) dim += ndim;
-    if (dim < 0 || dim >= ndim) {
-        TP_THROW(RuntimeError, "Dimension out of range (expected to be in range of [",
-                 -ndim, ", ", ndim - 1, "], but got ", dim - ndim, ")");
+    // c10::maybe_wrap_dim (WrapDimMinimal.cpp): IndexError, message reports
+    // the original (unwrapped) dim.
+    const int64_t min = -ndim;
+    const int64_t max = ndim - 1;
+    if (dim < min || dim > max) {
+        TP_THROW(IndexError, "Dimension out of range (expected to be in range of [",
+                 min, ", ", max, "], but got ", dim, ")");
     }
-    return dim;
+    return dim < 0 ? dim + ndim : dim;
+}
+
+// c10::maybe_wrap_dim with wrap_scalar=true: rank-0 accepts dims [-1, 0]
+// (both wrap to 0).  Used by flip's dim_list_to_bitset (WrapDimUtilsMulti.h).
+inline int64_t wrap_dim_scalar(int64_t dim, int64_t ndim) {
+    return wrap_dim(dim, ndim == 0 ? 1 : ndim);
 }
 
 inline void outer_inner(const std::vector<int64_t>& shape, int64_t dim,
@@ -256,15 +265,19 @@ Tensor reduce_dims_impl(const Tensor& self, std::vector<int64_t> dims_in,
     parallel_for(0, out_numel, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
         std::vector<int64_t> coords(red_dims.size(), 0);
         for (int64_t oi = begin; oi < end; ++oi) {
-            // Decode output coordinates against out_shape, then compute the
-            // input base offset over the non-reduced dims.
+            // Decode output coordinates against the non-reduced shape (the
+            // keepdim size-1 slots are not part of the linear index), then
+            // compute the input base offset over the non-reduced dims.
             int64_t base = 0;
             {
                 int64_t r2 = oi;
-                std::vector<int64_t> oc(std::max<int64_t>(out_shape.size(), 1), 0);
-                for (int64_t i = static_cast<int64_t>(out_shape.size()) - 1; i >= 0; --i) {
-                    oc[i] = r2 % out_shape[i];
-                    r2 /= out_shape[i];
+                std::vector<int64_t> oc_shape;
+                for (int64_t i = 0; i < nd; ++i)
+                    if (!reduced[i]) oc_shape.push_back(self.size(i));
+                std::vector<int64_t> oc(std::max<int64_t>(oc_shape.size(), 1), 0);
+                for (int64_t i = static_cast<int64_t>(oc_shape.size()) - 1; i >= 0; --i) {
+                    oc[i] = r2 % oc_shape[i];
+                    r2 /= oc_shape[i];
                 }
                 int64_t ok = 0;
                 for (int64_t i = 0; i < nd; ++i) {
@@ -665,9 +678,9 @@ Tensor erfinv_cpu(const Tensor& self) {
     }, "erfinv");
 }
 Tensor logit_cpu(const Tensor& self, std::optional<Scalar> eps) {
-    double e = eps.has_value() ? eps->toDouble() : 0.0;
+    double e = eps.has_value() ? eps->toDouble() : -1.0;
     return float_math_kernel(self, [e](double p) {
-        if (e > 0) p = std::min(std::max(p, e), 1.0 - e);
+        if (e >= 0) p = std::min(std::max(p, e), 1.0 - e);
         return std::log(p / (1.0 - p));
     }, "logit");
 }
@@ -711,13 +724,9 @@ Tensor nan_to_num_cpu(const Tensor& self, Scalar nan,
         ctype* dp = out.data_ptr<ctype>(); \
         ctype pv, nv; \
         if (has_pos) pv = static_cast<ctype>(pos_v); \
-        else pv = std::numeric_limits<ctype>::has_infinity \
-                      ? std::numeric_limits<ctype>::infinity() \
-                      : std::numeric_limits<ctype>::max(); \
+        else pv = std::numeric_limits<ctype>::max(); \
         if (has_neg) nv = static_cast<ctype>(neg_v); \
-        else nv = std::numeric_limits<ctype>::has_infinity \
-                      ? -std::numeric_limits<ctype>::infinity() \
-                      : std::numeric_limits<ctype>::lowest(); \
+        else nv = std::numeric_limits<ctype>::lowest(); \
         parallel_for(0, n, GRAIN_SIZE, [&](int64_t b, int64_t e) { \
             for (int64_t i = b; i < e; ++i) { \
                 ctype v = sp[i]; \
@@ -888,21 +897,89 @@ Tensor celu_cpu(const Tensor& self, Scalar alpha) {
 }
 Tensor hardshrink_cpu(const Tensor& self, Scalar lambd) {
     double l = lambd.toDouble();
+    // ATen Activation.cpp hardshrink_kernel: (a >= -l && a <= l) ? 0 : a
+    // (NaN fails both comparisons and passes through, matching ATen).
+    // lambd is rounded to the element dtype first, like ATen's
+    // lambd.to<scalar_t>(), so float32 boundary values compare exactly.
     return dtype_unary_kernel(self, [l](auto x) -> decltype(x) {
         using T = decltype(x);
+        const double lt = static_cast<double>(static_cast<T>(l));
         double v = static_cast<double>(x);
-        return (v > l || v < -l) ? static_cast<T>(x) : static_cast<T>(0);
+        return (v >= -lt && v <= lt) ? static_cast<T>(0) : x;
     }, "hardshrink");
 }
 Tensor softshrink_cpu(const Tensor& self, Scalar lambd) {
     double l = lambd.toDouble();
+    // ATen Activation.cpp softshrink_kernel: a > l ? a-l : (a < -l ? a+l : a*0)
+    // (the a*0 middle branch keeps NaN propagating, matching ATen).
     return dtype_unary_kernel(self, [l](auto x) -> decltype(x) {
         using T = decltype(x);
+        const double lt = static_cast<double>(static_cast<T>(l));
         double v = static_cast<double>(x);
-        if (v > l) return static_cast<T>(v - l);
-        if (v < -l) return static_cast<T>(v + l);
-        return static_cast<T>(0);
+        if (v > lt) return static_cast<T>(v - lt);
+        if (v < -lt) return static_cast<T>(v + lt);
+        return static_cast<T>(v * 0.0);
     }, "softshrink");
+}
+// ATen Activation.cpp shrink_backward_kernel (shared by hard/soft): grad
+// passes through where self is outside the inclusive [-lambd, lambd] band.
+Tensor hardshrink_backward_cpu(const Tensor& grad_out, const Tensor& self, Scalar lambd) {
+    double l = lambd.toDouble();
+    return binary_same_kernel(grad_out, self, [l](auto g, auto s) -> decltype(g) {
+        using T = decltype(g);
+        const double lt = static_cast<double>(static_cast<T>(l));
+        double v = static_cast<double>(s);
+        return (v >= -lt && v <= lt) ? static_cast<T>(0) : g;
+    }, "hardshrink_backward");
+}
+Tensor softshrink_backward_cpu(const Tensor& grad_output, const Tensor& self, Scalar lambd) {
+    double l = lambd.toDouble();
+    return binary_same_kernel(grad_output, self, [l](auto g, auto s) -> decltype(g) {
+        using T = decltype(g);
+        const double lt = static_cast<double>(static_cast<T>(l));
+        double v = static_cast<double>(s);
+        return (v >= -lt && v <= lt) ? static_cast<T>(0) : g;
+    }, "softshrink_backward");
+}
+// ATen Activation.cpp sigmoid_backward_kernel: grad * output * (1 - output),
+// where `output` is the saved forward result of sigmoid.
+Tensor sigmoid_backward_cpu(const Tensor& grad_output, const Tensor& output) {
+    return binary_same_kernel(grad_output, output, [](auto g, auto o) -> decltype(g) {
+        using T = decltype(o);
+        return g * o * (static_cast<T>(1) - o);
+    }, "sigmoid_backward");
+}
+// ATen Activation.cpp tanh_backward_kernel: grad * (1 - output * output),
+// where `output` is the saved forward result of tanh.
+Tensor tanh_backward_cpu(const Tensor& grad_output, const Tensor& output) {
+    return binary_same_kernel(grad_output, output, [](auto g, auto o) -> decltype(g) {
+        using T = decltype(o);
+        return g * (static_cast<T>(1) - o * o);
+    }, "tanh_backward");
+}
+// ATen BinaryOpsKernel.cpp logit_backward_kernel: without eps (eps<0) the
+// gradient is dy/(x(1-x)) inside [0,1], NaN outside, and dy*inf at exact
+// 0/1; with eps>=0 values outside [eps, 1-eps] (compared in scalar_t) are
+// masked to zero.
+Tensor logit_backward_cpu(const Tensor& grad_output, const Tensor& self, std::optional<Scalar> eps) {
+    double e = eps.has_value() ? eps->toDouble() : -1.0;
+    return binary_same_kernel(grad_output, self, [e](auto g, auto s) -> decltype(g) {
+        using T = decltype(s);
+        const T zero = static_cast<T>(0);
+        const T one = static_cast<T>(1);
+        if (e < 0) {
+            if (s < zero || s > one) return std::numeric_limits<T>::quiet_NaN();
+            if (s == zero || s == one) return g * std::numeric_limits<T>::infinity();
+            return g / (s * (one - s));
+        }
+        // ATen rounds eps to the element dtype and compares in scalar_t
+        // (float32 1 - 0.2f == 0.8f), so the band check must too.
+        const T lo = static_cast<T>(e);
+        const T hi = one - lo;
+        if (s < lo || s > hi) return zero;
+        if (s == zero || s == one) return g * std::numeric_limits<T>::infinity();
+        return g / (s * (one - s));
+    }, "logit_backward");
 }
 Tensor threshold_cpu(const Tensor& self, Scalar threshold, Scalar value) {
     double t = threshold.toDouble(), val = value.toDouble();
@@ -1322,6 +1399,9 @@ Tensor dist_cpu(const Tensor& self, const Tensor& other, Scalar p) {
 }
 
 Tensor renorm_cpu(const Tensor& self, Scalar p, int64_t dim, Scalar maxnorm) {
+    // ATen ReduceOps.cpp renorm: each sub-tensor obtained by slicing along
+    // `dim` (i.e. fixing the dim coordinate, reducing over all other dims)
+    // is scaled so its p-norm does not exceed maxnorm.
     int64_t nd = self.dim();
     dim = wrap_dim(dim, nd);
     double pd = p.toDouble(), mn = maxnorm.toDouble();
@@ -1332,22 +1412,28 @@ Tensor renorm_cpu(const Tensor& self, Scalar p, int64_t dim, Scalar maxnorm) {
     outer_inner(static_cast<std::vector<int64_t>>(sc.shape()), dim, outer, inner);
     const double* sp = sc.data_ptr<double>();
     double* dp = out.data_ptr<double>();
-    parallel_for(0, outer * inner, GRAIN_SIZE, [&](int64_t b, int64_t e) {
-        std::vector<double> slice(d_size);
-        for (int64_t si = b; si < e; ++si) {
-            int64_t o = si / inner, in2 = si % inner;
-            for (int64_t j = 0; j < d_size; ++j) slice[j] = sp[(o * d_size + j) * inner + in2];
+    const int64_t slice_numel = outer * inner;
+    parallel_for(0, d_size, GRAIN_SIZE, [&](int64_t b, int64_t e) {
+        for (int64_t j = b; j < e; ++j) {
             double norm = 0;
             if (pd == std::numeric_limits<double>::infinity()) {
-                for (double v : slice) norm = std::max(norm, std::fabs(v));
+                for (int64_t si = 0; si < slice_numel; ++si) {
+                    int64_t o = si / inner, in2 = si % inner;
+                    norm = std::max(norm, std::fabs(sp[(o * d_size + j) * inner + in2]));
+                }
             } else {
                 double s = 0;
-                for (double v : slice) s += std::pow(std::fabs(v), pd);
+                for (int64_t si = 0; si < slice_numel; ++si) {
+                    int64_t o = si / inner, in2 = si % inner;
+                    s += std::pow(std::fabs(sp[(o * d_size + j) * inner + in2]), pd);
+                }
                 norm = std::pow(s, 1.0 / pd);
             }
-            double factor = norm > mn ? mn / norm : 1.0;
-            for (int64_t j = 0; j < d_size; ++j)
-                dp[(o * d_size + j) * inner + in2] = slice[j] * factor;
+            const double factor = norm > mn ? mn / norm : 1.0;
+            for (int64_t si = 0; si < slice_numel; ++si) {
+                int64_t o = si / inner, in2 = si % inner;
+                dp[(o * d_size + j) * inner + in2] = sp[(o * d_size + j) * inner + in2] * factor;
+            }
         }
     });
     return out.to(self.dtype());
@@ -1489,55 +1575,68 @@ Tensor diag_embed_cpu(const Tensor& self, int64_t offset, int64_t dim1_, int64_t
 }
 
 Tensor narrow_cpu(const Tensor& self, int64_t dim, int64_t start, int64_t length) {
-    int64_t nd = self.dim();
-    dim = wrap_dim(dim, nd);
-    if (start < 0) start += self.size(dim);
-    if (start < 0 || length < 0 || start + length > self.size(dim)) {
-        TP_THROW(RuntimeError, "narrow: invalid start/length for dim ", dim);
+    // TensorShape.cpp narrow: a slice view with torch's exact checks.
+    if (self.dim() == 0) {
+        TP_THROW(RuntimeError, "narrow() cannot be applied to a 0-dim tensor.");
     }
-    std::vector<int64_t> out_shape(static_cast<std::vector<int64_t>>(self.shape()));
-    out_shape[dim] = length;
-    Tensor out = Tensor::empty(out_shape, self.dtype(), self.device());
-    int64_t outer = 1, inner = 1;
-    outer_inner(static_cast<std::vector<int64_t>>(self.shape()), dim, outer, inner);
-    Tensor sc = self.contiguous();
-    int64_t row = self.size(dim);
-#define TP_NARROW_CASE(ctype, name_) \
-    case DType::name_: { \
-        const ctype* sp = sc.data_ptr<ctype>(); \
-        ctype* dp = out.data_ptr<ctype>(); \
-        parallel_for(0, outer * length, GRAIN_SIZE, [&](int64_t b, int64_t e) { \
-            for (int64_t t = b; t < e; ++t) { \
-                int64_t o = t / length, k = t % length; \
-                std::memcpy(dp + static_cast<int64_t>(t) * inner, \
-                            sp + (o * row + start + k) * inner, inner * sizeof(ctype)); \
-            } \
-        }); \
-        break; \
+    if (length < 0) {
+        TP_THROW(RuntimeError, "narrow(): length must be non-negative.");
     }
-    switch (self.dtype()) {
-        TENSORPLAY_FORALL_SCALAR_TYPES(TP_NARROW_CASE)
-        default: TP_THROW(TypeError, "narrow: unsupported dtype");
+    dim = wrap_dim(dim, self.dim());
+    const int64_t cur_size = self.size(dim);
+    if (start < -cur_size || start > cur_size) {
+        TP_THROW(IndexError, "start out of range (expected to be in range of [",
+                 -cur_size, ", ", cur_size, "], but got ", start, ")");
     }
-#undef TP_NARROW_CASE
-    return out;
+    if (start < 0) start += cur_size;
+    if (start > cur_size - length) {
+        TP_THROW(RuntimeError, "start (", start, ") + length (", length,
+                 ") exceeds dimension size (", cur_size, ").");
+    }
+    return self.slice(dim, start, start + length, 1);
 }
 
 std::vector<Tensor> split_with_sizes_cpu(const Tensor& self, std::vector<int64_t> split_sizes, int64_t dim) {
-    int64_t nd = self.dim();
-    dim = wrap_dim(dim, nd);
-    int64_t total = 0;
-    for (int64_t s : split_sizes) total += s;
-    if (total != self.size(dim)) {
-        TP_THROW(RuntimeError, "split_with_sizes: split sizes sum (", total,
-                 ") expected to equal size of dim ", dim, " (", self.size(dim), ")");
+    // Torch split_with_sizes (TensorShape.cpp).
+    if (self.dim() == 0) {
+        TP_THROW(RuntimeError, "split expects at least a 1-dimensional tensor");
     }
+    const int64_t nd = self.dim();
+    if (dim < -nd || dim >= nd) {
+        TP_THROW(IndexError, "Dimension out of range (expected to be in range of [",
+                 -nd, ", ", nd - 1, "], but got ", dim, ")");
+    }
+    if (dim < 0) dim += nd;
+    const int64_t dim_size = self.size(dim);
     std::vector<Tensor> outs;
+    outs.reserve(split_sizes.size());
     int64_t start = 0;
-    for (int64_t len : split_sizes) {
-        if (len == 0) { outs.emplace_back(); continue; }
-        outs.push_back(narrow_cpu(self, dim, start, len));
+    for (const int64_t len : split_sizes) {
+        if (len < 0) {
+            TP_THROW(RuntimeError, "split_with_sizes expects split_sizes have only non-negative "
+                     "entries, but got split_sizes=[", [&] {
+                         std::string s;
+                         for (size_t i = 0; i < split_sizes.size(); ++i) {
+                             if (i) s += ", ";
+                             s += std::to_string(split_sizes[i]);
+                         }
+                         return s;
+                     }(), "]");
+        }
+        outs.push_back(self.slice(dim, start, start + len));
         start += len;
+    }
+    if (start != dim_size) {
+        TP_THROW(RuntimeError, "split_with_sizes expects split_sizes to sum exactly to ",
+                 dim_size, " (input tensor's size at dimension ", dim, "), but got split_sizes=[",
+                 [&] {
+                     std::string s;
+                     for (size_t i = 0; i < split_sizes.size(); ++i) {
+                         if (i) s += ", ";
+                         s += std::to_string(split_sizes[i]);
+                     }
+                     return s;
+                 }(), "]");
     }
     return outs;
 }
@@ -1560,10 +1659,23 @@ std::vector<Tensor> tensor_split_cpu(const Tensor& self, int64_t sections, int64
 }
 
 Tensor flip_cpu(const Tensor& self, const std::vector<int64_t>& dims) {
-    // TensorTransformations.cpp:36 flip: reverse each listed dim.
+    // TensorTransformations.cpp:36 flip: dim_list_to_bitset (WrapDimUtilsMulti.h)
+    // wraps with wrap_scalar=true and rejects duplicate dims, then reverses
+    // each listed dim.
     int64_t nd = self.dim();
+    std::vector<bool> seen(nd > 0 ? nd : 1, false);
     std::vector<bool> flip_mask(nd, false);
-    for (auto& d : dims) flip_mask[wrap_dim(d, nd)] = true;
+    for (auto d : dims) {
+        int64_t w = wrap_dim_scalar(d, nd);
+        if (nd > 0) {
+            if (seen[w]) {
+                TP_THROW(RuntimeError, "dim ", w,
+                         " appears multiple times in the list of dims");
+            }
+            seen[w] = true;
+            flip_mask[w] = true;
+        }
+    }
     Tensor sc = self.contiguous();
     Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(sc.shape()), sc.dtype(), sc.device());
     int64_t n = sc.numel();
@@ -1593,42 +1705,43 @@ Tensor flip_cpu(const Tensor& self, const std::vector<int64_t>& dims) {
 }
 
 Tensor roll_cpu(const Tensor& self, const std::vector<int64_t>& shifts, const std::vector<int64_t>& dims) {
-    // TensorTransformations.cpp:110 roll.
-    int64_t nd = self.dim();
+    // TensorTransformations.cpp:110 roll + TensorTransformations.h roll_common.
+    if (dims.size() != 1 || shifts.size() != 1) {
+        if (shifts.empty()) TP_THROW(RuntimeError, "`shifts` required");
+        if (dims.empty() && shifts.size() == 1) {
+            // Flatten-roll: roll the flattened tensor and view back.
+            Tensor flat = self.contiguous().reshape({self.numel()});
+            Tensor rolled = roll_cpu(flat, {shifts[0]}, {0});
+            return rolled.reshape(static_cast<std::vector<int64_t>>(self.shape()));
+        }
+        if (shifts.size() != dims.size()) {
+            TP_THROW(RuntimeError, "shifts and dimensions must align. shifts: ",
+                     shifts.size(), ", dims:", dims.size());
+        }
+        Tensor cur = self;
+        for (size_t i = 0; i < dims.size(); ++i) {
+            cur = roll_cpu(cur, {shifts[i]}, {dims[i]});
+        }
+        return cur;
+    }
+    // Avoid a div zero error below (upstream comment); empty input rolls to
+    // itself.
+    if (self.numel() == 0) return self.clone();
+    const int64_t nd = self.dim();
+    if (nd == 0) {
+        // torch reaches size(dim) on the 0-d tensor: maybe_wrap_dim with
+        // wrap_scalar=false rejects any dim.
+        TP_THROW(IndexError, "Dimension specified as ", dims[0],
+                 " but tensor has no dimensions");
+    }
+    const int64_t dim = wrap_dim(dims[0], nd);
+    const int64_t size = self.size(dim);
+    int64_t start = (size - shifts[0]) % size;
+    // Behavior of % is different in C++ vs Python for negative numbers.
+    if (start < 0) start += size;
+    // Equivalent to cat({narrow(dim, start, size-start), narrow(dim, 0, start)}):
+    // destination coord c along dim reads source coord (c + start) % size.
     Tensor sc = self.contiguous();
-    if (dims.empty()) {
-        // flatten-roll semantics
-        Tensor flat_in = sc.reshape({sc.numel()});
-        if (shifts.empty()) return sc.clone();
-        int64_t s = ((shifts[0] % sc.numel()) + sc.numel()) % sc.numel();
-        Tensor flat_out = Tensor::empty(flat_in.shape(), flat_in.dtype(), flat_in.device());
-        int64_t n = flat_in.numel();
-        if (n == 0) return sc;
-        // out[(i+s)%n] = in[i]
-        auto worker = [&](int64_t b, int64_t e) {
-            for (int64_t i = b; i < e; ++i) {
-                int64_t dst = (i + s) % n;
-                switch (flat_in.dtype()) {
-#define TP_ROLL_F(ctype, name_) case DType::name_: reinterpret_cast<ctype*>(flat_out.data_ptr())[dst] = reinterpret_cast<const ctype*>(flat_in.data_ptr())[i]; break;
-                    TENSORPLAY_FORALL_SCALAR_TYPES(TP_ROLL_F)
-#undef TP_ROLL_F
-                    default: break;
-                }
-            }
-        };
-        parallel_for(0, n, GRAIN_SIZE, worker);
-        return flat_out.reshape(static_cast<std::vector<int64_t>>(sc.shape()));
-    }
-    if (dims.size() != shifts.size()) {
-        TP_THROW(RuntimeError, "roll: shifts and dims must have the same length");
-    }
-    std::vector<int64_t> sh(nd, 0);
-    for (size_t i = 0; i < dims.size(); ++i) {
-        int64_t d2 = wrap_dim(dims[i], nd);
-        int64_t sz = sc.size(d2);
-        int64_t s = ((shifts[i] % sz) + sz) % sz;
-        sh[d2] = s;
-    }
     Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(sc.shape()), sc.dtype(), sc.device());
     int64_t n = sc.numel();
     auto worker = [&](int64_t b, int64_t e) {
@@ -1637,8 +1750,7 @@ Tensor roll_cpu(const Tensor& self, const std::vector<int64_t>& shifts, const st
             for (int64_t d2 = nd - 1; d2 >= 0; --d2) {
                 int64_t c = r2 % sc.size(d2);
                 r2 /= sc.size(d2);
-                int64_t sc3 = c - sh[d2];
-                if (sc3 < 0) sc3 += sc.size(d2);
+                int64_t sc3 = d2 == dim ? (c + start) % size : c;
                 src += sc3 * mult;
                 mult *= sc.size(d2);
             }
@@ -1655,54 +1767,43 @@ Tensor roll_cpu(const Tensor& self, const std::vector<int64_t>& shifts, const st
 }
 
 Tensor rot90_cpu(const Tensor& self, int64_t k, const std::vector<int64_t>& dims) {
-    // TensorTransformations.cpp:145 rot90 switch.
-    int64_t total_dims = self.dim();
-    if (dims.size() != 2) TP_THROW(RuntimeError, "expected total rotation dims == 2");
-    if (total_dims < 2) TP_THROW(RuntimeError, "expected total dims >= 2");
-    int64_t dim0 = wrap_dim(dims[0], total_dims);
-    int64_t dim1 = wrap_dim(dims[1], total_dims);
-    if (dim0 == dim1) TP_THROW(RuntimeError, "expected rotation dims to be different");
-    k = ((k % 4) + 4) % 4;
-    Tensor t = self.contiguous();
-    auto transpose_copy = [](const Tensor& x, int64_t a2, int64_t b2) {
-        int64_t nd2 = x.dim();
-        std::vector<int64_t> perm(nd2);
-        for (int64_t i = 0; i < nd2; ++i) perm[i] = i;
-        std::swap(perm[a2], perm[b2]);
-        std::vector<int64_t> new_shape;
-        for (int64_t i = 0; i < nd2; ++i) new_shape.push_back(x.size(perm[i]));
-        Tensor out = Tensor::empty(new_shape, x.dtype(), x.device());
-        int64_t n = x.numel();
-        const Size x_shape = x.shape();
-        std::vector<int64_t> xs(x_shape.begin(), x_shape.end());
-        std::vector<int64_t> xs_strides(nd2, 0);
-        { int64_t s = 1; for (int64_t i = nd2 - 1; i >= 0; --i) { xs_strides[i] = s; s *= xs[i]; } }
-        std::vector<int64_t> out_strides(nd2, 0);
-        { int64_t s = 1; for (int64_t i = nd2 - 1; i >= 0; --i) { out_strides[i] = s; s *= new_shape[i]; } }
-        auto wk = [&](int64_t b, int64_t e) {
-            std::vector<int64_t> oc(nd2, 0);
-            for (int64_t li = b; li < e; ++li) {
-                // out axis d2 corresponds to input axis perm[d2]
-                int64_t rr = li;
-                for (int64_t d2 = nd2 - 1; d2 >= 0; --d2) { oc[d2] = rr % new_shape[d2]; rr /= new_shape[d2]; }
-                int64_t src_lin = 0;
-                for (int64_t d2 = 0; d2 < nd2; ++d2) src_lin += oc[perm[d2]] * xs_strides[d2];
-                switch (x.dtype()) {
-#define TP_ROT_W(ctype, name_) case DType::name_: reinterpret_cast<ctype*>(out.data_ptr())[li] = reinterpret_cast<const ctype*>(x.data_ptr())[src_lin]; break;
-                    TENSORPLAY_FORALL_SCALAR_TYPES(TP_ROT_W)
-#undef TP_ROT_W
-                    default: break;
-                }
-            }
-        };
-        parallel_for(0, n, GRAIN_SIZE, wk);
-        return out;
+    // TensorTransformations.cpp:127 rot90.
+    const int64_t total_dims = self.dim();
+    const int64_t total_rot_dims = static_cast<int64_t>(dims.size());
+    if (total_rot_dims != 2) {
+        TP_THROW(RuntimeError, "expected total rotation dims == 2, but got dims = ",
+                 total_rot_dims);
+    }
+    if (total_dims < 2) {
+        TP_THROW(RuntimeError, "expected total dims >= 2, but got total dims = ",
+                 total_dims);
+    }
+    // Validate range first so out-of-range dims raise IndexError, then
+    // normalize before checking for duplicates (e.g. [1, -1] on a 2D tensor).
+    const int64_t dim0 = wrap_dim(dims[0], total_dims);
+    const int64_t dim1 = wrap_dim(dims[1], total_dims);
+    if (dim0 == dim1) {
+        TP_THROW(RuntimeError, "expected rotation dims to be different, but got dim0 = ",
+                 dims[0], " and dim1 = ", dims[1]);
+    }
+    // handle modulo with negative k
+    k = (4 + (k % 4)) % 4;
+    // transpose_ on the fresh flip result: a view with swapped sizes/strides.
+    auto transpose_view = [](const Tensor& x, int64_t a, int64_t b) {
+        std::vector<int64_t> sizes(x.dim()), strides(x.dim());
+        for (int64_t i = 0; i < x.dim(); ++i) {
+            sizes[i] = x.size(i);
+            strides[i] = x.stride(i);
+        }
+        std::swap(sizes[a], sizes[b]);
+        std::swap(strides[a], strides[b]);
+        return x.as_strided(sizes, strides);
     };
     switch (k) {
-        case 1: return transpose_copy(flip_cpu(t, {dim1}), dim0, dim1);
-        case 2: return flip_cpu(flip_cpu(t, {dim0}), {dim1});
-        case 3: return transpose_copy(flip_cpu(t, {dim0}), dim0, dim1);
-        default: return t.clone();
+        case 1: return transpose_view(flip_cpu(self, {dim1}), dim0, dim1);
+        case 2: return flip_cpu(self, {dim0, dim1});
+        case 3: return transpose_view(flip_cpu(self, {dim0}), dim0, dim1);
+        default: return detail::contiguous_clone(self);
     }
 }
 
@@ -1967,44 +2068,82 @@ Tensor channel_shuffle_cpu(const Tensor& self, int64_t groups) {
 }
 
 Tensor unfold_cpu(const Tensor& self, int64_t dimension, int64_t size, int64_t step) {
-    // TensorShape.cpp:4426 unfold, materialized copy.
-    int64_t nd = self.dim();
-    dimension = wrap_dim(dimension, nd);
-    if (size <= 0) TP_THROW(RuntimeError, "unfold: size must be positive");
-    if (step <= 0) TP_THROW(RuntimeError, "unfold: step must be positive");
-    int64_t d_size = self.size(dimension);
-    if (d_size < size) TP_THROW(RuntimeError, "unfold: maximum size for tensor at dimension ", dimension,
-                                 " is ", d_size, " but size is ", size);
-    int64_t count = (d_size - size) / step + 1;
-    std::vector<int64_t> out_shape;
-    for (int64_t i = 0; i < nd; ++i) out_shape.push_back(i == dimension ? count : self.size(i));
-    out_shape.push_back(size);
-    Tensor out = Tensor::empty(out_shape, self.dtype(), self.device());
+    // TensorShape.cpp unfold: an as_strided view.  wrap_scalar=true allows
+    // dimension == 0 on 0-d tensors (max_size becomes 1).
+    const int64_t nd = self.dim();
+    dimension = wrap_dim_scalar(dimension, nd);
+
+    std::vector<int64_t> sizes = static_cast<std::vector<int64_t>>(self.shape());
+    std::vector<int64_t> strides = self.strides();
+    const int64_t max_size = nd == 0 ? 1 : sizes[dimension];
+    if (size < 0) TP_THROW(RuntimeError, "size is ", size, " but must be >= 0");
+    if (size > max_size) {
+        TP_THROW(RuntimeError, "maximum size for tensor at dimension ", dimension,
+                 " is ", max_size, " but size is ", size);
+    }
+    if (step <= 0) TP_THROW(RuntimeError, "step is ", step, " but must be > 0");
+    sizes.push_back(size);
+    strides.push_back(nd == 0 ? 1 : strides[dimension]);
+    // The if handles the self.dim() == 0 case
+    if (dimension < nd) {
+        sizes[dimension] = (sizes[dimension] - size) / step + 1;
+        strides[dimension] *= step;
+    }
+    return self.as_strided(sizes, strides);
+}
+
+Tensor unfold_backward_cpu(const Tensor& grad, const std::vector<int64_t>& input_sizes,
+                           int64_t dim, int64_t size, int64_t step) {
+    // ATen UnfoldBackward.cpp + cpu/UnfoldBackwardKernel.cpp: scatter each
+    // window's gradient back onto `dim`, accumulating where windows overlap
+    // (step < size).  We gather over grad_input elements (race-free), which
+    // degenerates to a plain copy when step >= size.
+    if (step <= 0) TP_THROW(RuntimeError, "step is ", step, " but must be > 0");
+    Tensor grad_input = Tensor::zeros(input_sizes, grad.dtype(), grad.device());
+    const int64_t nd = static_cast<int64_t>(input_sizes.size());
+    if (nd == 0) {
+        // 0-d input: unfold appended a single axis; the lone element is hit once.
+        if (size > 0) grad_input.copy_(grad.select(0, 0));
+        return grad_input;
+    }
+    dim = wrap_dim(dim, nd);
+    const int64_t input_dim_size = input_sizes[dim];
+    const int64_t count = grad.size(dim);
     int64_t outer = 1, inner = 1;
-    outer_inner(static_cast<std::vector<int64_t>>(self.shape()), dimension, outer, inner);
-    Tensor sc = self.contiguous();
-    int64_t total = out.numel();
-#define TP_UNF_CASE(ctype, name_) \
+    outer_inner(input_sizes, dim, outer, inner);
+    Tensor gc = grad.contiguous();
+    const int64_t total = outer * input_dim_size * inner;
+    if (total == 0) return grad_input;
+#define TP_UFB(ctype, name_) \
     case DType::name_: { \
-        const ctype* sp = sc.data_ptr<ctype>(); \
-        ctype* dp = out.data_ptr<ctype>(); \
-        parallel_for(0, outer * count * inner, GRAIN_SIZE, [&](int64_t b, int64_t e) { \
+        const ctype* gp = gc.data_ptr<ctype>(); \
+        ctype* gip = grad_input.data_ptr<ctype>(); \
+        parallel_for(0, total, GRAIN_SIZE, [&](int64_t b, int64_t e) { \
             for (int64_t t = b; t < e; ++t) { \
-                int64_t c2 = t % inner; int64_t rest = t / inner; \
-                int64_t blk = rest % count; int64_t o = rest / count; \
-                for (int64_t kk = 0; kk < size; ++kk) { \
-                    dp[((o * count + blk) * size) + kk] = sp[(o * d_size + blk * step + kk) * inner + c2]; \
+                int64_t inner_idx = t % inner; \
+                int64_t rest = t / inner; \
+                int64_t idx_dim = rest % input_dim_size; \
+                int64_t outer_idx = rest / input_dim_size; \
+                int64_t left = (idx_dim > size) ? (idx_dim - size) / step : 0; \
+                if (!(left * step <= idx_dim && idx_dim < left * step + size)) ++left; \
+                int64_t right = idx_dim / step; \
+                if (right >= count) right = count - 1; \
+                ctype acc{}; \
+                for (int64_t fold = left; fold <= right; ++fold) { \
+                    int64_t j = idx_dim - fold * step; \
+                    acc += gp[((outer_idx * count + fold) * inner + inner_idx) * size + j]; \
                 } \
+                gip[t] = acc; \
             } \
         }); \
         break; \
     }
-    switch (self.dtype()) {
-        TENSORPLAY_FORALL_SCALAR_TYPES(TP_UNF_CASE)
-        default: TP_THROW(TypeError, "unfold: unsupported dtype");
+    switch (grad.dtype()) {
+        TENSORPLAY_FORALL_SCALAR_TYPES_WITH_COMPLEX(TP_UFB)
+        default: TP_THROW(TypeError, "unfold_backward: unsupported dtype");
     }
-#undef TP_UNF_CASE
-    return out;
+#undef TP_UFB
+    return grad_input;
 }
 
 // ===========================================================================
@@ -2500,7 +2639,12 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("selu", selu_cpu);
     m.impl("celu", celu_cpu);
     m.impl("hardshrink", hardshrink_cpu);
+    m.impl("hardshrink_backward", hardshrink_backward_cpu);
     m.impl("softshrink", softshrink_cpu);
+    m.impl("softshrink_backward", softshrink_backward_cpu);
+    m.impl("sigmoid_backward", sigmoid_backward_cpu);
+    m.impl("tanh_backward", tanh_backward_cpu);
+    m.impl("logit_backward", logit_backward_cpu);
     m.impl("threshold", threshold_cpu);
     m.impl("prelu", prelu_cpu);
     // Reductions
@@ -2537,7 +2681,8 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("pixel_shuffle", pixel_shuffle_cpu);
     m.impl("pixel_unshuffle", pixel_unshuffle_cpu);
     m.impl("channel_shuffle", channel_shuffle_cpu);
-    m.impl("unfold.Tensor", unfold_cpu);
+    m.impl("unfold", unfold_cpu);
+    m.impl("unfold_backward", unfold_backward_cpu);
     // Index/scatter complements
     m.impl("select_scatter", select_scatter_cpu);
     m.impl("slice_scatter", slice_scatter_cpu);

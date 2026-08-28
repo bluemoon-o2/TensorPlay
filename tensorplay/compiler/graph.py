@@ -171,24 +171,48 @@ def gate_outcome(kind: str, sample: Any) -> Any:
     raise GraphCaptureError(f"unknown control-flow gate kind {kind!r}")
 
 
+_SANITIZED_NAMES: Dict[str, str] = {}
+
+
 def _sanitize_name(name: str) -> str:
     """Reduce a candidate name to a valid Python identifier."""
 
+    cached = _SANITIZED_NAMES.get(name)
+    if cached is not None:
+        return cached
     sanitized = re.sub(r"[^0-9a-zA-Z_]", "_", name)
     if not sanitized or sanitized[0].isdigit() or keyword.iskeyword(sanitized):
         sanitized = f"_{sanitized}"
+    if len(_SANITIZED_NAMES) < 8192:
+        _SANITIZED_NAMES[name] = sanitized
     return sanitized
+
+
+_TARGET_STRINGS: Dict[Any, str] = {}
 
 
 def _target_to_str(target: Any) -> str:
     """Derive a readable base name from a node target (fx-style)."""
 
+    try:
+        cached = _TARGET_STRINGS.get(target)
+    except TypeError:  # unhashable target
+        cached = None
+    if cached is not None:
+        return cached
     if isinstance(target, str):
-        return _snake_case(target.split(".")[-1])
-    if callable(target):
+        result = _snake_case(target.split(".")[-1])
+    elif callable(target):
         atom = getattr(target, "__name__", None) or type(target).__name__
-        return _snake_case(str(atom))
-    return type(target).__name__
+        result = _snake_case(str(atom))
+    else:
+        result = type(target).__name__
+    if len(_TARGET_STRINGS) < 8192:
+        try:
+            _TARGET_STRINGS[target] = result
+        except TypeError:
+            pass
+    return result
 
 
 def _format_target(target: Any) -> str:
@@ -252,14 +276,25 @@ class Node:
 
         if replace_with is self:
             raise GraphCaptureError("cannot replace uses of a node with itself")
-        positions = {node: index for index, node in enumerate(self.graph.nodes)}
+        if replace_with.graph is not self.graph:
+            raise GraphCaptureError(
+                f"{replace_with.name} belongs to a different graph"
+            )
         users = list(self.users)
-        for user in users:
-            if positions[replace_with] > positions[user]:
-                raise GraphCaptureError(
-                    f"cannot use {replace_with.name} to replace {self.name} "
-                    f"in {user.name}: it appears later in the graph"
-                )
+        if users:
+            # Topological guard: ``replace_with`` must precede every user.
+            # One early-exit scan instead of an O(n) position table — the
+            # replacement normally sits right before the rewritten site, so
+            # the walk stops almost immediately.
+            pending = set(users)
+            for node in self.graph.nodes:
+                if node is replace_with:
+                    break
+                if node in pending:
+                    raise GraphCaptureError(
+                        f"cannot use {replace_with.name} to replace {self.name} "
+                        f"in {node.name}: it appears later in the graph"
+                    )
 
         def substitute(value: Any) -> Any:
             return replace_with if value is self else value
@@ -289,7 +324,25 @@ class Node:
         for input_node in (*_iter_nodes(self.args), *_iter_nodes(self.kwargs)):
             input_node.users.discard(self)
         self.graph.nodes.remove(self)
+        self.graph._live_names.discard(self.name)
         self.graph = None
+
+
+class _InsertPoint:
+    """Context manager that temporarily redirects a graph's insert point."""
+
+    __slots__ = ("_graph", "_restore")
+
+    def __init__(self, graph: "Graph", new_insert: Callable[[Node], None]) -> None:
+        self._graph = graph
+        self._restore = graph._insert
+        graph._insert = new_insert
+
+    def __enter__(self) -> "_InsertPoint":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self._graph._insert = self._restore
 
 
 class Graph:
@@ -297,6 +350,17 @@ class Graph:
 
     def __init__(self) -> None:
         self.nodes: list[Node] = []
+        # Insertion point used by create_node; inserting_before/inserting_after
+        # redirect it for the duration of a ``with`` block.  The default goes
+        # through a method (not ``self.nodes.append``) so it keeps tracking
+        # ``self.nodes`` even when dead_code_elimination rebinds the list.
+        self._insert: Callable[[Node], None] = self._append_node
+        # Live node names, maintained incrementally so _create_unique_name is
+        # O(1) per node instead of rescanning ``self.nodes`` (O(n^2) capture).
+        self._live_names: set[str] = set()
+
+    def _append_node(self, node: Node) -> None:
+        self.nodes.append(node)
 
     @property
     def placeholders(self) -> list[Node]:
@@ -327,7 +391,7 @@ class Graph:
         """
 
         base = _sanitize_name(candidate)
-        taken = {node.name for node in self.nodes}
+        taken = self._live_names
         name = base
         suffix = 0
         while name in taken:
@@ -354,6 +418,7 @@ class Graph:
         node_name = self._create_unique_name(
             name if name is not None else _target_to_str(target)
         )
+        self._live_names.add(node_name)
         node = Node(
             self,
             node_name,
@@ -362,7 +427,7 @@ class Graph:
             tuple(normalized_args),
             dict(normalized_kwargs),
         )
-        self.nodes.append(node)
+        self._insert(node)
         for input_node in _iter_nodes(node.args):
             input_node.users.add(node)
         for input_node in _iter_nodes(node.kwargs):
@@ -399,6 +464,131 @@ class Graph:
         for old_output in list(self.outputs):
             old_output.erase_node()
         return self.create_node("output", "output", (value,), name="output")
+
+    def inserting_before(self, n: Optional[Node] = None) -> _InsertPoint:
+        """Set the point at which :meth:`create_node` and friends insert.
+
+        Designed for use as a context manager; the previous insert point is
+        restored when the ``with`` block exits::
+
+            with graph.inserting_before(node):
+                ...  # created nodes land immediately before ``node``
+
+        Args:
+            n: The node before which to insert.  ``None`` inserts at the very
+                beginning of the graph.
+
+        Nodes created inside the block keep creation order: each one is placed
+        directly before ``n``, after the previously inserted nodes.  This is
+        the insertion mode subgraph rewriting needs (``torch.fx`` uses exactly
+        this one in ``Graph.graph_copy``), so a copied subgraph lands in front
+        of the matched region already topologically sorted.  The anchor is
+        re-located if the node list changes under the cached position, keeping
+        insertion O(1) without going stale.
+        """
+
+        if n is None:
+            def insert_at_front(node: Node) -> None:
+                self.nodes.insert(0, node)
+
+            return _InsertPoint(self, insert_at_front)
+        if n.graph is not self:
+            raise GraphCaptureError(f"{n.name} is not part of this graph")
+        cursor = [self.nodes.index(n)]
+
+        def insert_before(node: Node) -> None:
+            position = cursor[0]
+            if position >= len(self.nodes) or self.nodes[position] is not n:
+                try:
+                    position = self.nodes.index(n)
+                except ValueError:
+                    raise GraphCaptureError(
+                        f"insertion anchor {n.name} was erased from the graph"
+                    ) from None
+            self.nodes.insert(position, node)
+            cursor[0] = position + 1
+
+        return _InsertPoint(self, insert_before)
+
+    def inserting_after(self, n: Optional[Node] = None) -> _InsertPoint:
+        """Set the point at which :meth:`create_node` and friends insert.
+
+        Designed for use as a context manager; the previous insert point is
+        restored when the ``with`` block exits::
+
+            with graph.inserting_after(node):
+                ...  # created nodes land immediately after ``node``
+
+        Args:
+            n: The node after which to insert.  ``None`` inserts at the very
+                end of the graph (the default append behaviour).
+
+        Note the ordering subtlety shared with ``torch.fx``: every created node
+        is spliced directly after ``n``, so a sequence of creations appears in
+        the graph in *reverse* creation order.  Use :meth:`inserting_before`
+        on the successor node when program order matters.
+        """
+
+        if n is None:
+            return _InsertPoint(self, self._append_node)
+        if n.graph is not self:
+            raise GraphCaptureError(f"{n.name} is not part of this graph")
+        cursor = [self.nodes.index(n)]
+
+        def insert_after(node: Node) -> None:
+            position = cursor[0]
+            if position >= len(self.nodes) or self.nodes[position] is not n:
+                try:
+                    position = self.nodes.index(n)
+                except ValueError:
+                    raise GraphCaptureError(
+                        f"insertion anchor {n.name} was erased from the graph"
+                    ) from None
+            self.nodes.insert(position + 1, node)
+
+        return _InsertPoint(self, insert_after)
+
+    def node_copy(
+        self,
+        node: Node,
+        arg_transform: Callable[[Node], Any] = lambda value: value,
+    ) -> Node:
+        """Copy ``node`` into this graph at the current insert point.
+
+        ``arg_transform`` remaps every node-valued argument from ``node``'s
+        graph into this graph; the simplest form looks the value up in the
+        table populated by :meth:`graph_copy`.  The copy keeps the original
+        op, target and name (uniquified if already taken) and receives a
+        shallow copy of ``node.meta``.  Mirrors ``torch.fx.Graph.node_copy``.
+        """
+
+        args = _map_arg(node.args, arg_transform)
+        kwargs = _map_arg(node.kwargs, arg_transform)
+        copied = self.create_node(node.op, node.target, args, kwargs, name=node.name)
+        copied.meta = dict(node.meta)
+        return copied
+
+    def graph_copy(self, g: "Graph", val_map: Dict[Node, Node]) -> Any:
+        """Copy every node of ``g`` into this graph, in topological order.
+
+        ``val_map`` is populated with the mapping from each node of ``g`` to its
+        copy in this graph; entries may be seeded in advance to redirect the
+        copy (typically mapping ``g``'s placeholders onto existing nodes of
+        this graph).  Returns the value in this graph that corresponds to
+        ``g``'s output value — a single node, a nested container of nodes, or
+        ``None`` when ``g`` has no output node.  Insertion happens at the
+        current insert point, so this composes with :meth:`inserting_before`
+        exactly like ``torch.fx.Graph.graph_copy`` does for subgraph
+        rewriting.
+        """
+
+        for node in g.nodes:
+            if node in val_map:
+                continue
+            if node.op == "output":
+                return _map_arg(node.args[0], lambda n: val_map[n])
+            val_map[node] = self.node_copy(node, lambda n: val_map[n])
+        return None
 
     def lint(self) -> None:
         positions = {node: index for index, node in enumerate(self.nodes)}
@@ -1694,6 +1884,7 @@ def dead_code_elimination(graph: Graph) -> int:
 
     for node in old_nodes:
         if node not in live and node.op != "placeholder":
+            graph._live_names.discard(node.name)
             node.graph = None
     for node in graph.nodes:
         node.users.clear()

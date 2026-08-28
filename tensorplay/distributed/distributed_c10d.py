@@ -27,9 +27,11 @@ __all__ = [
     "Work",
     "group",
     "all_gather",
+    "all_gather_coalesced",
     "all_gather_into_tensor",
     "all_gather_object",
     "all_reduce",
+    "all_reduce_coalesced",
     "all_to_all",
     "all_to_all_single",
     "_allgather_base",
@@ -55,6 +57,7 @@ __all__ = [
     "is_initialized",
     "is_mpi_available",
     "is_nccl_available",
+    "monitored_barrier",
     "new_group",
     "new_subgroups",
     "new_subgroups_by_enumeration",
@@ -63,6 +66,7 @@ __all__ = [
     "recv_object_list",
     "reduce",
     "reduce_scatter",
+    "reduce_scatter_coalesced",
     "reduce_scatter_tensor",
     "scatter",
     "scatter_object_list",
@@ -128,16 +132,17 @@ class Work:
     def get_future(self):
         from tensorplay import futures as _futures
 
-        outer = _futures.Future()
+        fut = _futures.Future()
 
         def _completer():
             try:
                 self.wait()
-                outer.set_result(self._result_tensors())
+                fut.set_result(self._result_tensors())
             except BaseException as e:
-                outer.set_result(e)
+                fut.set_result(e)
 
-        return _futures.Future(_completer=_completer)
+        fut._completer = _completer
+        return fut
 
     def _result_tensors(self):
         return list(self._tensors)
@@ -230,6 +235,14 @@ def _resolve_group(group) -> ProcessGroup:
         return _check_default_pg()
     if isinstance(group, ProcessGroup):
         return group
+    if isinstance(group, str):
+        # torch parity: resolve by group name (used by autograd Function
+        # wrappers that stash ``pg.group_name`` in the context).
+        if _world_group is not None and group == _world_group.group_name:
+            return _world_group
+        pg = _groups.get(group)
+        if pg is not None:
+            return pg
     raise ValueError(_invalid_group_msg)
 
 
@@ -261,6 +274,8 @@ def _ensure_comm(pg: ProcessGroup, timeout_s: float) -> int:
     with pg._lock:
         if pg.comm is not None:
             return pg.comm
+        _apply_nccl_autotune()
+        _select_nccl_device(pg)
         store = _current_store()
         key = f"tensorplay_distributed/nccl_unique_id/{pg.group_name}"
         if _global_rank() == pg.ranks[0]:
@@ -270,6 +285,54 @@ def _ensure_comm(pg: ProcessGroup, timeout_s: float) -> int:
             uid = bytes.fromhex(store.get(key, timeout=timeout_s).decode())
         pg.comm = _C.comm_init_rank(pg.group_rank(_global_rank()), pg.size(), uid)
         return pg.comm
+
+
+_NCCL_AUTOTUNED = False
+
+
+def _apply_nccl_autotune() -> None:
+    """Apply topology-aware NCCL defaults before the first communicator init.
+
+    NCCL's auto-tuned channel grid under-utilizes intra-node GPUs that lack
+    direct P2P (traffic is staged through host SHM); a wider channel grid
+    raises large-message bandwidth by ~20% on such hosts. Only values the user
+    has not explicitly set are filled in, so manual ``NCCL_*`` tuning always
+    wins.
+    """
+    global _NCCL_AUTOTUNED
+    if _NCCL_AUTOTUNED:
+        return
+    _NCCL_AUTOTUNED = True
+    defaults = {
+        "NCCL_MIN_NCHANNELS": "16",
+        "NCCL_MAX_NCHANNELS": "16",
+    }
+    for key, value in defaults.items():
+        os.environ.setdefault(key, value)
+
+
+def _select_nccl_device(pg) -> None:
+    """Put each rank on its own GPU before NCCL init (torch parity).
+
+    Mirrors ProcessGroupNCCL::getDeviceForRank: NCCL forbids two ranks of
+    one communicator on the same device, and a fresh process defaults to
+    cuda:0, so single-node multi-rank runs collide unless the rank selects
+    its device. LOCAL_RANK (torchrun convention) wins, else rank % ndev.
+    A rank that already pinned a device (or world_size == 1) is untouched.
+    """
+    try:
+        from tensorplay.cuda import current_device, device_count, set_device
+        if device_count() <= 1 or current_device() != 0:
+            return
+        rank = _global_rank()
+        if pg.size() <= 1 or rank >= device_count():
+            return
+        import os
+        idx = int(os.environ.get("LOCAL_RANK", rank % device_count()))
+        if idx != 0:
+            set_device(idx)
+    except Exception:
+        pass
 
 
 def _get_process_group_name(pg) -> str:
@@ -507,13 +570,12 @@ def all_gather(tensor_list: List[tp.Tensor], tensor: tp.Tensor, group=None,
     _C.all_gather(out, send_t, comm)
 
     def _split():
-        flat = out.cpu()
         for i, t in enumerate(tensor_list):
-            t.copy_(flat[i * n : (i + 1) * n].reshape(t.shape))
+            t.copy_(out[i * n : (i + 1) * n].view(t.shape))
 
     return _finish_with_tensors(_record_event(_device_index_of(tensor)),
-                                tensor_list, restore=restore, extra=_split,
-                                async_op=async_op)
+                                tensor_list, restore=restore,
+                                extra=_split, async_op=async_op)
 
 
 def gather(tensor: tp.Tensor, gather_list: Optional[List[tp.Tensor]] = None,
@@ -535,9 +597,8 @@ def gather(tensor: tp.Tensor, gather_list: Optional[List[tp.Tensor]] = None,
     def _split():
         if my_group_rank != dst:
             return
-        flat = recv_obj.cpu()
         for i, t in enumerate(gather_list):
-            t.copy_(flat[i * n : (i + 1) * n].reshape(t.shape))
+            t.copy_(recv_obj[i * n : (i + 1) * n].view(t.shape))
 
     return _finish_with_tensors(_record_event(_device_index_of(tensor)),
                                 gather_list or [], restore=restore,
@@ -800,6 +861,164 @@ _reduce_scatter_base = reduce_scatter_tensor
 
 
 # ---------------------------------------------------------------------------
+# Coalesced collectives (torch.distributed top-level parity). Built on the
+# native ncclGroupStart/ncclGroupEnd primitive (_C.group_start/_C.group_end),
+# exactly how ProcessGroupNCCL implements its *_coalesced entry points.
+# ---------------------------------------------------------------------------
+def all_reduce_coalesced(tensors: List[tp.Tensor], op: int = ReduceOp.SUM,
+                         group=None, async_op: bool = False):
+    """All-reduce a list of tensors in one coalesced (grouped) launch."""
+    pg = _resolve_group(group)
+    comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
+    restores = []
+    _C.group_start()
+    try:
+        for t in tensors:
+            buf, restore = _contiguous_view(t)
+            restores.append(restore)
+            _C.all_reduce(buf, int(op), comm)
+    except BaseException:
+        _C.group_end()
+        raise
+    _C.group_end()
+
+    def _restore():
+        for r in restores:
+            if r is not None:
+                r()
+
+    dev = _device_index_of(tensors[0]) if tensors else tp.cuda.current_device()
+    return _finish_with_tensors(_record_event(dev), list(tensors),
+                                restore=_restore if any(restores) else None,
+                                async_op=async_op)
+
+
+def all_gather_coalesced(output_tensor_lists: List[List[tp.Tensor]],
+                         input_tensor_list: List[tp.Tensor], group=None,
+                         async_op: bool = False):
+    """All-gather each input tensor into its own output list, in one coalesced
+    launch (torch parity)."""
+    pg = _resolve_group(group)
+    comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
+    if len(output_tensor_lists) != len(input_tensor_list):
+        raise ValueError(
+            "output_tensor_lists and input_tensor_list must have the same length"
+        )
+    flats = []
+    restores = []
+    _C.group_start()
+    try:
+        for out_list, tensor in zip(output_tensor_lists, input_tensor_list):
+            if len(out_list) != pg.size():
+                raise RuntimeError(
+                    f"output list length ({len(out_list)}) does not match the "
+                    f"group world size ({pg.size()})"
+                )
+            n = tensor.numel()
+            out = tp.zeros(pg.size() * n, dtype=tensor.dtype,
+                           device=tensor.device)
+            send_t, restore = _contiguous_view(tensor)
+            restores.append(restore)
+            _C.all_gather(out, send_t, comm)
+            flats.append((out, out_list, n))
+    except BaseException:
+        _C.group_end()
+        raise
+    _C.group_end()
+
+    def _split():
+        for out, out_list, n in flats:
+            for i, t in enumerate(out_list):
+                t.copy_(out[i * n:(i + 1) * n].view(t.shape))
+        for r in restores:
+            if r is not None:
+                r()
+
+    dev = (_device_index_of(input_tensor_list[0]) if input_tensor_list
+           else tp.cuda.current_device())
+    outs = [t for ol in output_tensor_lists for t in ol]
+    return _finish_with_tensors(_record_event(dev), outs, extra=_split,
+                                async_op=async_op)
+
+
+def reduce_scatter_coalesced(output_tensor_list: List[tp.Tensor],
+                             input_tensor_lists: List[List[tp.Tensor]],
+                             op: int = ReduceOp.SUM, group=None,
+                             async_op: bool = False):
+    """Reduce-scatter each input tensor list into its output tensor, in one
+    coalesced launch (torch parity)."""
+    pg = _resolve_group(group)
+    comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
+    if len(output_tensor_list) != len(input_tensor_lists):
+        raise ValueError(
+            "output_tensor_list and input_tensor_lists must have the same length"
+        )
+    restores = []
+    _C.group_start()
+    try:
+        for output, in_list in zip(output_tensor_list, input_tensor_lists):
+            if len(in_list) != pg.size():
+                raise RuntimeError(
+                    f"input list length ({len(in_list)}) does not match the "
+                    f"group world size ({pg.size()})"
+                )
+            flat_in = tp.cat([t.reshape(-1) for t in in_list])
+            send_t, s_restore = _contiguous_view(flat_in)
+            recv_t, r_restore = _contiguous_view(output)
+            restores.extend([s_restore, r_restore])
+            _C.reduce_scatter(recv_t, send_t, int(op), comm)
+    except BaseException:
+        _C.group_end()
+        raise
+    _C.group_end()
+
+    def _restore():
+        for r in restores:
+            if r is not None:
+                r()
+
+    dev = (_device_index_of(output_tensor_list[0]) if output_tensor_list
+           else tp.cuda.current_device())
+    return _finish_with_tensors(_record_event(dev), list(output_tensor_list),
+                                restore=_restore if any(restores) else None,
+                                async_op=async_op)
+
+
+_mon_barrier_seq = [0]
+
+
+def monitored_barrier(group=None, timeout=None, wait_all_ranks: bool = False):
+    """Barrier that reports which ranks failed to arrive (torch parity).
+
+    Uses the rendezvous store to detect membership, then a real NCCL barrier
+    to synchronize. Rank 0 monitors by default; ``wait_all_ranks=True`` makes
+    every rank wait for every other rank.
+    """
+    pg = _resolve_group(group)
+    if timeout is None:
+        timeout_s = default_pg_timeout.total_seconds()
+    elif isinstance(timeout, _dt.timedelta):
+        timeout_s = timeout.total_seconds()
+    else:
+        timeout_s = float(timeout)
+    store = _get_process_group_store(pg)
+    _mon_barrier_seq[0] += 1
+    prefix = f"_tp_monbar_{pg.group_name}_{_mon_barrier_seq[0]}"
+    my_rank = pg.rank()
+    store.set(f"{prefix}_rank_{my_rank}", "1")
+    keys = [f"{prefix}_rank_{r}" for r in range(pg.size())]
+    if my_rank == 0 or wait_all_ranks:
+        if not store.wait(keys, timeout=timeout_s):
+            missing = [r for r in range(pg.size())
+                       if not store.wait([keys[r]], timeout=0.05)]
+            raise RuntimeError(
+                f"Timed out after {timeout_s}s in monitored_barrier waiting for "
+                f"rank(s) {missing} to join the barrier."
+            )
+    barrier(group=group)
+
+
+# ---------------------------------------------------------------------------
 # Object collectives (torch.distributed.distributed_c10d)
 # ---------------------------------------------------------------------------
 def _get_object_coll_device(group=None) -> str:
@@ -815,8 +1034,10 @@ def _object_to_tensor(obj, device, group=None):
     pickle.Pickler(f).dump(obj)
     import numpy as np
 
+    # np.frombuffer yields a read-only array (pickle bytes); tp tensors
+    # require writable storage, hence the copy.
     byte_tensor = tp.as_tensor(
-        np.frombuffer(f.getvalue(), dtype=np.uint8), dtype=tp.uint8
+        np.frombuffer(f.getvalue(), dtype=np.uint8).copy(), dtype=tp.uint8
     ).to(device)
     local_size = tp.tensor([byte_tensor.numel()], dtype=tp.int64, device=device)
     return byte_tensor, local_size
@@ -1098,7 +1319,7 @@ def all_to_all_single(output: tp.Tensor, input: tp.Tensor,
     """
     pg = _resolve_group(group)
     comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
-    if input.dtype() != output.dtype():
+    if input.dtype != output.dtype:
         raise ValueError("output tensor must have the same type as input tensor")
     if (output_split_sizes is None) != (input_split_sizes is None):
         raise ValueError(
@@ -1145,9 +1366,9 @@ def all_to_all(output_tensor_list: List[tp.Tensor],
             "all_to_all expects input/output tensor lists of length "
             f"world_size ({pg.size()})"
         )
-    dtype = input_tensor_list[0].dtype()
+    dtype = input_tensor_list[0].dtype
     for t in list(input_tensor_list) + list(output_tensor_list):
-        if t.dtype() != dtype:
+        if t.dtype != dtype:
             raise ValueError(
                 "all_to_all tensors must have identical dtypes across lists"
             )
@@ -1277,7 +1498,7 @@ def _compute_bucket_assignment_by_size(tensors, bucket_size_limits,
     iterators: dict = {}  # key -> index into bucket_size_limits
 
     for i, tensor in enumerate(tensors):
-        if tensor.is_sparse():
+        if tensor.is_sparse:
             raise RuntimeError("No support for sparse tensors.")
         tensor_index = i
         if tensor_indices:
@@ -1286,7 +1507,7 @@ def _compute_bucket_assignment_by_size(tensors, bucket_size_limits,
             result.append(([tensor_index], k_no_size_limit))
             continue
 
-        key = (tensor.dtype(), str(tensor.device))
+        key = (tensor.dtype, str(tensor.device))
         bucket = buckets.setdefault(key, {"indices": [], "size": 0,
                                           "limit": k_no_size_limit})
         bucket["indices"].append(tensor_index)
@@ -1348,7 +1569,7 @@ def _broadcast_coalesced(process_group, tensors, buffer_size,
     streams: dict = {}
     order = []
     for idx, tensor in enumerate(tensors):
-        key = (tensor.dtype(), str(tensor.device))
+        key = (tensor.dtype, str(tensor.device))
         if key not in streams:
             streams[key] = {"idx": [], "size": 0}
             order.append(key)
