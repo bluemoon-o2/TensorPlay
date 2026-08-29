@@ -37,8 +37,7 @@ using namespace tensorplay::parallel;
 namespace {
 
 inline int64_t wrap_dim(int64_t dim, int64_t ndim) {
-    // c10::maybe_wrap_dim (WrapDimMinimal.cpp): IndexError, message reports
-    // the original (unwrapped) dim.
+    // Dimension wrapping reports the original (unwrapped) value on error.
     const int64_t min = -ndim;
     const int64_t max = ndim - 1;
     if (dim < min || dim > max) {
@@ -48,8 +47,8 @@ inline int64_t wrap_dim(int64_t dim, int64_t ndim) {
     return dim < 0 ? dim + ndim : dim;
 }
 
-// c10::maybe_wrap_dim with wrap_scalar=true: rank-0 accepts dims [-1, 0]
-// (both wrap to 0).  Used by flip's dim_list_to_bitset (WrapDimUtilsMulti.h).
+// Scalar wrapping: rank-0 accepts dims [-1, 0] (both wrap to 0).  Used by
+// flip's dim-list conversion.
 inline int64_t wrap_dim_scalar(int64_t dim, int64_t ndim) {
     return wrap_dim(dim, ndim == 0 ? 1 : ndim);
 }
@@ -76,7 +75,7 @@ inline DType scalar_promote(DType t, const Scalar& s) {
 // Broadcast both inputs to a common promoted dtype; op returns that dtype.
 // kArith selects the complex-capable TensorIterator applier for pure
 // arithmetic functors (rsub/subtract/multiply); ordering/fmod-style callers
-// must keep the default: those ops are not defined over complex, mirroring
+// must keep the default: those ops are not defined over complex, following
 template <bool kArith = false, typename Op>
 Tensor binary_same_kernel(const Tensor& a_in, const Tensor& b_in, Op op, const char* name) {
     DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
@@ -1700,7 +1699,7 @@ Tensor roll_cpu(const Tensor& self, const std::vector<int64_t>& shifts, const st
         }
         return cur;
     }
-    // Avoid a div zero error below (upstream comment); empty input rolls to
+    // Avoid a div zero error below; empty input rolls to
     // itself.
     if (self.numel() == 0) return self.clone();
     const int64_t nd = self.dim();

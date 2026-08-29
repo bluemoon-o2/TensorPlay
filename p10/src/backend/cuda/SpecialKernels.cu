@@ -104,7 +104,7 @@ void launch_ew(dim3& grid, dim3& block, int64_t n) {
 // Host-stage fallback for reference-math chains that cannot be annotated
 // __device__ (same strategy as Tier5OpsKernels.cu's linear-algebra family):
 // pull to CPU, run the double-precision scalar loops, ship back. Dtype
-// semantics mirror float_math_cuda / binary_float_cuda.
+// semantics follow the float_math_cuda / binary_float_cuda helpers.
 template <typename F>
 Tensor host_staged_unary(const Tensor& self, F fn) {
     DType in = self.dtype();

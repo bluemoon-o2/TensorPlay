@@ -38,8 +38,7 @@ inline dim3 make_grid(int64_t work) {
 }
 
 inline int64_t wrap_dim(int64_t dim, int64_t ndim) {
-    // c10::maybe_wrap_dim (WrapDimMinimal.cpp): IndexError, message reports
-    // the original (unwrapped) dim.
+    // Dimension wrapping reports the original (unwrapped) value on error.
     const int64_t min = -ndim;
     const int64_t max = ndim - 1;
     if (dim < min || dim > max) {
@@ -49,8 +48,8 @@ inline int64_t wrap_dim(int64_t dim, int64_t ndim) {
     return dim < 0 ? dim + ndim : dim;
 }
 
-// c10::maybe_wrap_dim with wrap_scalar=true: rank-0 accepts dims [-1, 0]
-// (both wrap to 0).  Used by flip's dim_list_to_bitset (WrapDimUtilsMulti.h).
+// Scalar wrapping: rank-0 accepts dims [-1, 0] (both wrap to 0).  Used by
+// flip's dim-list conversion.
 inline int64_t wrap_dim_scalar(int64_t dim, int64_t ndim) {
     return wrap_dim(dim, ndim == 0 ? 1 : ndim);
 }
@@ -1110,7 +1109,7 @@ Tensor roll_cuda(const Tensor& self, const std::vector<int64_t>& shifts, const s
         }
         return cur;
     }
-    // Avoid a div zero error below (upstream comment); empty input rolls to
+    // Avoid a div zero error below; empty input rolls to
     // itself.
     if (self.numel() == 0) return self.clone();
     const int64_t nd = self.dim();
@@ -1254,7 +1253,7 @@ std::vector<Tensor> meshgrid_cuda(const std::vector<Tensor>& tensors, const std:
 }
 
 std::vector<Tensor> broadcast_tensors_cuda(const std::vector<Tensor>& tensors) {
-    // CompositeImplicit mirror of broadcast_tensors_cpu: device-generic
+    // CompositeImplicit implementation of broadcast_tensors_cpu: device-generic
     // expand views; no CUDA-specific code required.
     std::vector<int64_t> shape;
     for (auto& t : tensors) shape = broadcast_shapes(shape, shape_of(t));
@@ -1268,7 +1267,7 @@ std::vector<Tensor> broadcast_tensors_cuda(const std::vector<Tensor>& tensors) {
 }
 
 Tensor block_diag_cuda(const std::vector<Tensor>& tensors) {
-    // CompositeImplicit mirror of block_diag_cpu (device-generic members).
+    // CompositeImplicit implementation of block_diag_cpu (device-generic members).
     if (tensors.empty()) return Tensor::empty({1, 0}, DType::Float32);
     const Device& device = tensors[0].device();
     DType out_dtype = tensors[0].dtype();

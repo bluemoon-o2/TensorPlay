@@ -1,4 +1,4 @@
-// Tier 2-4 operators - CUDA kernels (mirror of cpu/TierOpsKernels.cpp).
+// Tier 2-4 operators - CUDA kernels.
 //
 // grid-stride loops; single-dim reductions assign one thread per output
 // slice and walk the reduced dimension sequentially. Rare complex ops
