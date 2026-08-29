@@ -1,12 +1,9 @@
 """Data loading utilities: Dataset, DataLoader, Sampler, collate.
 
-Behavioral alignment with ``torch.utils.data`` as vendored in
-``third_party/pytorch/torch/utils/data`` (dataset.py, sampler.py,
-_utils/collate.py, dataloader.py). Same public names, same validation
-order, same error messages; built on ``tensorplay.Tensor``.
+The public names, validation order, and error messages remain stable; the
+implementation is built on ``tensorplay.Tensor``.
 
 The implementation also has native batch-fetch hooks for TensorPlay-backed
-datasets. They keep the public PyTorch ``__getitems__`` contract while allowing
 the default collate path to return a single indexed batch instead of creating
 one Python tensor view per sample.
 """
@@ -64,7 +61,6 @@ _T = TypeVar("_T")
 
 # A private sentinel used by dataset wrappers to say that their zero-copy
 # batch path cannot represent the requested batch.  The fetcher then falls back
-# to the public PyTorch ``__getitems__``/``__getitem__`` contract.
 _FAST_BATCH_UNAVAILABLE = object()
 
 
@@ -158,7 +154,6 @@ class TensorDataset(Dataset[tuple[Tensor, ...]]):
         ]
 
     def __getitems__(self, indices: list[int]):
-        # Keep the public torch contract (a list of samples).  DataLoader's
         # default-collate path uses ``_tp_get_batch`` above to avoid rebuilding
         # this list and stacking it a second time.
         batch = self._tp_get_batch(indices)
@@ -497,7 +492,6 @@ def _use_generator(generator: Optional["tp.Generator"]):
 
     The native random operators currently consume the process-global CPU
     generator.  Swapping its complete serialized state (and restoring it in a
-    ``finally`` block) gives DataLoader samplers the same semantics as torch's
     explicit-generator APIs: the supplied generator advances, while the
     process-global generator is left untouched.  A foreign generator object
     is retained as a compatibility fallback and is seeded by ``initial_seed``
@@ -673,7 +667,6 @@ class RandomSampler(Sampler[int]):
         n = len(self.data_source)
         if self.generator is None:
             # Fresh random seed per epoch, drawn from the global generator
-            # (mirrors torch's ``torch.empty((), dtype=torch.int64).random_()``).
             seed = int(tp.empty((), dtype=tp.int64).random_(0, 2**63 - 1).item())
             generator = tp.Generator()
             generator.manual_seed(seed)
@@ -1308,7 +1301,6 @@ def get_worker_info() -> Optional[WorkerInfo]:
 
 class _KeyErrorMessage(str):
     # repr() of a str is surrounded by quotes, which is unreadable for KeyError
-    # messages. This subclass keeps the message as-is (mirrors torch._utils).
     def __repr__(self):
         return self
 
@@ -1318,7 +1310,6 @@ class ExceptionWrapper:
 
     def __init__(self, exc_info=None, where="in background"):
         # It is important that we don't store exc_info in a variable.
-        # See NOTE [ Python Traceback Reference Cycle Problem ] in torch.
         if exc_info is None:
             exc_info = sys.exc_info()
         self.exc_type = exc_info[0]
@@ -1385,7 +1376,6 @@ class _MapDatasetFetcher(_BaseDatasetFetcher):
             # TensorPlay-backed datasets can return the already-collated
             # result of a batch index_select.  This is deliberately gated on
             # the stock collate function: a user collate_fn must still receive
-            # the exact list-of-samples prescribed by torch.
             fast_getter = getattr(self.dataset, "_tp_get_batch", None)
             if self.collate_fn is default_collate and callable(fast_getter):
                 data = fast_getter(possibly_batched_index)
@@ -1403,7 +1393,6 @@ class _MapDatasetFetcher(_BaseDatasetFetcher):
 
 
 # The function `_generate_state` is adapted from `numpy.random.SeedSequence`
-# (MIT licensed, see torch/utils/data/_utils/worker.py for the copyright).
 # It generates an array of int32 as the seed for `numpy.random`, in order to
 # prevent state collision due to same seed and algorithm for `numpy.random`
 # and `random` modules.
@@ -1498,7 +1487,6 @@ def _worker_loop(
     persistent_workers,
 ) -> None:
     # See NOTE [ Data Loader Multiprocessing Shutdown Logic ] in
-    # third_party/pytorch/torch/utils/data/dataloader.py.
     try:
         watchdog = _ManagerWatchdog()
 
@@ -1661,13 +1649,12 @@ def _default_multiprocessing_context():
 
 
 def _new_base_seed(generator: Optional["tp.Generator"]) -> int:
-    # Mirrors torch's ``torch.empty((), dtype=torch.int64).random_(generator=...)``.
     with _use_generator(generator):
         return int(tp.empty((), dtype=tp.int64).random_(0, 2**63 - 1).item())
 
 
 def _cpu_count() -> Optional[int]:
-    """Number of CPUs available to the current process (torch._utils.cpu_count).
+    """
 
     Prefers ``os.sched_getaffinity`` (respects cgroups / taskset) and falls
     back to ``os.cpu_count``.
@@ -1728,7 +1715,6 @@ class _BaseDataLoaderIter:
         self._num_workers = loader.num_workers
         self._num_yielded = 0
 
-        # Match torch's two pin-memory modes.  With no explicit device, pin
         # memory is enabled only when an accelerator exists.  An explicit
         # device opts into the requested allocator and therefore keeps the
         # flag even when the current process has no default accelerator.
@@ -1776,7 +1762,6 @@ class _BaseDataLoaderIter:
                 warn_msg += (
                     "For multiprocessing data-loading, this could be caused by not properly configuring the "
                     "IterableDataset replica at each worker. Please see "
-                    "https://pytorch.org/docs/stable/data.html#torch.utils.data.IterableDataset for examples."
                 )
             warnings.warn(warn_msg, stacklevel=2)
         return data
@@ -1802,7 +1787,6 @@ class _SingleProcessDataLoaderIter(_BaseDataLoaderIter):
 class _MultiProcessDataLoaderIter(_BaseDataLoaderIter):
     r"""Iterates once over the DataLoader's dataset, as specified by the sampler.
 
-    Mirrors ``torch.utils.data.dataloader._MultiProcessingDataLoaderIter``:
     each worker runs fetch + collate on a per-worker index queue, results are
     streamed back through a shared result queue with bounded prefetch, and an
     optional pin-memory thread of the main process pins the returned batches.
@@ -1816,7 +1800,6 @@ class _MultiProcessDataLoaderIter(_BaseDataLoaderIter):
     # the worker's index queue; workers exit upon receiving `None`. Normal
     # data always travels as a 2-tuple `(idx, data)` where `idx` is the task
     # index assigned by `_try_put_index`, so `None` can never be confused with
-    # real data. See third_party/pytorch/torch/utils/data/dataloader.py for
     # the full note.
 
     def __init__(self, loader: "DataLoader"):
@@ -2187,7 +2170,6 @@ class DataLoader(Generic[_T_co]):
             consumed once. This allows to maintain the workers `Dataset`
             instances alive. (default: ``False``)
         pin_memory_device (str, optional): Deprecated device spelling kept for
-            PyTorch API compatibility. TensorPlay uses its current CUDA
             accelerator for pinned host allocations. (default: ``""``)
         in_order (bool, optional): If ``False``, the data loader will not
             enforce that batches returned from multiprocessing workers are
@@ -2342,7 +2324,6 @@ class DataLoader(Generic[_T_co]):
 
         self._iterator = None
 
-        # Match torch's post-construction immutability for fields that define
         # the sampler/data stream.  Mutating these while a worker iterator is
         # alive can otherwise silently mix epochs or strand queued indices.
         self.__initialized = True
@@ -2351,7 +2332,6 @@ class DataLoader(Generic[_T_co]):
 
     def check_worker_number_rationality(self) -> None:
         # Warn when num_workers exceeds the logical CPUs available to this
-        # process (torch.dataloader parity).
         if not self.num_workers or self.num_workers == 0:
             return
         max_num_worker_suggest = _cpu_count()
@@ -2481,7 +2461,6 @@ class DataLoader(Generic[_T_co]):
 
     def _finalize_batch(self, data: Any) -> Any:
         # Post-processing applied in the main process after a batch has been
-        # fetched and collated (single-process path). Like torch, pinning is
         # skipped when no accelerator is available.
         if self.pin_memory and tp.cuda.is_available():
             data = _pin_memory(data)

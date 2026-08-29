@@ -15,7 +15,6 @@ except ImportError:
 
 def make_dot(var, params=None):
     """
-    Produces Graphviz representation of PyTorch graph.
     If a node is a Variable (requires_grad=True), it will be blue.
     If a node is an operation (grad_fn), it will be gray.
     
