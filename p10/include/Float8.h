@@ -1,9 +1,8 @@
 // Float8_e4m3fn / Float8_e5m2 -- 8-bit floating point types.
 //
-// Bit-level conversion algorithms transcribed from upstream
-// torch/headeronly/util/Float8_{e4m3fn,e5m2}.h (same rounding semantics:
-// round-to-nearest-even on the way in; e4m3fn has no Inf -- overflow
-// saturates to max finite, NaN maps to 0x7f; e5m2 follows IEEE half rules).
+// Conversion uses round-to-nearest-even on the way in; e4m3fn has no Inf --
+// overflow saturates to max finite, NaN maps to 0x7f; e5m2 follows IEEE half
+// rules.
 #pragma once
 
 #include <cstdint>
@@ -149,7 +148,7 @@ struct Float8_e5m2 {
     }
 };
 // ---------------------------------------------------------------------------
-// Arithmetic/comparison via float promotion (mirrors Half.h).  Constrained to
+// Arithmetic/comparison via float promotion. Constrained to
 // Float8 operands: without the constraint these templates hijack every other
 // type combination (complex, etc.) and hard-fail on the float() casts.
 // ---------------------------------------------------------------------------

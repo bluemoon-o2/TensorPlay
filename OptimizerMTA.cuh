@@ -5,7 +5,6 @@
 // This is intentionally separate from the generic foreach header: optimizer
 // updates write more than one tensor (parameter plus optimizer state), and
 // fused optimizers also carry a device-side step list.  The layout follows
-// ATen's MultiTensorApply contract: bounded metadata is passed by value,
 // chunks from all tensors are packed into one launch, and each thread handles
 // four contiguous scalar values in the aligned path.
 
@@ -32,7 +31,6 @@ constexpr int kILP = 4;
 constexpr int64_t kChunkSize = 65536;
 constexpr int kBlockSize = 512;
 
-// The plain metadata mirrors Torch's MTA layout and keeps the common
 // optimizer kernels within the conservative 4 KiB kernel-argument limit.
 template <int Depth>
 constexpr int kMaxTensorsForDepth =
@@ -52,7 +50,6 @@ constexpr int kMaxExtendedTensorsForDepth =
        (Depth == 5 ? 29 : 0))));
 // Plain MTA does not need step values or Adafactor's tensor bookkeeping.
 // Its capacities therefore follow the address/numel/block layout used by
-// Torch's TensorListMetadata and leave more tensors in each launch.
 template <int Depth>
 constexpr int kMaxPlainTensorsForDepth =
     Depth == 1 ? 110 :
