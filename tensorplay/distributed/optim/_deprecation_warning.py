@@ -1,4 +1,3 @@
-# Ported from torch/distributed/optim/_deprecation_warning.py.
 import warnings
 
 

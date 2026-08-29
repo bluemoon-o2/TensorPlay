@@ -1,6 +1,4 @@
-# Ported from torch/distributed/c10d_logger.py.
 #
-# Adaptation: tp has no torch.monitor/_WaitCounter, so ``_time_logger``
 # records into the same logger instead of a wait counter; the exception
 # logging contract is identical.
 import functools

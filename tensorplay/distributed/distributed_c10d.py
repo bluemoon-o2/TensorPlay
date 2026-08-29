@@ -1,9 +1,6 @@
-"""tensorplay.distributed — torch.distributed-compatible API on NCCL.
+"""Process-group operations, rendezvous, and tensor marshaling.
 
-Layering mirrors torch: ``p10`` NCCLContext (C++, against nccl.h) plays the
-role of c10d's ProcessGroupNCCL core; this package plays the role of
-``distributed_c10d.py`` (groups, rendezvous, tensor marshaling). The store
-layer (FileStore/TCPStore) is pure Python by design.
+The store layer (FileStore/TCPStore) is pure Python by design.
 """
 
 from __future__ import annotations
@@ -85,7 +82,6 @@ class Backend:
     MPI = "mpi"
 
     BACKENDS = [GLOO, MPI, NCCL]
-    # Mirrors torch's registry of backend -> ProcessGroup class; tp only
     # ships the NCCL path so the remaining entries are absent.
     BACKEND_TO_MAP = {NCCL: None}
 
@@ -103,15 +99,14 @@ class GroupMember:
     WORLD: Optional["ProcessGroup"] = None
 
 
-#: torch parity: ``dist.group.WORLD`` is the canonical spelling of the
 #: default process group after ``init_process_group``.
 group = GroupMember
 
 
 class Work:
-    """Handle for an async collective (torch.distributed.Work subset).
+    """Represent asynchronous collective work and its completion future.
 
-    ``get_future()`` mirrors c10d: it returns a ``tensorplay.futures.Future``
+    ``get_future()`` returns a ``tensorplay.futures.Future``
     resolving to the list of output tensors once the collective completes.
     """
 
@@ -159,7 +154,6 @@ class ProcessGroup:
         return len(self.ranks)
 
     def rank(self) -> int:
-        """Returns this process's group rank (torch ``ProcessGroup.rank``)."""
         return self.group_rank(_global_rank())
 
     def group_size(self) -> int:
@@ -236,7 +230,6 @@ def _resolve_group(group) -> ProcessGroup:
     if isinstance(group, ProcessGroup):
         return group
     if isinstance(group, str):
-        # torch parity: resolve by group name (used by autograd Function
         # wrappers that stash ``pg.group_name`` in the context).
         if _world_group is not None and group == _world_group.group_name:
             return _world_group
@@ -312,12 +305,11 @@ def _apply_nccl_autotune() -> None:
 
 
 def _select_nccl_device(pg) -> None:
-    """Put each rank on its own GPU before NCCL init (torch parity).
+    """Select a CUDA device that avoids rank collisions in one communicator.
 
-    Mirrors ProcessGroupNCCL::getDeviceForRank: NCCL forbids two ranks of
+    NCCL forbids two ranks of
     one communicator on the same device, and a fresh process defaults to
     cuda:0, so single-node multi-rank runs collide unless the rank selects
-    its device. LOCAL_RANK (torchrun convention) wins, else rank % ndev.
     A rank that already pinned a device (or world_size == 1) is untouched.
     """
     try:
@@ -393,7 +385,6 @@ def init_process_group(
         init_method = "env://"
 
     if store is None:
-        # torch path: rendezvous() parses env://, file://, tcp:// URLs and
         # falls back to RANK/WORLD_SIZE environment variables.
         from .rendezvous import rendezvous
 
@@ -545,7 +536,6 @@ def all_reduce(tensor: tp.Tensor, op: int = ReduceOp.SUM, group=None,
 
 def reduce(tensor: tp.Tensor, dst: int, op: int = ReduceOp.SUM, group=None,
            async_op: bool = False):
-    # ``dst`` is a global rank (torch semantics).
     pg = _resolve_group(group)
     comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
     buf, restore = _contiguous_view(tensor)
@@ -580,7 +570,6 @@ def all_gather(tensor_list: List[tp.Tensor], tensor: tp.Tensor, group=None,
 
 def gather(tensor: tp.Tensor, gather_list: Optional[List[tp.Tensor]] = None,
            dst: int = 0, group=None, async_op: bool = False):
-    # ``dst`` is a group rank (torch semantics).
     pg = _resolve_group(group)
     comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
     my_group_rank = pg.group_rank(_global_rank())
@@ -607,7 +596,6 @@ def gather(tensor: tp.Tensor, gather_list: Optional[List[tp.Tensor]] = None,
 
 def scatter(tensor: tp.Tensor, scatter_list: Optional[List[tp.Tensor]] = None,
             src: int = 0, group=None, async_op: bool = False):
-    # ``src`` is a group rank (torch semantics).
     pg = _resolve_group(group)
     comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
     my_group_rank = pg.group_rank(_global_rank())
@@ -649,7 +637,7 @@ def reduce_scatter(output: tp.Tensor, input_list: List[tp.Tensor],
 
 
 def isend(tensor: tp.Tensor, dst: int, group=None, tag: int = 0):
-    """Send a tensor asynchronously (torch parity; ``dst`` is a global rank).
+    """
 
     Returns a Work handle, or None if not part of the group.
     """
@@ -666,7 +654,7 @@ def isend(tensor: tp.Tensor, dst: int, group=None, tag: int = 0):
 
 def irecv(tensor: tp.Tensor, src: Optional[int] = None, group=None,
           tag: int = 0):
-    """Receives a tensor asynchronously (torch parity; ``src`` global rank).
+    """
 
     Returns a Work handle whose ``wait()`` completes the copy, or None if
     not part of the group.
@@ -688,7 +676,6 @@ def irecv(tensor: tp.Tensor, src: Optional[int] = None, group=None,
 
 
 def send(tensor: tp.Tensor, dst: int, group=None, tag: int = 0):
-    """Send a tensor synchronously (torch parity)."""
     work = isend(tensor, dst, group=group, tag=tag)
     if work is not None:
         work.wait()
@@ -717,7 +704,6 @@ def _record_event(device_index: int):
 
 
 # ---------------------------------------------------------------------------
-# Group helpers (torch.distributed.distributed_c10d)
 # ---------------------------------------------------------------------------
 def _get_default_group() -> ProcessGroup:
     return _check_default_pg()
@@ -743,7 +729,6 @@ def _warn_not_in_group(op_name: str) -> None:
 
 
 def get_group_rank(group: ProcessGroup, global_rank: int) -> int:
-    """Translate a global rank into a group rank (torch parity)."""
     if group is GroupMember.WORLD or (isinstance(group, ProcessGroup) and group is _world_group):
         return global_rank
     if not isinstance(group, ProcessGroup) or group.group_name not in _groups:
@@ -757,7 +742,6 @@ def get_group_rank(group: ProcessGroup, global_rank: int) -> int:
 
 
 def get_global_rank(group: ProcessGroup, group_rank: int) -> int:
-    """Translate a group rank into a global rank (torch parity)."""
     if group is GroupMember.WORLD or (isinstance(group, ProcessGroup) and group is _world_group):
         return group_rank
     if not isinstance(group, ProcessGroup) or group.group_name not in _groups:
@@ -776,7 +760,6 @@ def _get_global_rank(group: ProcessGroup, rank: int) -> int:
 
 
 def get_process_group_ranks(group) -> List[int]:
-    """Get all ranks associated with ``group`` (torch parity)."""
     return list((group or _get_default_group()).ranks)
 
 
@@ -792,14 +775,12 @@ def _validate_output_list_for_rank(my_rank: int, dst: int, gather_list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Base tensor collectives (torch all_gather_into_tensor / reduce_scatter_tensor)
 # ---------------------------------------------------------------------------
 def all_gather_into_tensor(output_tensor: tp.Tensor, input_tensor: tp.Tensor,
                            group=None, async_op: bool = False):
     """Gather tensors from all ranks into one flat output tensor.
 
     ``output_tensor`` must have ``world_size * input_tensor.numel()`` elements,
-    matching torch's ``all_gather_into_tensor``.
     """
     pg = _resolve_group(group)
     comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
@@ -830,7 +811,7 @@ _allgather_base = all_gather_into_tensor
 def reduce_scatter_tensor(output: tp.Tensor, input: tp.Tensor,
                           op: int = ReduceOp.SUM, group=None,
                           async_op: bool = False):
-    """Reduce then scatter a flat input tensor across ranks (torch parity).
+    """
 
     ``input`` must have ``world_size * output.numel()`` elements.
     """
@@ -861,7 +842,6 @@ _reduce_scatter_base = reduce_scatter_tensor
 
 
 # ---------------------------------------------------------------------------
-# Coalesced collectives (torch.distributed top-level parity). Built on the
 # native ncclGroupStart/ncclGroupEnd primitive (_C.group_start/_C.group_end),
 # exactly how ProcessGroupNCCL implements its *_coalesced entry points.
 # ---------------------------------------------------------------------------
@@ -897,7 +877,7 @@ def all_gather_coalesced(output_tensor_lists: List[List[tp.Tensor]],
                          input_tensor_list: List[tp.Tensor], group=None,
                          async_op: bool = False):
     """All-gather each input tensor into its own output list, in one coalesced
-    launch (torch parity)."""
+"""
     pg = _resolve_group(group)
     comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
     if len(output_tensor_lists) != len(input_tensor_list):
@@ -946,7 +926,7 @@ def reduce_scatter_coalesced(output_tensor_list: List[tp.Tensor],
                              op: int = ReduceOp.SUM, group=None,
                              async_op: bool = False):
     """Reduce-scatter each input tensor list into its output tensor, in one
-    coalesced launch (torch parity)."""
+"""
     pg = _resolve_group(group)
     comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
     if len(output_tensor_list) != len(input_tensor_lists):
@@ -988,7 +968,7 @@ _mon_barrier_seq = [0]
 
 
 def monitored_barrier(group=None, timeout=None, wait_all_ranks: bool = False):
-    """Barrier that reports which ranks failed to arrive (torch parity).
+    """
 
     Uses the rendezvous store to detect membership, then a real NCCL barrier
     to synchronize. Rank 0 monitors by default; ``wait_all_ranks=True`` makes
@@ -1019,7 +999,6 @@ def monitored_barrier(group=None, timeout=None, wait_all_ranks: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# Object collectives (torch.distributed.distributed_c10d)
 # ---------------------------------------------------------------------------
 def _get_object_coll_device(group=None) -> str:
     """Device for object collectives: NCCL-only backend -> current CUDA dev."""
@@ -1051,7 +1030,6 @@ def _tensor_to_object(tensor, tensor_size, group=None):
 
 
 def all_gather_object(object_list, obj, group=None) -> None:
-    """Gathers picklable objects from the whole group into a list (torch parity)."""
     if _rank_not_in_group(group):
         _warn_not_in_group("all_gather_object")
         return
@@ -1089,7 +1067,6 @@ def gather_object(obj, object_gather_list=None, dst: Optional[int] = None,
                   group=None) -> None:
     """Gathers picklable objects from the whole group in a single process.
 
-    ``dst`` is a global rank (torch semantics).
     """
     if _rank_not_in_group(group):
         _warn_not_in_group("gather_object")
@@ -1143,7 +1120,6 @@ def gather_object(obj, object_gather_list=None, dst: Optional[int] = None,
 
 def send_object_list(object_list: Sequence[object], dst: int, group=None,
                      device=None) -> None:
-    """Sends picklable objects in ``object_list`` synchronously (torch parity)."""
     if _rank_not_in_group(group):
         _warn_not_in_group("send_object_list")
         return
@@ -1162,7 +1138,7 @@ def send_object_list(object_list: Sequence[object], dst: int, group=None,
 
 def recv_object_list(object_list: list, src: Optional[int] = None, group=None,
                      device=None) -> int:
-    """Receives picklable objects in ``object_list`` synchronously (torch parity).
+    """
 
     Returns the sender's global rank.
     """
@@ -1195,7 +1171,6 @@ def broadcast_object_list(object_list: list, src: int = 0, group=None,
                           device=None) -> None:
     """Broadcasts picklable objects in ``object_list`` to the whole group.
 
-    ``src`` is a global rank (torch semantics).
     """
     if _rank_not_in_group(group):
         _warn_not_in_group("broadcast_object_list")
@@ -1237,7 +1212,7 @@ def broadcast_object_list(object_list: list, src: int = 0, group=None,
 def scatter_object_list(scatter_object_output_list: list,
                         scatter_object_input_list: Optional[Sequence[object]] = None,
                         src: int = 0, group=None) -> None:
-    """Scatters picklable objects to the whole group (torch parity).
+    """
 
     ``src`` is a global rank. On each rank the scattered object is stored as
     the first element of ``scatter_object_output_list``.
@@ -1307,7 +1282,6 @@ def scatter_object_list(scatter_object_output_list: list,
 
 
 # ---------------------------------------------------------------------------
-# all_to_all family (torch.distributed + ProcessGroupNCCL::alltoall)
 # ---------------------------------------------------------------------------
 def all_to_all_single(output: tp.Tensor, input: tp.Tensor,
                       output_split_sizes: Optional[List[int]] = None,
@@ -1315,7 +1289,6 @@ def all_to_all_single(output: tp.Tensor, input: tp.Tensor,
                       group=None, async_op: bool = False):
     """Splits ``input`` evenly (or by split sizes) and scatters the chunks.
 
-    Split sizes are in group-rank order, matching torch semantics.
     """
     pg = _resolve_group(group)
     comm = _ensure_comm(pg, default_pg_timeout.total_seconds())
@@ -1356,8 +1329,8 @@ def all_to_all(output_tensor_list: List[tp.Tensor],
                async_op: bool = False):
     """Scatters a list of tensors to ranks and collects one from each.
 
-    Mirrors ProcessGroupNCCL::alltoall: per-rank splits are the tensor
-    numels, executed as one grouped send/recv exchange.
+    Per-rank splits are the tensor numels, executed as one grouped send/recv
+    exchange.
     """
     pg = _resolve_group(group)
     if len(output_tensor_list) != pg.size() or \
@@ -1395,7 +1368,6 @@ def all_to_all(output_tensor_list: List[tp.Tensor],
 
 
 def _check_op(op) -> None:
-    """Check that the ``op`` is either isend or irecv (torch parity)."""
     if op not in [isend, irecv]:
         raise ValueError(
             "Invalid ``op``. Expected ``op`` "
@@ -1405,7 +1377,6 @@ def _check_op(op) -> None:
 
 
 def _check_p2p_op_list(p2p_op_list) -> None:
-    """Check that the list holds P2POps sharing one group (torch parity)."""
     if not isinstance(p2p_op_list, list) or not all(
         isinstance(p2p_op, P2POp) for p2p_op in p2p_op_list
     ):
@@ -1421,7 +1392,6 @@ def _check_p2p_op_list(p2p_op_list) -> None:
 class P2POp:
     """A class to build point-to-point operations for ``batch_isend_irecv``.
 
-    Args mirror torch: ``op`` is :func:`isend` or :func:`irecv`, ``peer``
     is a global rank (or ``group_peer`` a group rank).
     """
 
@@ -1451,7 +1421,7 @@ class P2POp:
 
 
 def batch_isend_irecv(p2p_op_list: List[P2POp]) -> List[Work]:
-    """Send or receive a batch of tensors asynchronously (torch parity).
+    """
 
     All operations are treated as a single NCCL group so ordering of sends
     vs receives cannot deadlock. Every rank in ``group`` must participate.
@@ -1476,12 +1446,11 @@ def batch_isend_irecv(p2p_op_list: List[P2POp]) -> List[Work]:
 
 
 # ---------------------------------------------------------------------------
-# Coalesced broadcast & bucket assignment (torch.csrc.distributed.c10d.comm)
 # ---------------------------------------------------------------------------
 def _compute_bucket_assignment_by_size(tensors, bucket_size_limits,
                                        expect_sparse_gradient=None,
                                        tensor_indices=None):
-    """Port of c10d::compute_bucket_assignment_by_size (reducer.cpp).
+    """Compute communication buckets grouped by dtype and device.
 
     Returns ``(bucket_indices, per_bucket_size_limits)``. Tensors are binned
     per (dtype, device) key; sparse-gradient tensors get their own bucket.
@@ -1552,7 +1521,7 @@ def _unflatten_dense_tensors(flat, tensors):
 
 def _broadcast_coalesced(process_group, tensors, buffer_size,
                          authoritative_rank=0):
-    """Broadcast many tensors, coalesced into flat buckets (c10d parity).
+    """Broadcast many tensors, coalesced into flat buckets.
 
     Buckets are formed per (dtype, device); each bucket is flattened into a
     single buffer, broadcast with one collective, then copied back. At most
@@ -1631,7 +1600,6 @@ def _verify_params_across_processes(process_group, tensors, logger=None) -> bool
 
 
 class GradBucket:
-    """Ddp grad bucket view (torch.distributed.GradBucket parity subset)."""
 
     def __init__(self, index: int, buffer: tp.Tensor, offsets: List[int],
                  lengths: List[int], sizes: List[List[int]],
@@ -1673,7 +1641,7 @@ def new_subgroups_by_enumeration(
     pg_options=None,
     group_desc=None,
 ):
-    """Create subgroups by dividing the global world (torch parity).
+    """
 
     The division is specified by a nested list of ranks. The subgroups
     cannot have overlap, and some ranks may not have to be in any subgroup.
@@ -1719,7 +1687,7 @@ def new_subgroups(
     pg_options=None,
     group_desc=None,
 ):
-    """Create subgroups of equal size (torch parity).
+    """
 
     By default, it creates intra-machine subgroups, where each of which
     contains all the ranks of a machine, based on the assumption that each

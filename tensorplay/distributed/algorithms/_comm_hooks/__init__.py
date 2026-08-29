@@ -1,4 +1,3 @@
-# Ported from torch/distributed/algorithms/_comm_hooks/__init__.py:
 # deprecated re-export shim pointing at ddp_comm_hooks.
 import warnings
 

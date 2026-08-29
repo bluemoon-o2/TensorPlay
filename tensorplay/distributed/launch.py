@@ -1,7 +1,4 @@
-# Ported from torch/distributed/launch.py (deprecated shim).
 #
-# torch.distributed.launch is deprecated in favor of torchrun /
-# torch.distributed.run; the shim forwards to the same entry points.
 import sys
 import warnings
 from argparse import ArgumentParser
