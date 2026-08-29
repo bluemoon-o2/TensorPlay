@@ -1,5 +1,5 @@
 # mypy: allow-untyped-defs
-"""CUDA backend flags, mirroring ``torch.backends.cuda``.
+"""CUDA backend property helpers.
 
 Exposes ``tensorplay.backends.cuda.matmul.allow_tf32``, backed by the same
 global state as :func:`tensorplay.set_float32_matmul_precision`.

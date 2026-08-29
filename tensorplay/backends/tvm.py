@@ -1,6 +1,5 @@
 """TVM compiler backend selected by ``tensorplay.compile(backend="tvm")``.
 
-Mirrors ``torch._dynamo.backends.tvm`` in shape and failure policy:
 
 * Apache-TVM is an optional dependency; selecting this backend without it
   raises an actionable error instead of silently falling back.
@@ -333,8 +332,8 @@ def _lower_pointwise(
             return _apply_unary(te, _op, value_expr(_args[0], idx), dtype)
 
         # One te.compute per node over raw TIR intrinsics; create_prim_func
-        # inlines the pure chain into a single kernel — the fusion Inductor's
-        # scheduler performs.  (No topi: its transcendentals route through
+        # inlines the pure chain into a single kernel; the fusion scheduler
+        # performs this transformation. (No topi: its transcendentals route through
         # TVM's workspace pool, which segfaults next to TensorPlay's OpenMP.)
         # fcompute runs eagerly, so closing over ``build`` is safe here.
         refs[node] = te.compute(shape, lambda *idx: build(idx), name=node.name)
@@ -369,11 +368,11 @@ def tvm(
         ``target``: TVM target string override (default ``"cuda"`` for CUDA
         inputs, ``"llvm"`` otherwise).
         ``parallel``: parallelize CPU kernels over the flattened domain
-        (default false — torch's tvm backend also ships no custom schedule;
         repeated in-process builds with TVM's thread pool can crash).
 
     Unsupported graphs return an interpreter-backed callable unless
-    ``strict_native=True``, mirroring the Stax Triton contract.
+    ``strict_native=True``; the strict mode contract matches the Stax Triton
+    backend.
     """
 
     if not example_inputs:

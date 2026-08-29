@@ -1,9 +1,7 @@
 # mypy: allow-untyped-defs
-"""cuDNN backend flags, mirroring ``torch.backends.cudnn``.
+"""cuDNN backend property helpers.
 
 Exposes ``tensorplay.backends.cudnn.allow_tf32`` (defaults to True, like
-PyTorch), controlling TF32 math for cuDNN convolutions, and
-``tensorplay.backends.cudnn.benchmark`` (defaults to False, like PyTorch),
 which times candidate convolution algorithms per shape and caches the
 fastest.
 """

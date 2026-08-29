@@ -1,11 +1,10 @@
-"""The TensorPlay Inductor-equivalent compiler backend.
+"""The TensorPlay native graph compiler backend.
 
-Stax is the TensorPlay implementation of the PyTorch Inductor role.  It is a
-backend, not a second public compiler frontend: ``tensorplay.compile`` owns
+This is a compiler backend, not a second public compiler frontend:
+``tensorplay.compile`` owns
 capture, guards, specialization, and graph-break policy; this module owns
 lowering and executable generation for the canonical graph.
 
-Like ``torch._dynamo.backends.inductor``, the public backend entry point is a
 small lazy adapter.  Native Stax code is loaded only when the backend is
 actually selected, keeping import-time overhead out of the frontend.
 """
@@ -91,7 +90,7 @@ _NATIVE_OPS = {
     "flatten",
 }
 
-# Single source of truth lives in compiler.fx_passes (consumed by the
+# The fused-op name set lives in compiler.fx_passes (consumed by the
 # PointwiseFusionHint pass); keep the historical private alias.
 _CPU_FUSED_OPS = POINTWISE_FUSED_OP_NAMES
 
@@ -156,7 +155,7 @@ def _normalize_pointwise_grad_output(grad_output: Any, reference: Any) -> Any:
     """Match the output shape expected by a fused elementwise backward.
 
     TensorPlay's current reduction backward may hand a scalar tangent to a
-    custom Function for ``output.sum().backward()``.  Inductor's AOTAutograd
+    custom Function for ``output.sum().backward()``. The compiled backward
     contract supplies the expanded tangent, so normalize that boundary here
     before entering either the p10 or Triton backward kernel.
     """
@@ -785,7 +784,7 @@ def _build_fused_gradient_graphs(
 
     # Remove forward values that are not needed by any local derivative.  For
     # example, d(sin(x))/dx uses cos(x), not the forward sin(x) result; this
-    # matches Inductor's backward graph rather than blindly replaying all of
+    # follows the derivative graph rather than blindly replaying all of
     # the forward graph.
     total_input_count = input_count + 1
     instruction_count = len(program) // 3
@@ -987,10 +986,8 @@ def _lower_native(
     attribute_targets: list[str] = []
     constant_values: list[Any] = []
     folded_convs = _fold_eval_conv_batch_norm(graph_module, example_inputs)
-    # TorchInductor's inference layout pass prefers channels-last for CUDA
     # convolution inputs, weights, and outputs.  Its generated wrapper uses
     # ``empty_strided`` tensors with the channels-last strides and the current
-    # ``torch/_inductor/kernel/conv.py`` lowering consumes the real strides
     # rather than assuming NCHW.  Materialize the same weight layout once for
     # folded constants; runtime activations are converted by a native graph
     # node immediately before the first convolution that consumes them.
@@ -1004,8 +1001,8 @@ def _lower_native(
             folded_with_layout: dict[Node, tuple[Node, Any, Any]] = {}
             for conv, (batch_norm, weight, bias) in folded_convs.items():
                 # NCHW logical shape, NHWC physical storage, then reinterpret
-                # as NCHW.  This is the same layout represented by Inductor's
-                # generated weight strides, e.g. [K*C*R*S, 1, S*C, C].
+                # as NCHW. This layout is represented by generated weight
+                # strides, e.g. [K*C*R*S, 1, S*C, C].
                 physical_weight = weight.permute((0, 2, 3, 1)).clone()
                 channels_last_weight = physical_weight.permute((0, 3, 1, 2))
                 folded_with_layout[conv] = (
@@ -1023,7 +1020,6 @@ def _lower_native(
         batch_norm: conv for conv, (batch_norm, _, _) in folded_convs.items()
     }
 
-    # Match TorchInductor's wrapper liveness: only graph-live get_attr values
     # belong in the native ABI.  Inference Conv+BN folding leaves the original
     # parameter nodes in FX, but the native graph consumes only the folded
     # weight/bias constants.  Passing those dead tensors through Python and
@@ -1070,7 +1066,6 @@ def _lower_native(
     channels_last_values: dict[Node, Any] = {}
     peel_conv_bias = bool(example_inputs and example_inputs[0].device.is_cuda())
     # This is the same producer/sole-consumer legality check used by
-    # TorchInductor's buffer planner.  Residual Add->ReLU is also legal in a
     # training graph because add_relu has a generated autograd formula; the
     # Conv->ReLU and Conv+BN folding paths remain inference-only.
     if use_fusion:
@@ -1122,7 +1117,7 @@ def _lower_native(
         layout_values[node] = False
 
     def channels_last_value(node: Any) -> Any | None:
-        """Return the native value in Inductor's preferred 4-D layout."""
+        """Return the native value in the preferred 4-D layout."""
 
         if not isinstance(node, Node) or node not in values:
             return None
@@ -1272,7 +1267,6 @@ def _lower_native(
                 native_node.add_input(bias_input)
                 native_node.set_int_attr("has_bias", 1)
             else:
-                # TorchInductor's CUDA convolution lowering peels bias before
                 # the cuDNN call because cuDNN is slower with it.  Keep the
                 # bias as a broadcast pointwise input after the convolution.
                 native_node.set_int_attr("has_bias", 0)
@@ -1378,7 +1372,7 @@ def _lower_native(
             values[node] = native_node.add_output()
             # The cuDNN tensor descriptor and output follow the input layout;
             # a later convolution can therefore consume the max-pool result
-            # without the NCHW round-trip that Inductor avoids.
+            # without an NCHW round-trip.
             layout_values[node] = use_channels_last and layout_values.get(
                 input_node, False
             )
@@ -1435,7 +1429,6 @@ def _lower_native(
             )
             continue
 
-        # The generated functional add/sub wrappers preserve the PyTorch
         # ``alpha`` argument, so their graph node has
         # ``(input, other, alpha)`` even when alpha is the default 1.  Lower
         # that contract to the native pointwise IR instead of falling back to
@@ -2169,7 +2162,6 @@ def _build_aot_backward(
             source_value = runtime_values.get(node.args[0])
             if source_value is None:
                 return None
-            # The Torch reshape/flatten derivative needs the input shape, not
             # the input storage.  Keep that metadata-only dependency out of
             # the saved-tensor list so the rebuilt graph can omit the pooled
             # activation while still producing the exact reshape backward.
@@ -2200,7 +2192,6 @@ def _build_aot_backward(
             if arg.name not in context and arg.default is not None:
                 context[arg.name] = _aot_default_value(arg.default)
         context["grad"] = grad
-        # Some Torch formulas use the forward result (e.g. ReLU), while
         # others only need metadata or their inputs (e.g. adaptive average
         # pooling).  A pruned saved-tensor set must not require a symbol for
         # a result that the selected formula never reads.
@@ -2248,7 +2239,6 @@ def _build_aot_backward(
 
 
 class _AotNativeLowering:
-    """Torch-style AOTAutograd wrapper around two native Stax graphs."""
 
     def __init__(
         self,
@@ -2362,7 +2352,6 @@ def _lower_aot_native(
 
     # Training BatchNorm updates running buffers during forward.  A compiler
     # trace must not perform that update a second time; restore non-gradient
-    # attributes after the shape/materialization run, just as the Torch AOT
     # capture path separates tracing state from the user execution state.
     snapshots: list[tuple[Any, Any]] = []
     seen_attributes: set[int] = set()
@@ -2406,7 +2395,6 @@ def _lower_aot_native(
     _, grad_positions, needed_saved_nodes = built
     # The first graph is a shape/materialization graph.  Rebuild the forward
     # graph with only the values that the source-derived backward graph reads,
-    # matching Torch's saved-tensor contract instead of retaining every
     # intermediate until backward.
     forward_lowering = _lower_native(
         graph_module,
@@ -2453,7 +2441,6 @@ def stax(
     """Compile one canonical graph and return an executable callable.
 
     ``example_inputs`` and backend options are part of the same contract as
-    TorchInductor's ``compile_fx`` entry point.  Stax currently specializes
     metadata in the frontend and uses the native graph when its lowering
     contract is satisfied.  ``strict_native`` makes a failed lowering a hard
     compiler error, so a benchmark can never report the Python GraphModule
@@ -2519,8 +2506,7 @@ def stax(
             if node.op == "get_attr"
         ):
             raise RuntimeError(
-                "Stax strict_native=True could not build the Torch-style "
-                "AOTAutograd backward graph for the captured training region"
+                "AOT backward graph for the captured training region"
             )
     native_graph = (
         _lower_native(graph_module, example_inputs, use_fusion=use_fusion)
