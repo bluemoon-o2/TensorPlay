@@ -1,6 +1,5 @@
 """CUDA graphs orchestration (L5-M3).
 
-Management layer modeled on ``torch/_inductor/cudagraph_trees.py`` concepts
 (capture once, replay against static buffers), driven entirely by the native
 :class:`tensorplay._C.CUDAGraph` class:
 

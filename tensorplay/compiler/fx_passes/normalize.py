@@ -1,4 +1,4 @@
-"""Operator normalization, in the spirit of ``torch._inductor.fx_passes``.
+"""Canonical graph normalization rules.
 
 Canonical forms make downstream pattern matching (fusion hints, decomposition
 tables, codegen templates) reliable:
@@ -9,7 +9,6 @@ tables, codegen templates) reliable:
   ``x / 1``, ``x ** 1``, ``neg(neg(x))`` -> ``x``.
 
 ``x * 0`` is deliberately NOT folded: for floats it propagates NaN/Inf and
-torch keeps the multiplication.  The pass is idempotent — a second run is a
 no-op by construction.
 """
 

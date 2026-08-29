@@ -1,15 +1,14 @@
 """Compile-time autotuner for Stax Triton kernels (L5-M2).
 
-Modeled on ``torch/_inductor/runtime/triton_heuristics.py`` (CachingAutotuner):
-instead of emitting ``@triton.autotune`` — which benchmarks candidate configs
+Instead of emitting ``@triton.autotune`` — which benchmarks candidate configs
 at every new runtime key with per-launch overhead and keeps no persistent
-record — we benchmark the candidates once at compile time, pick the winner,
+record — this module benchmarks candidates once at compile time, picks the winner,
 and emit a fixed-config kernel.  Decisions are stored in the kernel codecache
 keyed by ``(program digest, xnumel bucket, device)``, so later processes skip
-benchmarking entirely, mirroring Inductor's persistent autotune cache.
+benchmarking entirely.
 
 The benchmarking itself uses :class:`tensorplay.cuda.Event` timings around a
-warmup + timed-iteration loop, equivalent to Inductor's ``do_bench``.
+warmup + timed-iteration loop.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ import json
 import os
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
-# (XBLOCK, num_warps) candidates.  Beyond the classic Inductor table this
+# (XBLOCK, num_warps) candidates.  Beyond the baseline table this
 # probes the 8-wide geometry (2048 elements / 256 threads = two vectorized
 # 16B accesses per thread) and the 16-wide extreme — transcendental-heavy
 # pointwise chains gain ILP from fewer, busier threads even at halved
@@ -66,7 +65,7 @@ def xnumel_bucket(xnumel: int) -> int:
 
     Decisions generalize within a bucket because XBLOCK only changes the
     grid/block geometry; any xnumel in the same bucket sees the same ranking
-    in practice (Inductor keys its autotune cache similarly by shape).
+    in practice because the autotune cache is grouped by shape.
     """
 
     if xnumel <= 0:
@@ -119,16 +118,15 @@ def bench_launch(launch: Callable[[list], Any], args: list,
                  *, warmup_ms: float = 3.0, iters: int = 20) -> float:
     """Minimum per-iteration latency (ms) over warmup + timed launches.
 
-    Mirrors the benchmark harness (``_time_tp``): CUDA events around EACH
-    launch with a device sync, best-of.  Three Inductor-benchmarker lessons
-    (``torch/_inductor/runtime/benchmarking.py::benchmark_gpu``):
+    Uses the benchmark harness (``_time_tp``): CUDA events around EACH
+    launch with a device sync, best-of.  Three benchmark-harness lessons
 
     * A pipelined average measures the Python launch floor (~25-35us) once
       kernels drop below it, flattening the ranking; per-iteration latency
       is what callers actually pay.
     * Candidates are JIT-compiled immediately before their window, so the
       GPU idles into a down-clock and a short timed loop never ramps back
-      (Inductor runs ``memory_warmup_iters=100`` busy iterations first).
+      (the tuner runs ``memory_warmup_iters=100`` busy iterations first).
       The first launch here is UNTIMED (it eats the lazy triton compile,
       workspace allocation and fast-launch recording), then the kernel runs
       for ``warmup_ms`` wall time before recording — settling clocks and L2
@@ -169,7 +167,7 @@ def bench_candidates(
     rounds: int = 2,
     bench_fn: Optional[Callable[[Any, list], float]] = None,
 ) -> Tuple[Optional[Any], Any, float]:
-    """Interleaved-round candidate benchmarking (Inductor-style).
+    """Interleaved-round candidate benchmarking.
 
     Benches every candidate once per round and keeps the per-candidate MIN
     across rounds, so a clock-ramp transient in one window penalizes all

@@ -1,6 +1,5 @@
 """Operator decomposition pass (L5-M4).
 
-Modeled on ``torch/_inductor/decomposition.py``: rewrite composite
 operators into the primitive set *before* AOT, so the derivative registry
 only has to cover primitives. Every expansion below uses ops that already
 have local vector-Jacobian rules, which keeps decomposed graphs
@@ -8,8 +7,8 @@ differentiable by construction.
 
 This table deliberately lands every rewrite on the Stax/Triton fusible
 primitive set (``POINTWISE_FUSED_OP_NAMES``): add/sub/mul/div/pow/neg/exp/
-log/sqrt/tanh/relu/sigmoid/square plus scalar constants.  That is the same
-lever Inductor pulls — a small kernel set covers a wide operator surface —
+log/sqrt/tanh/relu/sigmoid/square plus scalar constants. A small primitive
+set covers a wide operator surface,
 so each entry below multiplies *natively compiled* coverage without any
 new kernel.  Compare-based rewrites (elu/selu/hardshrink/sign family,
 which need ``where`` + comparison primitives) are intentionally deferred
@@ -74,7 +73,6 @@ def _silu(graph: Graph, node: Node) -> Node:
     return _binop(graph, operator.mul, x, sig)
 
 
-# swish is the historical alias of silu (torch parity).
 _DECOMP_METHODS["swish"] = _silu
 
 
@@ -97,7 +95,6 @@ def _square(graph: Graph, node: Node) -> Node:
 def _softplus(graph: Graph, node: Node) -> Node:
     """softplus(x) -> log(1 + exp(x))
 
-    torch/_inductor lowers with log1p(exp(x)); log1p itself decomposes to
     log(1 + .) below, so both spellings converge on the same primitive chain.
     """
     x = node.args[0]
@@ -160,7 +157,6 @@ def _log10(graph: Graph, node: Node) -> Node:
 def _logit(graph: Graph, node: Node) -> Node:
     """logit(x) -> log(x) - log(1 - x)
 
-    torch/_inductor writes this as log(x / (1 - x)); the subtract spelling
     avoids a division whose numerator/denominator can both underflow.
     """
     x = node.args[0]
@@ -341,7 +337,6 @@ class DecomposePass(PassBase):
                 continue
             # Replacement sub-chains must precede the replaced node's users:
             # create them directly before the original site.  inserting_before
-            # keeps creation order, mirroring torch.fx subgraph rewriting.
             with graph.inserting_before(node):
                 replacement = rule(graph, node)
             node.replace_all_uses_with(replacement)

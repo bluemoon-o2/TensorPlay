@@ -1,6 +1,5 @@
-"""AOTAutograd-style partitioning over the canonical graph (L4, v2).
+"""Ahead-of-time graph partitioning over the canonical graph (L4, v2).
 
-torch-aligned architecture (see docs/graph_compiler_alignment_plan.md):
 local vector-Jacobian rules append tagged backward nodes into the SAME
 joint graph (``meta["is_backward"]``), then a partitioner extracts the
 forward/backward pair by tag membership -- ``partition_default`` today,
@@ -172,7 +171,6 @@ _RULES: Dict[Tuple[str, Any], Callable] = {
         lambda b, go, s: b.bwd("call_function", operator.mul, (go, b.bwd("call_function", operator.gt, (s, 0))))
     ),
     ("call_method", "sum"): _method_rule(
-        # torch derivatives.yaml: `self: grad.expand(self.sizes())` -- the
         # formula reads only the input's SIZES, never its values, so emit a
         # metadata-only expand (no edge to the forward node) and the
         # partitioner correctly saves nothing for sum.
@@ -245,11 +243,11 @@ def _copy_nodes(
 def partition_default(
     joint_gm: GraphModule, *, num_fwd_outputs: int = 1, policy: str = "save_needed"
 ):
-    """torch-contract split of a tagged joint graph.
+    """
 
     Joint output args are ``(fwd..., bwd...)``; ``num_fwd_outputs`` marks the
     boundary. ``save_needed`` saves every forward value the backward reads
-    (upstream default_partition); ``recompute_all`` saves nothing and clones
+    (the default partition policy); ``recompute_all`` saves nothing and clones
     producer chains into the backward graph. Returns
     ``(fw_gm, bw_gm, input_kinds, input_keys, saved_names, leaf_targets)``
     where backward inputs carry a role tag for name-based binding.
@@ -549,8 +547,8 @@ def partition_min_cut(
     def ensure(node: Node) -> Node:
         if node in bw_map:
             return bw_map[node]
-        # Upstream _extract_graph_with_inputs_outputs: only the explicit
-        # input list (saved values + tangent) becomes placeholders; every
+        # Only the explicit input list (saved values + tangent) becomes
+        # placeholders; every
         # other reachable node -- including backward-internal ones -- is
         # cloned recursively into the extracted graph.
         external = (
@@ -648,7 +646,7 @@ class AotResult:
         user_out, saved = self.forward(*args)
         if grad_output is None:
             if isinstance(user_out, tuple):
-                # Total-derivative tangent for multi-output regions, mirroring
+                # Total-derivative tangent for multi-output regions, matching
                 # eager `sum(t.sum() for t in outs).backward()`.
                 grad_output = sum(o.sum() for o in user_out) * 0 + 1
             else:
@@ -704,7 +702,6 @@ def build_aot(
 
     builder = _JointBuilder(graph_module)
     out_arg = graph_module.graph.output_node.args[0]
-    # torch contract: every forward output seeds its own tangent. Multi-output
     # regions (tuple returns) each receive the unit tangent, which reproduces
     # the total derivative d(sum(out_i))/dx that eager `sum(...).backward()`
     # computes.
@@ -743,8 +740,8 @@ def build_aot(
 
     if not grad_outputs:
         raise AOTError("no leaf gradients were computed")
-    # Upstream contract: backward outputs follow primal input order -- the
-    # reverse sweep discovers leaf gradients bottom-up, so restore the
+    # Backward outputs follow primal input order -- the reverse sweep
+    # discovers leaf gradients bottom-up, so restore the
     # forward placeholder order before emitting the joint output.
     placeholder_order = {
         p.name: idx for idx, p in enumerate(graph_module.graph.placeholders)
@@ -762,7 +759,6 @@ def build_aot(
             continue
         if seen_output:
             n.meta["is_backward"] = True
-    # torch contract: joint output = (fwd..., bwd...), split at num_fwd_outputs.
     graph_module.graph.output((out_arg, *[g for _, g in grad_outputs]))
 
     if partitioner == "min_cut":

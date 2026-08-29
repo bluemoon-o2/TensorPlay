@@ -1,13 +1,11 @@
-"""Kernel codegen cache (L5-M1).
+"""Kernel code-generation cache (L5-M1).
 
-Modeled on ``torch/_inductor/codecache.py``: content-addressed on-disk cache
-for compiled artifacts. The lowering backend (stax/Triton/AVX) supplies the
+The lowering backend (stax/Triton/AVX) supplies the compiled artifact
 generated ``source`` plus its compile callable; this module owns key
 canonicalization, lookup, atomic publication and process-level memoization,
 so backends stay free of cache plumbing.
 
 Layout: ``$TP_CACHE_DIR`` or ``<cwd>/.tp_cache/kernels/<backend>/ab/<key>.<ext>``
-where ``ab`` is the first two hex digits of the key (fan-out like torch's
 local cache). Publication is temp-file + rename, so concurrent processes
 never observe partial artifacts.
 """

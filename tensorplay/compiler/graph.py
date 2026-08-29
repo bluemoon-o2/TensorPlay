@@ -2,8 +2,7 @@
 
 This module is deliberately independent of Stax.  A compiler frontend owns
 capture and produces this graph; backends consume :class:`GraphModule`.
-Keeping the graph here mirrors the PyTorch split between Dynamo/FX and a
-backend such as Inductor.
+backend such as Stax or TVM.
 """
 
 from __future__ import annotations
@@ -94,7 +93,6 @@ def capture_call(
     TensorPlay's generated functional wrappers call into the native extension
     directly, so the extension cannot see a :class:`Proxy`.  This small
     dispatcher is the equivalent of the operator-overload dispatch that lets
-    FX/Dynamo record ``torch.nn.functional`` calls without changing their
     eager implementation.
 
     Hot path: every eager op passes through here, so the no-proxy case is
@@ -145,7 +143,6 @@ def _iter_nodes(value: Any) -> Iterable["Node"]:
 
 
 def _snake_case(name: str) -> str:
-    """Port of torch.fx.Graph._snake_case for semantic node naming."""
 
     s1 = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", name)
     return re.sub("([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
@@ -375,7 +372,6 @@ class Graph:
         """The single output node of this graph.
 
         :meth:`output` enforces the single-output invariant by replacing any
-        previous output node, mirroring torch.fx.
         """
 
         outputs = self.outputs
@@ -480,7 +476,6 @@ class Graph:
 
         Nodes created inside the block keep creation order: each one is placed
         directly before ``n``, after the previously inserted nodes.  This is
-        the insertion mode subgraph rewriting needs (``torch.fx`` uses exactly
         this one in ``Graph.graph_copy``), so a copied subgraph lands in front
         of the matched region already topologically sorted.  The anchor is
         re-located if the node list changes under the cached position, keeping
@@ -523,7 +518,6 @@ class Graph:
             n: The node after which to insert.  ``None`` inserts at the very
                 end of the graph (the default append behaviour).
 
-        Note the ordering subtlety shared with ``torch.fx``: every created node
         is spliced directly after ``n``, so a sequence of creations appears in
         the graph in *reverse* creation order.  Use :meth:`inserting_before`
         on the successor node when program order matters.
@@ -559,7 +553,6 @@ class Graph:
         graph into this graph; the simplest form looks the value up in the
         table populated by :meth:`graph_copy`.  The copy keeps the original
         op, target and name (uniquified if already taken) and receives a
-        shallow copy of ``node.meta``.  Mirrors ``torch.fx.Graph.node_copy``.
         """
 
         args = _map_arg(node.args, arg_transform)
@@ -578,7 +571,6 @@ class Graph:
         ``g``'s output value — a single node, a nested container of nodes, or
         ``None`` when ``g`` has no output node.  Insertion happens at the
         current insert point, so this composes with :meth:`inserting_before`
-        exactly like ``torch.fx.Graph.graph_copy`` does for subgraph
         rewriting.
         """
 
@@ -624,7 +616,6 @@ class Graph:
 
         The output is plain text and requires no third-party packages; feed it
         to ``dot -Tpng`` or :meth:`draw` to produce an image.  Styling follows
-        the conventions popularized by torchviz/torchview: inputs are blue
         ellipses, operations yellow boxes, submodule calls green components,
         attributes orange diamonds, and the result a pale-green ellipse.
         """
@@ -864,7 +855,7 @@ class Proxy:
     def _scalar_sample(self) -> Any:
         """Python scalar behind this node for control-flow gates.
 
-        Mirrors THPVariable_bool/long_bool: a 0-d/1-element tensor reduces
+        A 0-d/1-element tensor reduces
         through ``item()``.  Returns ``None`` when no sample is available,
         which keeps purely symbolic capture failing fast.
         """
@@ -964,7 +955,6 @@ class Proxy:
         # CPython but is deprecated ("may be removed"), so numeric gates do
         # NOT smuggle symbolic scalars through __int__ — use the explicit
         # ``tensorplay.compiler.gate`` entry point instead (UPV analog,
-        # torch/_dynamo/variables/tensor.py UnspecializedPythonVariable).
         scalar = self._scalar_sample()
         if scalar is None:
             raise GraphCaptureError("int(Proxy) is not supported during graph capture")
@@ -1049,7 +1039,6 @@ def gate(source: Any) -> Any:
     """Mark a traced scalar as unspecialized and keep it a tensor proxy.
 
     Native counterpart of Dynamo's ``UnspecializedPythonVariable``
-    (torch/_dynamo/variables/tensor.py:3417): like UPV, the value IS the
     1-element tensor proxy — ``need_unwrap``-style conversion to a real
     Python number happens only through explicit ``int()``/``float()``
     (which specialize+bake), never implicitly.
@@ -1147,7 +1136,6 @@ class Tracer:
         self.metadata_touches: set[Tuple[str, str]] = set()
         # Qualified module path recorded per ``call_module`` node.  Modules
         # executed twice produce distinct ``path_0``/``path_1`` style entries,
-        # mirroring torchvision's NodePathTracer.
         self.node_to_qualname: Dict[Node, str] = {}
         self._recorded_qualnames: set[str] = set()
 

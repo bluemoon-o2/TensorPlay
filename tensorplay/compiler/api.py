@@ -1,7 +1,6 @@
 """Public compiler orchestration for TensorPlay.
 
-The API follows the shape of ``torch.compile`` while keeping frontend
-capture, backend selection, and execution concerns separate.  A backend is
+Capture, backend selection, and execution concerns are separate. A backend is
 never asked to discover Python control flow; it only receives a captured
 ``GraphModule`` and example inputs.
 """
@@ -50,8 +49,6 @@ def _disable_capture() -> Iterable[None]:
     """Temporarily execute a region outside the active Stax capture.
 
     This is the TensorPlay counterpart of the capture boundary used by
-    ``torch._disable_dynamo``.  The public compiler owns the capture state;
-    optimizers only use this narrow internal context when Torch marks a
     stateful Python region as uncapturable.
     """
 
@@ -78,7 +75,6 @@ def _tensor_signature(value: Any, *, dynamic: bool) -> tuple[Any, ...] | None:
     try:
         shape = tuple(int(item) for item in shape)
         # Dynamic mode keeps rank specialization but removes concrete sizes.
-        # This is the same useful boundary as TorchDynamo's first dynamic
         # shape policy; operations still receive the real runtime tensors.
         shape_key = ("dynamic", len(shape)) if dynamic else shape
     except (TypeError, ValueError):
@@ -598,7 +594,7 @@ def _compile_region(
     # Backend failures are compiler failures, not graph breaks.  In
     # particular, a Stax lowering error must not silently turn a requested
     # compiled region into an uncompiled call.
-    # FX/Inductor backends receive graph inputs in placeholder order, including
+    # Registered backends receive graph inputs in placeholder order, including
     # values supplied through keywords and defaults.  Passing only positional
     # arguments makes a keyword-only/scalar placeholder appear to be missing
     # and is especially harmful for native Stax lowering.

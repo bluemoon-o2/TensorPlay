@@ -1,4 +1,4 @@
-"""Graph pass infrastructure aligned with ``torch.fx.passes``.
+"""Pass management utilities.
 
 A pass receives the :class:`~tensorplay.compiler.graph.GraphModule`, mutates
 its graph in place, and reports whether it changed anything.  The
@@ -38,7 +38,6 @@ class PassResult(NamedTuple):
 
 
 class PassBase:
-    """Mirror of ``torch.fx.passes.PassBase`` for the canonical graph."""
 
     def __call__(self, graph_module: GraphModule) -> PassResult:
         raise NotImplementedError
@@ -61,7 +60,6 @@ def _as_graph_module(target: Any) -> GraphModule:
 class PassManager:
     """Run passes until no pass reports a modification (or once).
 
-    Mirrors ``torch.fx.passes.infra.PassManager``.  Each round executes every
     pass once and validates the graph; iteration stops when a full round is
     unmodified or ``max_iterations`` is reached.
     """

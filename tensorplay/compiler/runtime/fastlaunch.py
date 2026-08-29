@@ -9,8 +9,7 @@ configuration, every later launch can call the compiled kernel directly::
 
 skipping the per-call binder, specialization-key build, cache lookup and
 used-globals revalidation inside ``JITFunction.run``.  This is the Python
-equivalent of the launcher Inductor generates per kernel
-(``torch/_inductor/runtime/triton_heuristics.py`` builds one compiled
+equivalent of the compiled launcher generated per kernel
 ``binary.run`` call site per autotuned config); the native
 ``static_triton_launcher`` is the same idea one level lower and is NOT
 adoptable here without a ``_C`` rebuild.

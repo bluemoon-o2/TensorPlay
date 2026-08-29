@@ -1,6 +1,5 @@
 """Backend registry used by :func:`tensorplay.compile`.
 
-The contract intentionally follows TorchDynamo's public backend contract:
 ``backend(graph_module, example_inputs, **options) -> callable``.
 Backends do not capture Python and do not own graph-break policy.
 """

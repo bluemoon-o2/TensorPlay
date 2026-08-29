@@ -3,8 +3,8 @@
 Triton is deliberately not a second public TensorPlay compiler backend.  The
 frontend and backend contract remain ``tensorplay.compile(..., backend='stax')``;
 Stax selects this code generator for eligible CUDA pointwise groups.  Training
-uses the same AOT-style split as Inductor: Stax receives a forward program and
-a separately compiled reverse-mode program, then the runtime Function only
+uses the local ahead-of-time split: Stax receives a forward program and a
+separately compiled reverse-mode program, then the runtime Function only
 assembles those two compiled artifacts for autograd.
 """
 
@@ -86,7 +86,6 @@ def _next_power_of_two(value: int) -> int:
 def _broadcast_reference_shape(
     shapes: list[tuple[int, ...]],
 ) -> tuple[int, ...] | None:
-    """Result shape of torch-style broadcasting over ``shapes``; None if invalid."""
 
     rank = max(len(shape) for shape in shapes)
     reference = [1] * rank
@@ -105,7 +104,7 @@ def _broadcast_reference_shape(
 # A full-sum epilogue whose input fits one block is emitted as a single
 # kernel writing the scalar directly; larger inputs take the two-stage split
 # (partial sums to a workspace, then a tiny finalize kernel), matching
-# Inductor's multilayer split-reduction semantics in miniature.
+# Multilayer split-reduction semantics in miniature.
 _SINGLE_BLOCK_MAX = 1024
 
 # Deterministic config used when autotuning is off/unavailable and the split
@@ -179,7 +178,7 @@ def _dim_reduction_config(
 
 # Software-pipelining depth for the reduction r-loop: keeps the next chunk's
 # loads in flight while the current one reduces (memory-bound kernels are
-# latency-bound without it — Inductor emits num_stages for the same reason).
+# latency-bound without it — the generated kernel exposes this depth).
 _DIM_NUM_STAGES = 3
 
 # Candidate table for axis-reduction autotuning.  Triples are
@@ -188,10 +187,9 @@ _DIM_NUM_STAGES = 3
 # few-output-lane / wide-reduction band where the derived 512 cap leaves
 # the r-loop too shallow.  The XBLOCK*RBLOCK product is what bounds
 # register pressure, so the quads trade grid parallelism for r-tile depth
-# at a constant footprint.  The 16-warp quads mirror Inductor's INNER
-# contiguous_config (XBLOCK 1-2, RBLOCK min(rnumel, 2048),
+# at a constant footprint.  The 16-warp quads use an inner contiguous band
+# (XBLOCK 1-2, RBLOCK min(rnumel, 2048),
 # num_warps = tile/128 — 4-8 elements/thread; see
-# torch/_inductor/runtime/triton_heuristics.py::_reduction_configs), the
 # low-pressure band our 3-tuple geometries cannot reach because 512-deep
 # tiles with <=8 warps spill.
 _DIM_REDUCTION_CANDIDATES: tuple[tuple[int, ...], ...] = (
@@ -208,7 +206,7 @@ _DIM_REDUCTION_CANDIDATES: tuple[tuple[int, ...], ...] = (
     (16, 8, 1024, 3),
     (4, 4, 2048, 2),
     (16, 8, 2048, 2),
-    # Inductor INNER band: one/two output lanes per program, deep r-tile,
+    # Inner band: one/two output lanes per program, deep r-tile,
     # warps scaled to keep ~4-8 elements/thread
     (1, 16, 2048, 3),
     (2, 16, 2048, 3),
@@ -218,7 +216,7 @@ _DIM_REDUCTION_CANDIDATES: tuple[tuple[int, ...], ...] = (
 _STATIC_DIM_TRIPLE = (128, 4, 3)
 
 # Reductions whose entire space fits one tile skip the r-loop entirely
-# (Inductor's persistent-reduction shape): no loop-carried acc, one reduce.
+# (persistent-reduction shape): no loop-carried acc, one reduce.
 _PERSISTENT_RNUMEL_MAX = 512
 
 
@@ -231,7 +229,6 @@ class ReductionSpec:
 
     ``argmax`` is an *index* reduction: the kernel carries a value stream and
     an index stream side by side (the dual-output skeleton) but v1 stores only
-    the int64 indices, matching ``torch.argmax``'s first-occurrence contract.
     It requires explicit dims and float32/float64 inputs.
     """
 
@@ -258,7 +255,6 @@ class ReductionSpec:
             raise ValueError(f"unsupported reduction op: {op}")
         if op == "argmax":
             if not dims:
-                # torch.argmax() flattens when dim is None; that form needs the
                 # full-reduction machinery to track indices, which v1 does not
                 # implement (single/split paths are value-only).
                 raise ValueError("argmax folding requires a dim argument")
@@ -329,7 +325,6 @@ def runtime_available() -> bool:
     """True when Triton can actually compile AND launch here.
 
     Importing ``triton`` is not enough: its CUDA driver needs a compatible
-    device (sm_70+ for current releases) and, in some installs, torch.
     Probed once per process by compiling and launching a trivial kernel;
     callers should treat False as "use another lowering".
     """
@@ -624,10 +619,10 @@ class TritonProgramCodegen:
         """Per-input load lines honouring broadcast offsets.
 
         ``use_mask=False`` (every lane valid: numel divides XBLOCK) drops
-        predication entirely — the same fast path Inductor takes — and marks
+        predication entirely and marks
         reference-layout loads with ``cache_modifier='.cg'``: a read-once,
         coalesced stream has no reuse for L1, so bypassing it keeps the
-        resident working set (Inductor's skip-L1 heuristic, identical input
+        resident working set (the skip-L1 heuristic, under these input
         conditions: not broadcasted, not inside a reduction, single use).
         Broadcast/offset inputs and any predicated load keep the plain form.
         """
@@ -675,8 +670,8 @@ class TritonProgramCodegen:
         Full-reduction epilogues are always pinned: a reference input within
         one block takes the single-kernel direct-store form, anything larger
         takes the two-stage split — per-program partial results into a
-        workspace plus a tiny finalize kernel — mirroring Inductor's
-        multilayer split reduction in miniature.  Axis reductions (the
+        workspace plus a tiny finalize kernel — using multilayer split
+        reduction in miniature.  Axis reductions (the
         ``sum(dim)`` family, M5b) emit an output-space kernel whose inner
         ``tl.range`` loop folds RBLOCK-sized chunks of the reduction space;
         their configs are deterministic in v1 (tuning lands with M5d).
@@ -691,8 +686,8 @@ class TritonProgramCodegen:
         body: list[str] = [
             "xoffset = tl.program_id(0) * XBLOCK",
             # AxisInfo hint: proves contiguity+alignment of every xindex
-            # derived access, unlocking vectorized ld/st (Inductor emits
-            # the same multiple_of annotation).
+            # derived access, unlocking vectorized ld/st through the
+            # multiple_of annotation.
             "xoffset = tl.multiple_of(xoffset, XBLOCK)",
             "xindex = xoffset + tl.arange(0, XBLOCK)",
             "xmask = xindex < xnumel",
@@ -902,7 +897,7 @@ class TritonProgramCodegen:
             for index in range(self.input_count):
                 inner.append(f"in_off{index} = {_input_offset(index)}")
                 # Reduction tiles stream through L2 exactly once, so give the
-                # lines evict-first priority — Inductor's rule for every load
+                # lines evict-first priority — the rule for every load
                 # inside a reduction loop; persistent single-tile reads keep
                 # it too (the tile is still read-once).
                 if mask_text:
@@ -936,10 +931,8 @@ class TritonProgramCodegen:
                 # Per-chunk winners over the priority stream.  tl.argmax
                 # breaks ties toward the lower lane, and combining chunks
                 # with a strict ``>`` keeps the earlier chunk, so the global
-                # winner is the FIRST maximum — torch's contract.
                 #
                 # NaN ordering is explicit: several triton versions ignore
-                # NaN inside tl.max, but torch.argmax treats NaN as the
                 # greatest value (first NaN wins).  A finite sentinel ranks
                 # NaN above every real value, letting cval double as the
                 # has-NaN flag without a second reduction per chunk.
@@ -1352,7 +1345,7 @@ class TritonProgramCodegen:
             persistent_split = (
                 fixed_config is not None and len(fixed_config) > 2
             )
-            # Static workspace (Inductor's preallocated-buffer pattern):
+            # Static workspace (the preallocated-buffer pattern):
             # wsn is a per-kernel constant, so the partial buffer is
             # allocated once and reused.  Every launch overwrites all wsn
             # entries before the finalize reads them, and the returned
@@ -1538,7 +1531,7 @@ class TritonProgramCodegen:
                 # Pinned config: the grid is a compile-time constant, so emit
                 # it literally instead of paying triton's per-call
                 # grid-lambda/meta resolution (the launch path is the pw
-                # chain's bottleneck once kernels reach hardware parity).
+                # chain's bottleneck once kernels reach hardware throughput).
                 grid_n = -(-_prod(self.reference_shape) // fixed_config[0])
                 source += (
                     f"    {kernel_name}[({grid_n},)]({call_args_txt}{constexpr_kw})\n"
@@ -1593,7 +1586,6 @@ def _compile_program(
             )
         ).encode()
     ).hexdigest()[:16]
-    # L5-M1 (torch/_inductor/codecache.py PyCodeCache): the generated source
     # is content-addressed and persisted; a process-level memo keeps the
     # exec'd launch callable so repeated compile() calls skip regeneration.
     memo_key = f"{digest}:{fixed_config}"
@@ -1677,7 +1669,7 @@ def _autotune_dims_program(
 ):
     """Benchmark ``_DIM_REDUCTION_CANDIDATES`` once; persist the decision.
 
-    Mirrors the CachingAutotuner flow for the axis-reduction kernel family:
+    Uses the CachingAutotuner flow for the axis-reduction kernel family:
     the decision cache key covers program content, reduction spec, shape
     buckets and device, so a hit skips both benchmarking and recompiles.
     """
@@ -1877,7 +1869,7 @@ def _autotune_launch(
 ):
     """Compile a program, autotuning the launch config when possible (M2).
 
-    Mirrors Inductor's CachingAutotuner: benchmark candidate configs once at
+    Uses the CachingAutotuner flow: benchmark candidate configs once at
     compile time and emit a fixed-config kernel; persist the decision so
     later processes skip benchmarking.  Any failure falls back to a static
     pinned config for reductions (the split workspace is baked per config)
@@ -2038,7 +2030,7 @@ def _reduction_spec_from_node(node: Node) -> ReductionSpec | None:
         return None
 
     if op == "amax" and not dims:
-        return None  # torch.amax requires a dim argument
+        return None
     if op == "max" and dims:
         return None  # max(dim) yields a (values, indices) pair
     try:
@@ -2054,7 +2046,7 @@ def _split_reduction_epilogue(
 
     Returns ``(tail_node, producer, ReductionSpec)`` when the graph's single
     output is a supported ``chain_result.sum()/mean()/amax()/max()`` and
-    every other node is pointwise-fusible — the shape Inductor lowers to one
+    every other node is pointwise-fusible — the shape lowered to one
     kernel with a fused reduction epilogue.  Otherwise returns ``None``.
     """
 
@@ -2551,7 +2543,7 @@ def compile_graph_module(
             # M5c training: chain one local VJP program per segment.  The
             # reverse sweep feeds each segment's export-gradient through its
             # own fused backward kernel and accumulates contributions into
-            # upstream segments / placeholders (fan-out sums).
+            # segment boundaries / placeholders (fan-out sums).
             for plan in segment_plans:
                 if (
                     plan.needs_broadcast
@@ -2643,7 +2635,6 @@ def compile_graph_module(
                     if plan.tangent_plan is not None:
                         # sum/mean: uniform distribution back over the
                         # reduction input (expand + mean scale), matching
-                        # torch's reduction backward exactly.  The fused
                         # backward kernels read dense buffers (same contract
                         # as _normalize_pointwise_grad_output), so the
                         # stride-0 expansion is materialized here.

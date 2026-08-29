@@ -1,6 +1,5 @@
 """Guard expressions for compiled specializations (L6).
 
-Modeled on ``torch/_dynamo/guards.py``: every cached specialization carries a
 set of guard conditions over its inputs, and a failed cache lookup can be
 explained condition-by-condition ("why did this recompile happen?").
 
