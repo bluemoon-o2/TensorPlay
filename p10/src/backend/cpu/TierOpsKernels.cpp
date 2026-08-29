@@ -1,8 +1,6 @@
 // Tier 2-4 operators (arithmetic aliases, comparisons/logic, clamp family,
 // activations, math functions, reductions, shape ops) - CPU kernels.
 //
-// Algorithms ported from the vendored PyTorch tree at third_party/pytorch
-// (2.15.0a0). Verified ATen anchors cited per section:
 //   BinaryOps.cpp:954 true_divide, :1169/:1203 rsub, :1184 remainder,
 //                  :1498 logical_and, :1540 fmod
 //   TensorCompare.cpp:435 isnan, :458 isinf, :474 isfinite
@@ -64,7 +62,8 @@ inline void outer_inner(const std::vector<int64_t>& shape, int64_t dim,
 }
 
 inline DType scalar_promote(DType t, const Scalar& s) {
-    // Weak scalar participation (mirrors ComparisonKernels.cpp result rule).
+    // Weak scalar participation: scalars only promote the tensor dtype when
+    // they carry a floating type of their own.
     if (!isFloatingType(s.dtype())) return t;
     if (isFloatingType(t)) return t;
     return DType::Float32;
@@ -78,7 +77,6 @@ inline DType scalar_promote(DType t, const Scalar& s) {
 // kArith selects the complex-capable TensorIterator applier for pure
 // arithmetic functors (rsub/subtract/multiply); ordering/fmod-style callers
 // must keep the default: those ops are not defined over complex, mirroring
-// ATen.
 template <bool kArith = false, typename Op>
 Tensor binary_same_kernel(const Tensor& a_in, const Tensor& b_in, Op op, const char* name) {
     DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
@@ -202,7 +200,6 @@ Tensor dtype_unary_kernel(const Tensor& self, F f, const char* name) {
     return out;
 }
 
-// Math unary with torch result-type semantics: f maps double -> double;
 // integral inputs yield Float32; Half/BFloat16 compute in float and keep
 // their dtype; Float32/Float64 preserved.
 template <typename F>
@@ -522,7 +519,6 @@ Tensor multiply_tensor_cpu(const Tensor& self, const Tensor& other) {
     return binary_same_kernel<true>(self, other, [](auto x, auto y) { return x * y; }, "multiply");
 }
 Tensor multiply_scalar_cpu(const Tensor& self, Scalar other) {
-    // torch parity: complex tensors (or complex scalars) multiply component-wise
     if (isComplexType(self.dtype()) || other.isComplex()) {
         DType dt;
         if (isComplexType(self.dtype())) {
@@ -631,7 +627,6 @@ Tensor isposinf_cpu(const Tensor& self) {
 // ===========================================================================
 
 Tensor reciprocal_cpu(const Tensor& self) {
-    // torch parity: reciprocal over complex tensors preserves dtype (1/z);
     // the old float_math_kernel path silently dropped the imaginary part.
     if (isComplexType(self.dtype())) {
         return complex_unary_op_kernel(self, [](auto z) {
@@ -782,7 +777,6 @@ Tensor hypot_cpu(const Tensor& a, const Tensor& b) {
     }, "hypot");
 }
 
-// ATen BinaryOpsKernel.cpp atan2_cpu: std::atan2 over float/int iterator.
 Tensor atan2_cpu(const Tensor& a, const Tensor& b) {
     return binary_float_kernel(a, b, [](double x, double y) {
         return std::atan2(x, y);
@@ -897,9 +891,6 @@ Tensor celu_cpu(const Tensor& self, Scalar alpha) {
 }
 Tensor hardshrink_cpu(const Tensor& self, Scalar lambd) {
     double l = lambd.toDouble();
-    // ATen Activation.cpp hardshrink_kernel: (a >= -l && a <= l) ? 0 : a
-    // (NaN fails both comparisons and passes through, matching ATen).
-    // lambd is rounded to the element dtype first, like ATen's
     // lambd.to<scalar_t>(), so float32 boundary values compare exactly.
     return dtype_unary_kernel(self, [l](auto x) -> decltype(x) {
         using T = decltype(x);
@@ -910,8 +901,6 @@ Tensor hardshrink_cpu(const Tensor& self, Scalar lambd) {
 }
 Tensor softshrink_cpu(const Tensor& self, Scalar lambd) {
     double l = lambd.toDouble();
-    // ATen Activation.cpp softshrink_kernel: a > l ? a-l : (a < -l ? a+l : a*0)
-    // (the a*0 middle branch keeps NaN propagating, matching ATen).
     return dtype_unary_kernel(self, [l](auto x) -> decltype(x) {
         using T = decltype(x);
         const double lt = static_cast<double>(static_cast<T>(l));
@@ -921,7 +910,6 @@ Tensor softshrink_cpu(const Tensor& self, Scalar lambd) {
         return static_cast<T>(v * 0.0);
     }, "softshrink");
 }
-// ATen Activation.cpp shrink_backward_kernel (shared by hard/soft): grad
 // passes through where self is outside the inclusive [-lambd, lambd] band.
 Tensor hardshrink_backward_cpu(const Tensor& grad_out, const Tensor& self, Scalar lambd) {
     double l = lambd.toDouble();
@@ -941,7 +929,6 @@ Tensor softshrink_backward_cpu(const Tensor& grad_output, const Tensor& self, Sc
         return (v >= -lt && v <= lt) ? static_cast<T>(0) : g;
     }, "softshrink_backward");
 }
-// ATen Activation.cpp sigmoid_backward_kernel: grad * output * (1 - output),
 // where `output` is the saved forward result of sigmoid.
 Tensor sigmoid_backward_cpu(const Tensor& grad_output, const Tensor& output) {
     return binary_same_kernel(grad_output, output, [](auto g, auto o) -> decltype(g) {
@@ -949,7 +936,6 @@ Tensor sigmoid_backward_cpu(const Tensor& grad_output, const Tensor& output) {
         return g * o * (static_cast<T>(1) - o);
     }, "sigmoid_backward");
 }
-// ATen Activation.cpp tanh_backward_kernel: grad * (1 - output * output),
 // where `output` is the saved forward result of tanh.
 Tensor tanh_backward_cpu(const Tensor& grad_output, const Tensor& output) {
     return binary_same_kernel(grad_output, output, [](auto g, auto o) -> decltype(g) {
@@ -957,7 +943,6 @@ Tensor tanh_backward_cpu(const Tensor& grad_output, const Tensor& output) {
         return g * (static_cast<T>(1) - o * o);
     }, "tanh_backward");
 }
-// ATen BinaryOpsKernel.cpp logit_backward_kernel: without eps (eps<0) the
 // gradient is dy/(x(1-x)) inside [0,1], NaN outside, and dy*inf at exact
 // 0/1; with eps>=0 values outside [eps, 1-eps] (compared in scalar_t) are
 // masked to zero.
@@ -972,7 +957,6 @@ Tensor logit_backward_cpu(const Tensor& grad_output, const Tensor& self, std::op
             if (s == zero || s == one) return g * std::numeric_limits<T>::infinity();
             return g / (s * (one - s));
         }
-        // ATen rounds eps to the element dtype and compares in scalar_t
         // (float32 1 - 0.2f == 0.8f), so the band check must too.
         const T lo = static_cast<T>(e);
         const T hi = one - lo;
@@ -1040,7 +1024,6 @@ Tensor prelu_cpu(const Tensor& self, const Tensor& weight) {
 // Reductions (ReduceOps.cpp / Sorting.cpp anchors)
 // ===========================================================================
 
-// ATen parity (ReduceOps.cpp meta funcs + ReduceOpsUtils.h
 // zero_numel_check_dims): reducing an empty tensor is only valid along an
 // explicitly given non-empty dim; a full reduction has no identity.
 static void zero_numel_check_dims(const Tensor& self, const std::vector<int64_t>& dims,
@@ -1069,7 +1052,6 @@ Tensor amax_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool kee
     return reduce_dims_impl<double>(
         self, dim, keepdim, isFloatingType(self.dtype()) ? self.dtype() : self.dtype(),
         -std::numeric_limits<double>::infinity(),
-        // torch amax semantics: NaN is treated as greater than any number
         // (strictly propagates), matching slice_max_kernel on CUDA.
         [](double acc, double v) { return (v != v || v > acc) ? v : acc; },
         [](double acc) { return acc; });
@@ -1085,7 +1067,6 @@ Tensor amin_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool kee
     return reduce_dims_impl<double>(
         self, dim, keepdim, self.dtype(),
         std::numeric_limits<double>::infinity(),
-        // torch amin semantics: NaN is treated as greater than any number
         // (strictly propagates), matching slice_min_kernel on CUDA.
         [](double acc, double v) { return (v != v || v < acc) ? v : acc; },
         [](double acc) { return acc; });
@@ -1137,7 +1118,6 @@ Tensor nansum_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool k
     DType out_dt = isFloatingType(self.dtype()) ? self.dtype() : DType::Int64;
     std::vector<int64_t> dim = dim_in;
     if (dim.empty()) {
-        // torch: dim omitted (or empty) reduces over every dimension
         for (int64_t i = 0; i < self.dim(); ++i) dim.push_back(i);
     }
     return reduce_dims_impl<double>(
@@ -1392,14 +1372,12 @@ Tensor dist_cpu(const Tensor& self, const Tensor& other, Scalar p) {
         for (int64_t i = 0; i < n; ++i) s += std::pow(std::fabs(ap[i] - bp[i]), pd);
         result = std::pow(s, 1.0 / pd);
     }
-    // torch semantics: dist returns the promoted input dtype, not fp64.
     DType out_dt = promoteTypes(self.dtype(), other.dtype());
     if (!isFloatingType(out_dt)) out_dt = DType::Float32;
     return Tensor::zeros({}, out_dt, self.device()).fill_(Scalar(static_cast<double>(result)));
 }
 
 Tensor renorm_cpu(const Tensor& self, Scalar p, int64_t dim, Scalar maxnorm) {
-    // ATen ReduceOps.cpp renorm: each sub-tensor obtained by slicing along
     // `dim` (i.e. fixing the dim coordinate, reducing over all other dims)
     // is scaled so its p-norm does not exceed maxnorm.
     int64_t nd = self.dim();
@@ -1575,7 +1553,6 @@ Tensor diag_embed_cpu(const Tensor& self, int64_t offset, int64_t dim1_, int64_t
 }
 
 Tensor narrow_cpu(const Tensor& self, int64_t dim, int64_t start, int64_t length) {
-    // TensorShape.cpp narrow: a slice view with torch's exact checks.
     if (self.dim() == 0) {
         TP_THROW(RuntimeError, "narrow() cannot be applied to a 0-dim tensor.");
     }
@@ -1597,7 +1574,6 @@ Tensor narrow_cpu(const Tensor& self, int64_t dim, int64_t start, int64_t length
 }
 
 std::vector<Tensor> split_with_sizes_cpu(const Tensor& self, std::vector<int64_t> split_sizes, int64_t dim) {
-    // Torch split_with_sizes (TensorShape.cpp).
     if (self.dim() == 0) {
         TP_THROW(RuntimeError, "split expects at least a 1-dimensional tensor");
     }
@@ -1729,7 +1705,6 @@ Tensor roll_cpu(const Tensor& self, const std::vector<int64_t>& shifts, const st
     if (self.numel() == 0) return self.clone();
     const int64_t nd = self.dim();
     if (nd == 0) {
-        // torch reaches size(dim) on the 0-d tensor: maybe_wrap_dim with
         // wrap_scalar=false rejects any dim.
         TP_THROW(IndexError, "Dimension specified as ", dims[0],
                  " but tensor has no dimensions");
@@ -1844,7 +1819,6 @@ Tensor repeat_interleave_cpu(const Tensor& self, int64_t repeats, int64_t dim) {
 }
 
 std::vector<Tensor> meshgrid_cpu(const std::vector<Tensor>& tensors, const std::string& indexing) {
-    // ATen TensorShape.cpp meshgrid: grid j carries input j's VALUES tiled
     // along dim j; common promoted dtype; "xy" swaps the first two axes.
     size_t k = tensors.size();
     if (k == 0) return {};
@@ -1900,7 +1874,6 @@ std::vector<Tensor> meshgrid_cpu(const std::vector<Tensor>& tensors, const std::
 }
 
 std::vector<Tensor> broadcast_tensors_cpu(const std::vector<Tensor>& tensors) {
-    // ATen TensorShape.cpp broadcast_tensors: expand every input to the
     // common broadcast shape.  Returns stride-0 views; gradients flow through
     // the dispatcher expand op (sum-to-size backward).
     std::vector<int64_t> shape{};
@@ -1922,7 +1895,6 @@ std::vector<Tensor> broadcast_tensors_cpu(const std::vector<Tensor>& tensors) {
 
 
 Tensor block_diag_cpu(const std::vector<Tensor>& tensors) {
-    // ATen TensorShape.cpp block_diag: 0-D -> 1x1, 1-D -> (1, n) diag row,
     // 2-D rectangular blocks; result dtype = promoted inputs; empty call
     // yields a (1, 0) tensor.
     if (tensors.empty()) return Tensor::empty({1, 0}, DType::Float32);
@@ -1935,13 +1907,13 @@ Tensor block_diag_cpu(const std::vector<Tensor>& tensors) {
         const Tensor& t = tensors[idx];
         if (!(t.device() == device)) {
             TP_THROW(RuntimeError,
-                     "torch.block_diag: input tensors must all be on the same device.");
+                     "block_diag: input tensors must all be on the same device.");
         }
         out_dtype = promoteTypes(out_dtype, t.dtype());
         const int64_t nd = t.dim();
         if (nd > 2) {
             TP_THROW(RuntimeError,
-                     "torch.block_diag: Input tensors must have 2 or fewer dimensions. Input ",
+                     "block_diag: Input tensors must have 2 or fewer dimensions. Input ",
                      static_cast<int64_t>(idx), " has ", nd, " dimensions");
         }
         Tensor b2 = t;
@@ -2094,7 +2066,6 @@ Tensor unfold_cpu(const Tensor& self, int64_t dimension, int64_t size, int64_t s
 
 Tensor unfold_backward_cpu(const Tensor& grad, const std::vector<int64_t>& input_sizes,
                            int64_t dim, int64_t size, int64_t step) {
-    // ATen UnfoldBackward.cpp + cpu/UnfoldBackwardKernel.cpp: scatter each
     // window's gradient back onto `dim`, accumulating where windows overlap
     // (step < size).  We gather over grad_input elements (race-free), which
     // degenerates to a plain copy when step >= size.
@@ -2147,9 +2118,7 @@ Tensor unfold_backward_cpu(const Tensor& grad, const std::vector<int64_t>& input
 }
 
 // ===========================================================================
-// Index/scatter complements + isclose/isreal (torch parity 2026-08-24)
 //
-// ATen anchors:
 //   TensorShape.cpp select_scatter_out / slice_scatter_out
 //   (composite: clone the base, mutate a view, return);
 //   TensorAdvancedIndexing.cpp take_along_dim_out (broadcast indices against
@@ -2176,7 +2145,6 @@ Tensor select_scatter_cpu(const Tensor& self, const Tensor& src, int64_t dim, in
 
 Tensor slice_scatter_cpu(const Tensor& self, const Tensor& src, int64_t dim,
                          std::optional<int64_t> start, std::optional<int64_t> end, int64_t step) {
-    // torch slice_scatter: start/end follow slice() normalization.
     if (step <= 0) TP_THROW(RuntimeError, "slice_scatter: step must be positive");
     int64_t nd = self.dim();
     dim = wrap_dim(dim, nd);
@@ -2205,7 +2173,6 @@ Tensor diagonal_scatter_cpu(const Tensor& self, const Tensor& src, int64_t offse
 Tensor take_along_dim_cpu(const Tensor& self, const Tensor& indices, std::optional<int64_t> dim) {
     // TensorAdvancedIndexing.cpp take_along_dim_out
     if (!dim.has_value()) {
-        // Flattened variant: indices must be 1-D (torch requires equal numel).
         Tensor flat = self.reshape({-1});
         Tensor idx = indices.to(DType::Int64).reshape({-1});
         return flat.gather(0, idx);
@@ -2249,7 +2216,7 @@ Tensor nanmean_cpu(const Tensor& self, std::optional<int64_t> dim_opt, bool keep
     if (!isFloatingType(x.dtype()) && !isComplexType(x.dtype())) {
         x = x.to(acc_dt != DType::Undefined ? acc_dt : DType::Float32);
     } else if (isReducedFloatingType(x.dtype()) && acc_dt == DType::Undefined) {
-        x = x.to(DType::Float32);   // accumulate in f32 like ATen opmath
+        x = x.to(DType::Float32);
     }
     std::vector<int64_t> dims;
     if (dim_opt.has_value()) dims.push_back(*dim_opt);
@@ -2273,29 +2240,71 @@ Tensor nanmean_cpu(const Tensor& self, std::optional<int64_t> dim_opt, bool keep
 }
 
 Tensor isclose_cpu(const Tensor& self, const Tensor& other, double rtol, double atol, bool equal_nan) {
-    // TensorCompare.cpp isclose: |a-b| <= atol + rtol*|b|; NaNs compare equal
-    // only under equal_nan; infinities compare equal to themselves.
+    // |a-b| <= atol + rtol*|b|; values also count as close when they are
+    // equal, infinities match each other, and NaNs match under equal_nan.
+    // Complex inputs keep complex arithmetic: both the equality check and
+    // the error use the full two-component value.
+    if (self.dtype() != other.dtype()) {
+        TP_THROW(RuntimeError, toString(self.dtype()), " did not match ",
+                 toString(other.dtype()));
+    }
+    TP_THROW_IF(rtol < 0, RuntimeError,
+                "rtol must be greater than or equal to zero, but got ", rtol);
+    TP_THROW_IF(atol < 0, RuntimeError,
+                "atol must be greater than or equal to zero, but got ", atol);
+
     std::vector<int64_t> out_shape = broadcast_shapes(
         static_cast<std::vector<int64_t>>(self.shape()),
         static_cast<std::vector<int64_t>>(other.shape()));
-    Tensor a = self.to(DType::Float64).expand(out_shape).contiguous();
-    Tensor b = other.to(DType::Float64).expand(out_shape).contiguous();
     Tensor out = Tensor::empty(out_shape, DType::Bool, self.device());
     int64_t n = out.numel();
+    bool* dp = out.data_ptr<bool>();
+
+    if (isComplexType(self.dtype())) {
+        Tensor a = self.to(DType::ComplexDouble).expand(out_shape).contiguous();
+        Tensor b = other.to(DType::ComplexDouble).expand(out_shape).contiguous();
+        const std::complex<double>* ap =
+            static_cast<const std::complex<double>*>(a.data_ptr());
+        const std::complex<double>* bp =
+            static_cast<const std::complex<double>*>(b.data_ptr());
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
+            for (int64_t i = begin; i < end; ++i) {
+                std::complex<double> x = ap[i], y = bp[i];
+                bool close = x == y;
+                if (equal_nan) {
+                    auto is_nan = [](const std::complex<double>& v) {
+                        return std::isnan(v.real()) || std::isnan(v.imag());
+                    };
+                    close = close || (is_nan(x) && is_nan(y));
+                }
+                if (!close) {
+                    double actual = std::abs(x - y);
+                    double allowed = atol + rtol * std::abs(y);
+                    close = std::isfinite(actual) && actual <= allowed;
+                }
+                dp[i] = close;
+            }
+        });
+        return out;
+    }
+
+    Tensor a = self.to(DType::Float64).expand(out_shape).contiguous();
+    Tensor b = other.to(DType::Float64).expand(out_shape).contiguous();
     const double* ap = a.data_ptr<double>();
     const double* bp = b.data_ptr<double>();
-    bool* dp = out.data_ptr<bool>();
     parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
         for (int64_t i = begin; i < end; ++i) {
             double x = ap[i], y = bp[i];
-            if (x != x || y != y) {
-                dp[i] = equal_nan && x != x && y != y;
-            } else if (std::isinf(x) || std::isinf(y)) {
-                dp[i] = x == y;
-            } else {
-                double tol = atol + rtol * std::fabs(y);
-                dp[i] = std::fabs(x - y) <= tol;
+            bool close = x == y;
+            if (equal_nan && x != x && y != y) {
+                close = true;
             }
+            if (!close) {
+                double actual = std::fabs(x - y);
+                double allowed = atol + rtol * std::fabs(y);
+                close = std::isfinite(actual) && actual <= allowed;
+            }
+            dp[i] = close;
         }
     });
     return out;
@@ -2422,7 +2431,6 @@ Tensor bitwise_scalar_cpu(const Tensor& self_in, Scalar other, Pred pred, const 
 
 template <typename Pred>
 Tensor bitwise_shift_scalar_cpu(const Tensor& self_in, Scalar other, Pred pred, const char* name) {
-    // Shift amounts follow torch: modded by the element bit width.
     bitwise_check_cpu(self_in, name);
     int64_t bits = self_in.itemsize() * 8;
     int64_t shift = other.to<int64_t>();
@@ -2487,7 +2495,6 @@ Tensor bitwise_not_cpu(const Tensor& self) {
 
 template <bool kLeft>
 Tensor bitwise_shift_tensor_cpu(const Tensor& a_in, const Tensor& b_in, const char* name) {
-    // ATen BinaryBitwiseOpsKernel: shift amounts are taken modulo the element
     // bit width; shifting through the unsigned domain keeps << defined.
     bitwise_check_cpu(a_in, name);
     bitwise_check_cpu(b_in, name);
@@ -2669,7 +2676,6 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("diag_embed", diag_embed_cpu);
     m.impl("narrow", narrow_cpu);
     m.impl("split_with_sizes", split_with_sizes_cpu);
-    // tensor_split.sections: owned by cpu/ShapeAlignKernels.cpp (torch-exact
     // view semantics + indices/tensor overloads); duplicate removed.
     m.impl("roll", roll_cpu);
     m.impl("flip", flip_cpu);
