@@ -193,9 +193,7 @@ Tensor pdist_cuda(const Tensor& self, double p) {
     return to_device(cpu::pdist_cpu(to_host(self), p), dev);
 }
 // ---------------------------------------------------------------------------
-// Native CUDA RNN forward — port of ATen RNN.cpp templated cell structure
 // (LSTMCell / GRUCell / SimpleCell<tanh_f|relu_f>) running the fused-cell
-// kernels ported into RNNKernels.cu (ATen RNN.cu _thnn_fused_*_cell_cuda).
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -229,7 +227,6 @@ static std::tuple<Tensor, Tensor, Tensor> rnn_cuda_impl(
     Tensor x = batch_first ? input.transpose(0, 1).contiguous() : input.contiguous();
     const int64_t T = x.size(0), N = x.size(1);
     if (hx.empty()) TP_THROW(RuntimeError, "rnn: hx required");
-    // ATen RNN.cpp parity: lstm indexes hx[1] for c0 (torch: "lstm expects
     // two hidden states"); an undersized hx would read past the vector.
     if (kind == 0 && hx.size() != 2) TP_THROW(RuntimeError, "lstm expects two hidden states");
     const int64_t L = num_layers;
@@ -465,7 +462,6 @@ Tensor polar_cuda(const Tensor& abs_, const Tensor& angle_) {
 }
 
 
-// ATen native_functions.yaml: adjoint(Tensor(a) self) is transpose(-2,-1)
 // composed with conj(); ndim <= 1 is plain conj.  conj_cuda materializes the
 // conjugate for complex inputs and aliases real ones.
 Tensor adjoint_cuda(const Tensor& self) {

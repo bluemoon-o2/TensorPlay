@@ -1,6 +1,5 @@
 // Tier 2-4 operators - CUDA kernels (mirror of cpu/TierOpsKernels.cpp).
 //
-// Same op set and ATen anchors as the CPU file. Elementwise work runs as
 // grid-stride loops; single-dim reductions assign one thread per output
 // slice and walk the reduced dimension sequentially. Rare complex ops
 // (mode/kthvalue/nanmedian/dist-special-p) are host-staged reference paths.
@@ -483,7 +482,6 @@ Tensor isposinf_cuda(const Tensor& self) {
 // ===========================================================================
 
 Tensor reciprocal_cuda(const Tensor& self) {
-    // torch parity: 1/z over complex, dtype preserved.
     if (isComplexType(self.dtype())) {
         if (self.dtype() != DType::ComplexFloat &&
             self.dtype() != DType::ComplexDouble)
@@ -547,7 +545,6 @@ Tensor fix_cuda(const Tensor& self) {
 }
 Tensor erfinv_cuda(const Tensor& self) {
     // CUDA has no native erfinv; use the Cephes calc_erfinv from SpecialMath.h
-    // (the same implementation ATen's erfinv_kernel uses), not glibc's
     // host-only ::erfinv — linking that from device code leaves an undefined
     // symbol in libp10.so.
     return float_math_cuda(self, [] __device__ (double x) { return tensorplay::special_math::calc_erfinv(x); }, "erfinv");
@@ -763,6 +760,17 @@ Tensor& clamp__cuda(Tensor& self, std::optional<Scalar> min, std::optional<Scala
     return self;
 }
 
+// Keep them separate from clamp_ (which accepts two optional bounds): these
+// are the unsuffixed dispatcher names used by the generated native schemas.
+Tensor& clamp_min__scalar_cuda(Tensor& self, Scalar min) {
+    self.copy_(clamp_min_scalar_cuda(self, min));
+    return self;
+}
+Tensor& clamp_max__scalar_cuda(Tensor& self, Scalar max) {
+    self.copy_(clamp_max_scalar_cuda(self, max));
+    return self;
+}
+
 // ===========================================================================
 // Activations
 // ===========================================================================
@@ -791,9 +799,6 @@ Tensor celu_cuda(const Tensor& self, Scalar alpha) {
 }
 Tensor hardshrink_cuda(const Tensor& self, Scalar lambd) {
     double l = lambd.toDouble();
-    // ATen ActivationHardshrinkKernel.cu: (a >= -l && a <= l) ? 0 : a
-    // (NaN fails both comparisons and passes through, matching ATen).
-    // lambd is rounded to the element dtype first, like ATen's
     // lambd.to<scalar_t>(), so float32 boundary values compare exactly.
     return dtype_unary_cuda(self,
                             [l] __device__ (auto x) -> decltype(x) {
@@ -806,7 +811,6 @@ Tensor hardshrink_cuda(const Tensor& self, Scalar lambd) {
 }
 Tensor softshrink_cuda(const Tensor& self, Scalar lambd) {
     double l = lambd.toDouble();
-    // ATen ActivationSoftshrinkKernel.cu: isnan(a) ? a : (a > l ? a-l :
     // (a < -l ? a+l : 0)); the v*0 middle branch keeps NaN propagating.
     return dtype_unary_cuda(self,
                             [l] __device__ (auto x) -> decltype(x) {
@@ -819,7 +823,6 @@ Tensor softshrink_cuda(const Tensor& self, Scalar lambd) {
                             },
                             "softshrink");
 }
-// ATen ActivationSoftshrinkKernel.cu shrink_backward_kernel (shared by
 // hard/soft): grad passes through where self is outside the inclusive
 // [-lambd, lambd] band.
 Tensor hardshrink_backward_cuda(const Tensor& grad_out, const Tensor& self, Scalar lambd) {
@@ -860,7 +863,6 @@ Tensor tanh_backward_cuda(const Tensor& grad_output, const Tensor& output) {
                             },
                             "tanh_backward");
 }
-// ATen BinaryMiscBackwardOpsKernels.cu logit_backward_kernel_cuda: without
 // eps (eps<0) the gradient is dy/(x(1-x)) inside [0,1] and NaN outside; with
 // eps>=0 values outside [eps, 1-eps] (compared in the element dtype) are
 // masked to zero. Exact 0/1 fall through to the division (dy/0 -> inf).
@@ -941,8 +943,6 @@ Tensor prelu_cuda(const Tensor& self, const Tensor& weight) {
 }
 
 // ===========================================================================
-// Index/scatter complements + isclose/isreal (torch parity 2026-08-24)
-// Mirrors cpu/TierOpsKernels.cpp; see that file for ATen anchors.
 // ===========================================================================
 
 // Cross-TU kernels reused by the composites below.
@@ -1051,7 +1051,7 @@ Tensor nanmean_cuda(const Tensor& self, std::optional<int64_t> dim_opt, bool kee
     if (!isFloatingType(x.dtype()) && !isComplexType(x.dtype())) {
         x = x.to(acc_dt != DType::Undefined ? acc_dt : DType::Float32);
     } else if (isReducedFloatingType(x.dtype()) && acc_dt == DType::Undefined) {
-        x = x.to(DType::Float32);   // accumulate in f32 like ATen opmath
+        x = x.to(DType::Float32);
     }
     std::vector<int64_t> dims;
     if (dim_opt.has_value()) dims.push_back(*dim_opt);
@@ -1063,7 +1063,6 @@ Tensor nanmean_cuda(const Tensor& self, std::optional<int64_t> dim_opt, bool kee
     Tensor valid = isnan_cuda(x).logical_not();
     Tensor count = sum_dim_kernel(valid.to(DType::Float32), dims, keepdim, DType::Float32);
     Tensor quot = total.to(DType::Float32).div(count);
-    // All-NaN slices yield NaN (count == 0), matching ATen nanmean.
     Tensor zero = count.eq(Scalar(0.0f));
     Tensor result = quot.masked_fill(zero, Scalar(std::numeric_limits<double>::quiet_NaN()));
     return result.to(acc_dt != DType::Undefined ? acc_dt : total.dtype());
@@ -1274,7 +1273,6 @@ Tensor bitwise_shift_tensor_cuda_impl(const Tensor& a_in, const Tensor& b_in, co
 
 template <bool kLeft>
 Tensor bitwise_shift_scalar_cuda_impl(const Tensor& a_in, Scalar other, const char* name) {
-    // Shift amounts follow torch: modded by the element bit width.
     bitwise_check_cuda(a_in, name);
     int64_t bits = a_in.itemsize() * 8;
     int64_t shift = other.to<int64_t>();
@@ -1438,6 +1436,10 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, TierOpsKernels) {
     m.impl("lcm", lcm_cuda);
     m.impl("heaviside", heaviside_cuda);
     m.impl("clamp_", clamp__cuda);
+    m.impl("clamp_min", clamp_min_scalar_cuda);
+    m.impl("clamp_max", clamp_max_scalar_cuda);
+    m.impl("clamp_min_", clamp_min__scalar_cuda);
+    m.impl("clamp_max_", clamp_max__scalar_cuda);
     m.impl("clamp_min.Scalar", clamp_min_scalar_cuda);
     m.impl("clamp_max.Scalar", clamp_max_scalar_cuda);
     m.impl("clamp_min.Tensor", clamp_min_tensor_cuda);

@@ -1,13 +1,6 @@
-// Special-function pointwise kernels (torch.special family) - CUDA.
 //
-// Math ported VERBATIM from third_party/pytorch/aten/src/ATen/native/Math.h
 // (2.15.0a0) via p10/include/SpecialMath.h; launch plumbing follows the house
 // float_math_cuda / binary_float_cuda pattern from TierOpsKernels.cu.
-// ATen anchors:
-//   aten/src/ATen/native/cuda/bessel_j0.cu        special_bessel_j0
-//   aten/src/ATen/native/cuda/UnaryGammaKernels.cu polygamma/gammainc(gammaincc)
-//   aten/src/ATen/native/cuda/ZetaKernel.cu       special_zeta
-//   aten/src/ATen/native/Math.h                   *_forward device formulas
 #include "Tensor.h"
 #include "Dispatcher.h"
 #include "Scalar.h"

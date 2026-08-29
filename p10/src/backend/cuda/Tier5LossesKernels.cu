@@ -3,11 +3,9 @@
 // Mean reduction pattern: an elementwise (or one-thread-per-row) kernel
 // writes per-element/per-row losses into a Float64 buffer; an atomicAdd
 // reduction sums it; the scalar mean is finalized on the host after one
-// D2H copy. ATen anchors (third_party/pytorch 2.15.0a0): Loss.cpp families
 // l1/smooth_l1/huber/kl_div/bce/bce_with_logits/cosine_embedding/
 // hinge_embedding/margin_ranking/soft_margin/triplet_margin/poisson_nll/
 // multilabel_soft_margin. (multi_margin_loss / multilabel_margin_loss live
-// in MarginLossKernels.cu with ATen-aligned signatures.)
 #include "Tensor.h"
 #include "Dispatcher.h"
 #include "Scalar.h"

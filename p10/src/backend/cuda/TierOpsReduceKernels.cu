@@ -1,6 +1,5 @@
 // Tier 2-4 operators part 2 - CUDA kernels: reductions + shape ops.
 // Companion to TierOpsKernels.cu (which owns arithmetic/comparisons/math/
-// clamp/activations). Same ATen anchors as cpu/TierOpsKernels.cpp.
 #include "Tensor.h"
 #include "Dispatcher.h"
 #include "Scalar.h"
@@ -417,7 +416,6 @@ __global__ void repeat_interleave_kernel(int64_t total_rows, int64_t inner, int6
 // Reduction entry points
 // ===========================================================================
 
-// ATen parity (ReduceOps.cpp meta funcs + ReduceOpsUtils.h
 // zero_numel_check_dims): reducing an empty tensor is only valid along an
 // explicitly given non-empty dim; a full reduction has no identity.
 static void zero_numel_check_dims(const Tensor& self, const std::vector<int64_t>& dims,
@@ -477,7 +475,6 @@ Tensor logsumexp_cuda2(const Tensor& self, int64_t dim, bool keepdim) {
     Tensor accs = Tensor::zeros({slices}, DType::Float64, self.device());
     if (slices > 0) {
         // The kernel handles d_size==0 itself (writes -inf per slice, matching
-        // torch's log(0) result for reducing an empty dim).
         auto stream = getCurrentCUDAStream().stream();
         dim3 grid = make_grid(slices), block(kThreads);
         slice_logsumexp_kernel<double><<<grid, block, 0, stream>>>(
@@ -494,7 +491,6 @@ Tensor nansum_cuda2(const Tensor& self, const std::vector<int64_t>& dim_in, bool
     DType out_dt = isFloatingType(self.dtype()) ? self.dtype() : DType::Int64;
     std::vector<int64_t> dim = dim_in;
     if (dim.empty()) {
-        // torch: dim omitted (or empty) reduces over every dimension
         for (int64_t i = 0; i < self.dim(); ++i) dim.push_back(i);
     }
     return reduce_iterative(self, dim, keepdim, 2, out_dt);
@@ -587,7 +583,6 @@ std::tuple<Tensor, Tensor> var_mean_cuda(const Tensor& self, std::vector<int64_t
         Tensor m2 = Tensor::zeros(shape_of(m1), DType::Float64, self.device());
         if (slices > 0) {
             // The kernel divides by dsz, so dsz==0 slices become NaN, matching
-            // torch's var/mean over an empty reduction dim.
             dim3 grid = make_grid(slices), block(kThreads);
             slice_mean_f64_kernel<double><<<grid, block, 0, stream>>>(
                 slices, dsz, inner, mean.data_ptr<double>(), m1.data_ptr<double>(), false);
@@ -924,8 +919,8 @@ Tensor diag_cuda(const Tensor& self, int64_t diagonal) {
 }
 
 Tensor diag_embed_cuda(const Tensor& self, int64_t offset, int64_t dim1_, int64_t dim2_) {
-    // Host-staged reference implementation (rare op), mirrors the structure
-    // of TensorShape.cpp:1272.
+    // Host-staged reference implementation for this infrequently used shape
+    // transform.
     int64_t nDims = self.dim() + 1;
     int64_t dim1 = wrap_dim(dim1_, nDims);
     int64_t dim2 = wrap_dim(dim2_, nDims);
@@ -973,7 +968,6 @@ Tensor diag_embed_cuda(const Tensor& self, int64_t offset, int64_t dim1_, int64_
 }
 
 Tensor narrow_cuda(const Tensor& self, int64_t dim, int64_t start, int64_t length) {
-    // TensorShape.cpp narrow: a slice view with torch's exact checks.
     if (self.dim() == 0) {
         TP_THROW(RuntimeError, "narrow() cannot be applied to a 0-dim tensor.");
     }
@@ -996,7 +990,6 @@ Tensor narrow_cuda(const Tensor& self, int64_t dim, int64_t start, int64_t lengt
 
 std::vector<Tensor> split_with_sizes_cuda(const Tensor& self, std::vector<int64_t> split_sizes,
                                           int64_t dim) {
-    // Torch split_with_sizes (TensorShape.cpp).
     if (self.dim() == 0) {
         TP_THROW(RuntimeError, "split expects at least a 1-dimensional tensor");
     }
@@ -1122,7 +1115,6 @@ Tensor roll_cuda(const Tensor& self, const std::vector<int64_t>& shifts, const s
     if (self.numel() == 0) return self.clone();
     const int64_t nd = self.dim();
     if (nd == 0) {
-        // torch reaches size(dim) on the 0-d tensor: maybe_wrap_dim with
         // wrap_scalar=false rejects any dim.
         TP_THROW(IndexError, "Dimension specified as ", dims[0],
                  " but tensor has no dimensions");
@@ -1287,13 +1279,13 @@ Tensor block_diag_cuda(const std::vector<Tensor>& tensors) {
         const Tensor& t = tensors[idx];
         if (!(t.device() == device)) {
             TP_THROW(RuntimeError,
-                     "torch.block_diag: input tensors must all be on the same device.");
+                     "block_diag: input tensors must all be on the same device.");
         }
         out_dtype = promoteTypes(out_dtype, t.dtype());
         const int64_t nd = t.dim();
         if (nd > 2) {
             TP_THROW(RuntimeError,
-                     "torch.block_diag: Input tensors must have 2 or fewer dimensions. Input ",
+                     "block_diag: Input tensors must have 2 or fewer dimensions. Input ",
                      static_cast<int64_t>(idx), " has ", nd, " dimensions");
         }
         Tensor b2 = t;
@@ -1434,7 +1426,6 @@ __global__ void unfold_backward_gather_kernel(int64_t total, int64_t input_dim_s
                                               int64_t size, int64_t step,
                                               const T* grad, T* grad_input) {
     // Gather over grad_input elements (race-free); each element accumulates the
-    // folds whose window covers it (ATen cpu/UnfoldBackwardKernel.cpp).
     int64_t t = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
     for (; t < total; t += stride) {
@@ -1459,7 +1450,6 @@ __global__ void unfold_backward_gather_kernel(int64_t total, int64_t input_dim_s
 
 Tensor unfold_backward_cuda(const Tensor& grad, const std::vector<int64_t>& input_sizes,
                             int64_t dim, int64_t size, int64_t step) {
-    // ATen UnfoldBackward.cpp: scatter each window's gradient back onto `dim`,
     // accumulating where windows overlap (step < size).
     if (step <= 0) TP_THROW(RuntimeError, "step is ", step, " but must be > 0");
     Tensor grad_input = Tensor::zeros(input_sizes, grad.dtype(), grad.device());
@@ -1514,7 +1504,6 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, TierReduceOpsKernels) {
     m.impl("diag_embed", diag_embed_cuda);
     m.impl("narrow", narrow_cuda);
     m.impl("split_with_sizes", split_with_sizes_cuda);
-    // tensor_split.sections: owned by cpu/ShapeAlignKernels.cpp (torch-exact
     // view semantics + indices/tensor overloads); duplicate removed.
     m.impl("flip", flip_cuda);
     m.impl("roll", roll_cuda);
