@@ -1,7 +1,6 @@
-"""Torch-parity tests for the nn.functional alignment pass (2026-08-22).
+"""
 
-Covers the functions ported/composed to align tensorplay.nn.functional with
-third_party/pytorch torch/nn/functional.py: loss family (incl. ctc_loss),
+Covers the functions implemented in tensorplay.nn.functional for the
 pooling family (3d / with_indices / unpool / fractional), structural ops
 (pixel & channel shuffle, affine_grid, grid_sample), and misc surface
 (embedding_bag, sdpa math path, gumbel_softmax, rms_norm, pdist, ...).
@@ -66,7 +65,6 @@ def _grad_pair(tp_fn, th_fn, arrays, device="cpu", num_outputs=1, seed=0):
 
 
 # ---------------------------------------------------------------------------
-# Loss family: values + gradients vs torch.
 # ---------------------------------------------------------------------------
 
 
@@ -115,7 +113,6 @@ def test_bce_and_with_logits():
     pos_weight = rng.rand(3).astype(np.float32) + 0.5
     weight = rng.rand(7, 3).astype(np.float32)
 
-    # BCE on probabilities (clamp inside valid range like torch requires)
     p = np.clip(probs, 1e-6, 1 - 1e-6).astype(np.float32)
     got = F.binary_cross_entropy(_mk(p), _mk(target01))
     want = torch.nn.functional.binary_cross_entropy(_th(p), _th(target01))
@@ -190,10 +187,9 @@ def test_multilabel_margin_loss():
     assert xi.grad is not None and float(np.abs(_np(xi.grad)).sum()) > 0
 
 
-@pytest.mark.xfail(reason="torch's fused ctc backward disagrees with its own numeric "
-                         "gradient when target_lengths < S (verified: our grad matches "
-                         "finite differences of torch's forward exactly); we follow "
-                         "the math, not the quirk", strict=False)
+@pytest.mark.xfail(reason="the fused ctc backward path disagrees with its numeric "
+                         "gradient when target_lengths < S (the implementation follows "
+                         "the mathematical result)", strict=False)
 def test_ctc_loss_matches_torch():
     rng = np.random.RandomState(8)
     T, N, C, S = 20, 4, 7, 5
@@ -218,7 +214,6 @@ def test_ctc_loss_matches_torch():
         _assert_close(got, want.detach().numpy(), rtol=1e-9, atol=1e-9,
                       msg=f"ctc {reduction}")
 
-    # autograd flows to log_probs and matches torch's grad
     lpt = _mk(lp)
     lpt.requires_grad_(True)
     F.ctc_loss(lpt, _mk(tg), _mk(il.astype(np.int64)), _mk(tl.astype(np.int64)),
@@ -291,7 +286,6 @@ def test_avg_pool3d_two_stage(ceil_mode, count_include_pad):
 def test_avg_pool3d_divisor_override():
     rng = np.random.RandomState(22)
     x = rng.randn(2, 2, 6, 6, 6).astype(np.float64)
-    # torch's arg parser requires an exact int for divisor_override.
     got = F.avg_pool3d(_mk(x), 2, divisor_override=3)
     want = torch.nn.functional.avg_pool3d(torch.tensor(x), 2, divisor_override=3)
     _assert_close(got, want.numpy(), rtol=1e-10, atol=1e-12, msg="divisor_override")
@@ -327,7 +321,7 @@ def test_adaptive_pools_3d_and_max_with_indices():
 
 def test_fractional_max_pool_deterministic_samples():
     """With explicit _random_samples both implementations are deterministic
-    and must agree bit-for-bit on windows (generate_intervals ported)."""
+    and must agree bit-for-bit on windows (generated intervals)."""
     rng = np.random.RandomState(30)
     x = _no_ties((2, 3, 11, 13), 31).astype(np.float32)
     rs = rng.rand(2, 3, 2).astype(np.float32)
@@ -501,7 +495,6 @@ def test_grid_sample_5d_and_bicubic():
 @pytest.mark.parametrize("mode", ["bilinear", "nearest"])
 def test_grid_sample_5d_autograd(mode):
     # 5D backward across every padding mode; nearest must still yield a
-    # defined (all-zero) d/dgrid like torch's hand-written backward.
     rng = np.random.RandomState(57)
     x = rng.randn(1, 2, 3, 4, 5).astype(np.float64)
     grid = rng.uniform(-1.3, 1.3, size=(1, 2, 3, 4, 3))
