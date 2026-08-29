@@ -48,7 +48,7 @@ DEFAULT_ALIGNMENT = 4096
 
 _MEGA_MAGIC = b"MEGA"
 
-# MEGA metadata type tags (mirror megatensors/cpp/ext.cpp).
+# MEGA metadata type tags used by the extension.
 _MEGA_META_UINT32 = 4
 _MEGA_META_INT32 = 5
 _MEGA_META_UINT64 = 6
