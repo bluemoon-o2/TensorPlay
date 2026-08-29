@@ -5,11 +5,8 @@ TensorPlay adds nested-container support, storage-sharing deduplication,
 checksums, endianness records, zero-copy ``mmap`` loading, and full
 ``map_location`` semantics on that foundation.
 
-Interoperability formats are accepted transparently by extension or content
-sniffing: ``.pt``/``.pth`` checkpoints written by ``torch.save`` (zip,
-magic-number stream, and ancient tar layouts -- reading works without torch
-installed), and ``.safetensors`` files.  Saving to a file-like object (e.g.
-``io.BytesIO``) produces the torch pickle format, mirroring ``torch.save``.
+Interoperability formats are accepted transparently by extension or content,
+including ``.safetensors`` files. Saving to a file-like object (e.g.
 
 All loaders are allowlist-based (weights-only): loading never executes code
 embedded in a checkpoint.
@@ -100,7 +97,6 @@ def resolve_map_location(map_location: Any, location: str):
 
     Returns ``None`` (keep the saved location), a device string such as
     ``"cuda:0"``, or a TensorPlay tensor whose contents should receive the
-    loaded data (callable map_location returning a tensor, mirroring torch's
     storage-returning callables).
     """
 
@@ -205,7 +201,7 @@ def _contig_stride(size):
 
 
 # ---------------------------------------------------------------------------
-# MEGA header parsing (pure python; mirrors megatensors/cpp/ext.cpp layout)
+# MEGA header parsing (pure Python; follows the local extension layout)
 # ---------------------------------------------------------------------------
 
 
@@ -540,10 +536,7 @@ def save(
       ``alignment``, per-region ``checksum`` (``"crc32"``, ``"sha256"``, or
       ``"none"``) and free-form ``metadata`` (strings, numbers, bools, lists).
     - ``.safetensors``: flat name->tensor mapping.
-    - ``.pt`` / ``.pth``: torch-compatible archive; any picklable object graph.
 
-    A file-like object (``io.BytesIO`` etc.) receives the torch pickle format,
-    matching ``torch.save`` conventions.
     """
 
     if not _is_path_like(f):
@@ -601,10 +594,9 @@ def load(
     mmap: bool = False,
     weights_only: bool = True,
 ) -> Any:
-    """Load a checkpoint saved by ``tp.save`` or ``torch.save``.
+    """
 
     Format is detected by extension or content sniffing: ``.mega`` (and MEGA
-    shard indexes), ``.safetensors``, and torch archives (``.pt``/``.pth`` --
     zip, magic-number stream, and tar layouts).
 
     Args:
@@ -617,7 +609,6 @@ def load(
         mmap: if true, MEGA and safetensors tensors are zero-copy views over a
             private (copy-on-write) mapping of the file; the returned
             containers keep the mapping alive, and bytes are paged in on first
-            touch.  Explicit device remapping still copies.  Torch archives
             load eagerly.
         weights_only: accepted for API familiarity; every TensorPlay loader is
             weights-only by construction.  Passing ``False`` warns.
@@ -663,10 +654,9 @@ def load(
     if lower.endswith(".safetensors"):
         raise ValueError(f"{filename}: not a valid safetensors file")
     if lower.endswith((".pt", ".pth")):
-        raise ValueError(f"{filename}: not a recognized torch checkpoint")
+        raise ValueError(f"{filename}: not a recognized legacy checkpoint")
     raise ValueError(
         f"unrecognized checkpoint: {filename!r}. Supported: '.mega', "
-        "'.safetensors', '.pt'/'.pth' (torch), MEGA shard indexes"
     )
 
 

@@ -1,8 +1,6 @@
-"""TorchScript compatibility shims.
+"""Eager-execution helpers for the JIT-compatible namespace.
 
-torchvision model files use ``@torch.jit.unused`` / ``torch.jit.is_scripting()``
-(e.g. googlenet, inception) to guard eager paths.  TensorPlay has no
-TorchScript, so the decorators are identity passthroughs and
+Model code can use these helpers to guard eager paths. TensorPlay has no
 ``is_scripting()`` always returns False — exactly the semantics of an eager
 execution environment.
 """
@@ -16,7 +14,6 @@ T = TypeVar("T")
 
 
 def is_scripting() -> bool:
-    """Returns False: TensorPlay always executes eagerly (cf. torch.jit.is_scripting)."""
     return False
 
 
@@ -33,7 +30,6 @@ def is_importing() -> bool:
 
 
 def unused(fn: T) -> T:
-    """Identity decorator; marks a method as unavailable under TorchScript."""
     return fn
 
 
@@ -51,7 +47,6 @@ def ignore(*args, **kwargs):
 
 
 def _overload_method(*args, **kwargs):
-    """Identity decorator standing in for torch.jit._overload_method."""
     if len(args) == 1 and callable(args[0]) and not kwargs:
         return args[0]
     return lambda f: f
@@ -72,10 +67,8 @@ def Final(value):
 
 
 def isinstance(x, *args):
-    """Eager fallback for torch.jit.isinstance: a real runtime type check.
+    """
 
-    torch's eager implementation evaluates the predicate against the value
-    (torch.jit.isinstance("a", str) is True), including Optional/Union and
     container generics (List[int], Dict[str, Tensor], Tuple[T, ...]).
     """
     if len(args) != 1:

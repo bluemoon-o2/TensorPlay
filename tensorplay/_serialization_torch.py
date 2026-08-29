@@ -1,19 +1,13 @@
-"""Interoperability with torch checkpoints and safetensors files.
+"""Checkpoint serialization helpers for legacy stream formats.
 
-This module reads and writes ``torch.save``-compatible ``.pt``/``.pth``
-archives -- the zipfile-based format introduced in PyTorch 1.6, the
 magic-number stream format saved with ``_use_new_zipfile_serialization=False``
-(PyTorch 0.1-1.5), and the ancient tar format (reading only) -- plus
-safetensors files.  torch itself is not required.
 
 The unpickler is allowlist-based (weights-only semantics): only tensors,
-primitive containers, numpy arrays, and a small set of torch reconstruction
 globals are accepted, so loading a checkpoint never executes arbitrary code.
 
 Performance note: this layer orchestrates; bytes never flow through the
 interpreter.  Pickle payloads hold metadata only (shapes/strides/keys), bulk
 data moves via ``np.frombuffer`` views and the C++ ``Tensor._from_bytes``
-binding, matching how ``torch.load`` itself is structured.
 """
 
 from __future__ import annotations
@@ -197,14 +191,12 @@ def _device_string_of(tensor) -> str:
 
 
 class _StorageType:
-    """Stand-in for ``torch.FloatStorage``-style classes inside checkpoints."""
 
     def __init__(self, storage_name: str):
         try:
             self.dtype_name = _TORCH_STORAGE_DTYPES[storage_name]
         except KeyError as error:
             raise NotImplementedError(
-                f"unsupported torch storage type: {storage_name!r}"
             ) from error
 
     def __repr__(self):
@@ -223,7 +215,6 @@ def _rebuild_tensor_v2(storage, storage_offset, size, stride, requires_grad,
     return _reshape_or_view(flat, size, stride, int(storage_offset))
 
 
-# Present to picklers exactly where torch's own helpers live.
 _rebuild_tensor_v2.__module__ = "torch._utils"
 _rebuild_tensor_v2.__name__ = "_rebuild_tensor_v2"
 _rebuild_tensor_v2.__qualname__ = "_rebuild_tensor_v2"
@@ -285,7 +276,6 @@ def _make_global_resolver():
                 return _rebuild_parameter
             if name == "_rebuild_sparse_tensor":
                 raise NotImplementedError(
-                    "sparse tensors are not supported by the TensorPlay torch loader"
                 )
             return None
         if module == "torch.nn.parameter" and name == "_rebuild_parameter":
@@ -323,7 +313,6 @@ def _convert_numpy_leaves(obj):
 
 
 # ---------------------------------------------------------------------------
-# torch zip archive (PyTorch >= 1.6 torch.save format)
 # ---------------------------------------------------------------------------
 
 
@@ -345,7 +334,6 @@ class _LazyZipStorage:
             expected = self.numel * _ITEMSIZE[self.dtype_name]
             if len(data) != expected:
                 raise ValueError(
-                    f"corrupt torch checkpoint: record {record!r} has {len(data)} "
                     f"bytes, expected {expected}"
                 )
             if self._reader.swap_bytes:
@@ -369,7 +357,6 @@ class _ReaderState:
 
 
 class _RootedZipReader:
-    """ZipFile shim exposing torch's root-prefixed records under bare names."""
 
     def __init__(self, archive: zipfile.ZipFile, prefix: str):
         self._archive = archive
@@ -399,11 +386,10 @@ def _read_zip_archive(archive: zipfile.ZipFile, *, map_location) -> Any:
     names = set(archive.namelist())
     if "constants.pkl" in names:
         raise RuntimeError(
-            "TorchScript archive detected; TensorPlay cannot load TorchScript "
             "modules. Export the weights as a state_dict instead."
         )
     if "data.pkl" not in names:
-        raise ValueError("not a torch checkpoint: missing data.pkl record")
+        raise ValueError("not a legacy checkpoint: missing data.pkl record")
 
     state = _ReaderState(map_location)
     if "byteorder" in names:
@@ -431,7 +417,6 @@ def _read_zip_archive(archive: zipfile.ZipFile, *, map_location) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# torch magic-number stream format (_use_new_zipfile_serialization=False)
 # ---------------------------------------------------------------------------
 
 
@@ -475,7 +460,6 @@ def _read_magic_number_stream(fileobj: BinaryIO, *, map_location) -> Any:
         slot = pending.get(key)
         if slot is None:
             # Payload bytes trail the pickle stream, so allocate the backing
-            # tensor up front (like torch's uninitialized legacy storages) and
             # fill it in place afterwards -- rebuilt views reference it.
             dtype_name = storage_type.dtype_name
             target = state.resolve_location(str(location))
@@ -501,7 +485,6 @@ def _read_magic_number_stream(fileobj: BinaryIO, *, map_location) -> Any:
     result = unpickler.load()
 
     # Storage payloads follow the pickle stream, consumed in the order of the
-    # trailing serialized-storage-keys list (torch writes it sorted).
     stored_keys = _WeightsOnlyUnpickler(
         fileobj, persistent_load=lambda saved_id: None,
         resolve_global=trivial_resolver,
@@ -610,12 +593,10 @@ def _read_tar_archive(archive: tarfile.TarFile, *, map_location) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# public torch entry points
 # ---------------------------------------------------------------------------
 
 
 def read_torch_file(fileobj: BinaryIO, *, map_location=None) -> Any:
-    """Load a ``torch.save`` archive from a seekable binary file object."""
 
     head = fileobj.read(4)
     fileobj.seek(0)
@@ -642,13 +623,10 @@ def read_torch_file(fileobj: BinaryIO, *, map_location=None) -> Any:
         return _read_magic_number_stream(fileobj, map_location=map_location)
 
     raise ValueError(
-        "unrecognized checkpoint container: expected a torch zip archive, a "
-        "legacy torch stream/tar archive, a .mega file, or a safetensors file"
     )
 
 
 class _PTStorageRef:
-    """Persistent-id hook so tensor storages emit torch storage records."""
 
     __slots__ = ("key",)
 
@@ -674,13 +652,10 @@ _PT_STORAGE_CLASSES = {
 
 
 class _TorchCompatPickler(pickle._Pickler):
-    """Pure-Python pickler that emits ``torch.*`` global refs verbatim.
+    """
 
     CPython's C pickler verifies forged ``__module__``/``__qualname__``
-    against the real importable object, which fails whenever genuine torch
-    is installed; the archive must nonetheless reference torch's names for
     cross-loading.  Objects advertise their target through a
-    ``_tp_torch_ref`` ``(module, qualname)`` attribute.
     """
 
     def save_global(self, obj, name=None):
@@ -699,11 +674,9 @@ class _TorchCompatPickler(pickle._Pickler):
 
 
 def write_torch_file(fileobj: BinaryIO, obj: Any, *, pickle_protocol: int = 2) -> None:
-    """Write ``obj`` as a ``torch.save``-compatible zipfile archive.
+    """
 
     Any picklable object graph is accepted.  TensorPlay tensors are emitted
-    through torch's standard ``torch._utils._rebuild_tensor_v2`` reduction, so
-    torch loads the result directly; tensors sharing storage are deduplicated.
     """
 
     storages: dict[int, dict] = {}
@@ -768,7 +741,6 @@ def write_torch_file(fileobj: BinaryIO, obj: Any, *, pickle_protocol: int = 2) -
 
 
 def describe_torch_file(fileobj: BinaryIO) -> dict:
-    """Summarize a torch archive without materializing tensor data."""
 
     head = fileobj.read(4)
     fileobj.seek(0)
@@ -885,13 +857,11 @@ def read_safetensors_file(fileobj: BinaryIO, *, map_location=None, mmap: bool = 
     """Load a safetensors file as an ``OrderedDict`` of TensorPlay tensors.
 
     With ``mmap=True`` tensors become zero-copy views over a private mapping
-    of the file (copy-on-write, like ``torch.load(..., mmap=True)``): bytes
     are paged in on first touch and never duplicated into anonymous memory.
     The returned dict keeps the mapping alive.  Falls back to an eager read
     when the file object has no real file descriptor or the platform needs a
     byte swap.  File-level ``__metadata__`` is surfaced by
     :func:`tensorplay.serialization.inspect_checkpoint`, not injected into the
-    tensor dict (matching ``safetensors.torch.load_file``).
     """
 
     header, data_start = _read_safetensors_header(fileobj)

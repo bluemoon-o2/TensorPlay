@@ -1,8 +1,7 @@
-"""``tensorplay.futures`` — ported from ``torch.futures``.
+"""Asynchronous future values used by TensorPlay.
 
 Provides :class:`Future`, the asynchronous execution primitive used by
-``torch.distributed`` communication hooks (``Work.get_future().then(...)``).
-tp's implementation is pure Python: completion is backed by an optional
+TensorPlay's implementation is pure Python: completion is backed by an optional
 ``_completer`` callable (e.g. a CUDA event synchronization) that runs on the
 first ``wait()``/``value()`` call, after which ``then`` callbacks fire in
 registration order on derived futures.
@@ -15,7 +14,7 @@ __all__ = ["Future"]
 
 
 class Future:
-    """Holder for an asynchronous result (torch parity subset).
+    """
 
     Example::
 
@@ -53,7 +52,6 @@ class Future:
             completer()
 
     def set_result(self, result: Any) -> None:
-        """Sets the result value and fires callbacks (torch parity)."""
         with self._cond:
             if self._done:
                 raise RuntimeError("Future is already done")
@@ -75,7 +73,6 @@ class Future:
     def value(self) -> Any:
         """Gets the result value, blocking until it completes.
 
-        Raises ``RuntimeError`` on error results (mirrors torch's
         ``ValueError``-on-error behavior loosely; tp stores exceptions as
         results and re-raises them here).
         """
@@ -88,9 +85,7 @@ class Future:
         """Adds a callback mapped over this future; returns the new future.
 
         The callback receives *this* future and its return value becomes the
-        derived future's result (torch ``Future.then`` contract). Waiting on
         the derived future drives *this* future (and therefore the underlying
-        async collective) to completion, matching torch's wait-propagation
         through ``.then()`` chains.
         """
 

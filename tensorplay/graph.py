@@ -1,11 +1,10 @@
-"""Public ``tensorplay.graph`` API: torch.fx-aligned capture surface.
+"""Graph facade and feature-extraction helpers.
 
 The canonical implementation lives in :mod:`tensorplay.compiler.graph`; this
 facade re-exports it and adds the frontend features that operate on captured
 models:
 
 - :func:`get_graph_node_names` / :func:`create_feature_extractor`, the
-  counterpart of ``torchvision.models.feature_extraction``;
 - :meth:`Graph.to_dot` / :meth:`Graph.draw` visualization helpers;
 - :class:`NodePathTracer`, which records the qualified module path behind
   every ``call_module`` node;
@@ -59,7 +58,6 @@ __all__ = [
 
 
 def wrap(fn_or_name=None):
-    """Identity decorator; mirrors ``torch.fx.wrap`` for capture execution."""
 
     if fn_or_name is None:
         return lambda fn: fn
@@ -73,7 +71,6 @@ class NodePathTracer(Tracer):
     ``call_module`` node in :attr:`Tracer.node_to_qualname`.
 
     A module counts as a leaf once it has no child modules, matching
-    torchvision's behavior; shared modules executed several times receive
     ``path_0``, ``path_1``, ... entries so each execution stays selectable.
     """
 
@@ -255,7 +252,6 @@ def create_feature_extractor(
     """Build a module returning intermediate graph nodes of ``model``.
 
     This is the counterpart of
-    ``torchvision.models.feature_extraction.create_feature_extractor``.
     Use :func:`get_graph_node_names` to discover selectable names, then pass
     either an iterable of names or a ``{name: new_output_name}`` mapping::
 

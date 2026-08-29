@@ -1,12 +1,10 @@
-"""torch.special-compatible namespace.
+"""Special mathematical functions.
 
 Functions backed by p10 pointwise kernels (erf/erfc/erfinv/exp2/expm1/log1p/
 lgamma/digamma/i0/sinc/logit/exp2/...) re-export the native ops; the rest are
 composed from differentiable primitives (``ndtr``/``ndtri``/``log_ndtr``/
-``entr``/``xlogy``/``multigammaln``/...) following ATen's published formulas.
-Families that require kernels tensorplay does not ship yet (Bessel/Airy,
-incomplete gamma, orthogonal-polynomial recurrences) keep their torch names
-and raise ``NotImplementedError`` at call time instead of failing on import.
+Families that require kernels TensorPlay does not ship yet (Bessel/Airy)
+raise ``NotImplementedError`` at call time instead of failing on import.
 """
 import math
 
@@ -169,7 +167,6 @@ def logsumexp(input, dim, keepdim=False, *, out=None):
 
 
 # ---------------------------------------------------------------------------
-# Composed specials (ATen formulas on differentiable primitives)
 # ---------------------------------------------------------------------------
 
 def expit(input):
@@ -181,7 +178,6 @@ def log_ndtr(input):
     """``log`` of the standard normal CDF, stable in the left tail."""
     scaled = input * _INV_SQRT_2
     tail_mask = input < -10.0
-    # Asymptotic expansion used by ATen for large-negative inputs.
     right = log(erfc(-scaled)) - 0.6931471805599453  # -log(2)
     t = 1.0 / (input * input)
     approx = -0.5 * input * input - 0.9189385332046727 \

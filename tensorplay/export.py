@@ -3,8 +3,6 @@
 ``tensorplay.export`` captures a model once into a static :class:`ExportedProgram`
 whose graph is guaranteed to be free of Python data-dependent control flow and
 whose parameters/buffers are separated from user inputs via
-:class:`GraphSignature`.  This is TensorPlay's counterpart to ``torch.export``
-(see ``third_party/pytorch/torch/export``): API-surface alignment only — no
 sympy constraint solving, guards machinery, or pt2 archive serialization.
 
 The capture itself reuses the single compiler frontend
@@ -53,7 +51,6 @@ class Dim:
 class GraphSignature:
     """Separation of graph inputs into parameters, buffers, and user inputs.
 
-    Mirrors ``torch.export.ExportGraphSignature`` in spirit: ``get_attr``
     targets are qualified attribute paths into the root module (e.g.
     ``"linear.weight"``), while ``user_inputs`` are placeholder names bound to
     the exported callable's arguments.

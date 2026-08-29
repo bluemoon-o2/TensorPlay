@@ -1,7 +1,7 @@
-"""Sparse tensor namespace, mirroring ``torch.sparse``.
+"""Sparse COO and CSR operations.
 
 Provides the COO/CSR operations under a dedicated namespace so user code can
-read ``tensorplay.sparse.mm(s, d)`` the same way it reads ``torch.sparse.mm``.
+use the same tensor objects for sparse construction and conversion.
 """
 
 import tensorplay
@@ -44,13 +44,12 @@ def mul(self, other):
 
 def mm(sparse, dense):
     """Performs a matrix multiplication of a 2-D sparse COO/CSR tensor with a
-    dense matrix.  Equivalent to ``torch.sparse.mm``."""
+"""
     return tensorplay.sparse_mm(sparse, dense)
 
 
 def spdiags(diagonals, offsets, shape, layout=None):
-    """Constructs a sparse tensor from diagonals, mirroring
-    ``torch.sparse.spdiags`` (and thereby ``scipy.sparse.spdiags``).
+    """Construct a sparse tensor from diagonals.
 
     Args:
         diagonals: matrix of shape ``(len(offsets), L)`` (or a single vector);
@@ -70,7 +69,6 @@ def spdiags(diagonals, offsets, shape, layout=None):
 def sum(input, dim=None, dtype=None):
     """Sum of ``input``'s values over ``dim``.
 
-    Mirrors ``torch.sparse.sum``: with no ``dim`` (or an empty list) the
     result is a dense 0-dim tensor; reducing every sparse dim yields a dense
     tensor; a partial reduction returns a coalesced sparse COO tensor over
     the remaining dims with duplicate coordinates folded.  ``dtype`` converts

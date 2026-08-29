@@ -1,13 +1,13 @@
-"""torch.fft-compatible namespace.
+"""Fourier transforms and related frequency-domain utilities.
 
 The one-dimensional transforms live natively in p10
 (p10/src/backend/cpu/SpectralKernels.cpp with vendored pocketfft, and
 p10/src/backend/cuda/SpectralKernels.cu on cuFFT). The 2-D/n-D variants and
 the Hermitian family are composed here from those primitives: the DFT is
 separable across dimensions and every normalization mode scales
-multiplicatively, so passing the same ``norm`` to each per-dimension pass
-reproduces ATen's global scaling exactly. ``hfft``/``ihfft`` follow ATen's
-convention of conjugating the input before the real-to-complex /
+multiplicatively, so passing the same ``norm`` to each per-dimension pass.
+The Hermitian helpers use the convention of conjugating the input before the
+real-to-complex /
 complex-to-real pass (``hfft`` == ``irfft(conj(x))``, ``ihfft`` ==
 ``rfft(conj(x))``).
 """
@@ -87,7 +87,6 @@ def _normalize_dims(dim, ndim):
 
 
 def _default_dims(input, s):
-    # torch convention: dim=None -> all dimensions, or the last len(s) dims.
     ndim = input.dim()
     k = len(s) if s is not None else ndim
     return list(range(ndim - k, ndim))

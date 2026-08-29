@@ -1,8 +1,7 @@
-"""Native profiler: TensorPlay's counterpart to :mod:`torch.profiler`.
+"""Runtime profiler for operator, autograd, memory, and GPU events.
 
-Records every dispatched operator exactly once at the below-autograd
-redispatch funnel -- composite inner calls show up individually, matching
-upstream's CompositeImplicitAutograd behavior.  The autograd engine emits a
+Every dispatched operator is recorded once at the below-autograd redispatch
+funnel. Composite inner calls remain visible, and the autograd engine emits a
 ``__backward__`` span around every backward()/grad() execution.
 
 Typical use::
@@ -13,13 +12,9 @@ Typical use::
     print(prof.key_averages())
     prof.export_chrome_trace("trace.json")
 
-The exported file uses Chrome Trace JSON (torch's schema: metadata events,
-GPU lanes, ac2g flow arrows) and loads directly in ``chrome://tracing`` /
-Perfetto.  :meth:`profile.export_tensorboard_trace` additionally writes a
-torch_tb_profiler-compatible artifact (``*.pt.trace.json`` with
-``schemaVersion``/``deviceProperties``/``distributedInfo`` metadata).
+The Chrome trace includes GPU lanes and accelerator-to-GPU flow arrows and
+loads directly in ``chrome://tracing`` or Perfetto.
 
-Beyond the torch surface, sessions can enable:
 
 * ``gpu_trace=True`` -- CUPTI kernel-level GPU tracing (USE_CUDA builds):
   kernel/memcpy/memset rows on GPU lanes, CUDA runtime/driver API rows, and
@@ -32,8 +27,8 @@ Beyond the torch surface, sessions can enable:
   :meth:`profile.export_stacks`.
 
 Multi-process runs tag their traces with the ``RANK``/``WORLD_SIZE``
-environment (torch.distributed conventions); use
-:func:`merge_distributed_traces` to fold per-rank exports into one file.
+environment values; :func:`merge_distributed_traces` folds per-rank exports
+into one file.
 """
 
 from __future__ import annotations
@@ -53,7 +48,6 @@ __all__ = ["profile", "record_function", "EventList", "schedule",
 
 
 def _rank_world():
-    """(rank, world_size) from torch.distributed env conventions."""
     rank = os.environ.get("RANK", os.environ.get("TP_RANK"))
     world = os.environ.get("WORLD_SIZE", os.environ.get("TP_WORLD_SIZE"))
     try:
@@ -64,10 +58,10 @@ def _rank_world():
 
 
 class _FunctionsTable:
-    """Aggregated per-op statistics (torch.profiler.key_averages analog).
+    """Build an aggregated event table including self-CPU time.
 
-    Provides the upstream summary surface including self-CPU time: each
-    event's duration minus the time spent inside its same-thread children,
+    Each
+    event's duration minus the time spent inside its same-thread children is
     computed with a per-thread sweep over the (properly nested) spans.  When
     a session captured GPU data (gpu_timing or gpu_trace), CUDA columns are
     appended (``Self CUDA`` / ``CUDA Total``) and the table sorts by them.
@@ -255,7 +249,6 @@ class _Row:
     def total_us(self):
         return self.avg_ns * self.count / 1e3
 
-    # torch-compatible aliases
     @property
     def self_cuda_time_total(self):
         return self.cuda_us
@@ -265,7 +258,6 @@ class _Row:
         return self.cuda_us
 
 
-# profiler action constants (torch.profiler.profiler_action parity subset)
 class _Action:
     NONE = "none"
     WARMUP = "warmup"
@@ -274,7 +266,7 @@ class _Action:
 
 
 def schedule(*, wait, warmup, active, repeat=0, skip_first=0):
-    """Returns a step-driven schedule callable (torch parity subset).
+    """
 
     The returned callable maps a monotonically increasing ``step`` number to
     one of the actions NONE / WARMUP / RECORD; ``profile.step()`` consults it
@@ -367,7 +359,6 @@ class _PySampler:
 class profile:
     """Context manager recording ops executed inside the block.
 
-    Args (torch.profiler subset): ``record_shapes`` captures per-op input
     shapes+dtypes; ``with_stack`` captures the full Python frame chain of
     each op; ``schedule`` enables step-driven capture cycles via ``step()``;
     ``profile_memory`` records allocator-level alloc/free events;
@@ -375,7 +366,6 @@ class profile:
     work (validated on CUDA 12.x, sm_89); ``gpu_trace`` enables CUPTI
     kernel-level tracing with op->runtime->kernel correlation (USE_CUDA
     builds); ``with_samples`` runs the Python stack sampler.  Extra keyword
-    arguments are accepted and ignored so common torch call patterns keep
     working.
     """
 
@@ -487,7 +477,6 @@ class profile:
 
     @property
     def current_action(self):
-        """Action the schedule currently prescribes (torch parity)."""
         if self.schedule is None:
             return None
         return self.schedule(self.step_num)
@@ -502,9 +491,8 @@ class profile:
             samples=self._sampler.samples if self._sampler else [])
 
     def export_tensorboard_trace(self, directory, run_name=None):
-        """Writes a torch_tb_profiler-compatible ``*.pt.trace.json``.
+        """
 
-        Follows torch's artifact naming (``<name>.<host>.<pid>.<ts>.pt.trace.
         json``) and schema (``schemaVersion``/``deviceProperties``/
         ``baseTimeNanoseconds``/``distributedInfo`` plus process/thread
         metadata events), so TensorBoard's profiler plugin can open the
@@ -589,7 +577,7 @@ class profile:
         return total, peak, timeline
 
     def export_stacks(self, path):
-        """Folded flamegraph stacks (torch.profiler.export_stacks parity).
+        """
 
         Aggregates per-op self CPU time by the op's captured Python stack
         (``with_stack=True``) in flamegraph.pl format:
@@ -652,8 +640,7 @@ class EventList(list):
     def export_chrome_trace(self, path, torch_compat=False,
                             gpu_activities=None, mem_events=None,
                             samples=None):
-        """Chrome Trace JSON -- torch's schema, loadable by chrome://tracing,
-        Perfetto and (with ``torch_compat=True``) torch_tb_profiler.
+        """
 
         Layout: CPU rows on ``pid=0`` lanes; kernel/memcpy/memset rows on
         ``pid=1000000+device`` stream lanes; CUDA runtime/driver API rows on
@@ -680,7 +667,6 @@ class EventList(list):
 
         cat_of = {"o": "cpu_op", "u": "user_annotation", "b": "backward"}
         if torch_compat:
-            # torch has no separate backward category; the engine span is a
             # user annotation there.
             cat_of["b"] = "user_annotation"
         gpu_cat = {"k": "kernel", "m": "gpu_memcpy", "s": "gpu_memset",
@@ -806,7 +792,6 @@ class EventList(list):
                 "ts": rel(gpu_ts), "cat": "ac2g", "name": "ac2g", "bp": "e",
             })
 
-        # Process/thread metadata (torch schema): lanes are known only
         # after every row registered itself, so emit these first.
         used_gpu_pids = sorted({e["pid"] for e in trace_events
                                 if isinstance(e.get("pid"), int) and
@@ -831,7 +816,6 @@ class EventList(list):
             _m("thread_name", row_pid, lane_id, "name", name)
             _m("thread_sort_index", row_pid, lane_id, "sort_index",
                lane_id)
-        # Record Window End marker (torch's export contract).
         end_ts = max(
             (e["ts"] + e.get("dur", 0) for e in trace_events
              if e["ph"] == "X" and "ts" in e),
@@ -895,7 +879,6 @@ class EventList(list):
             doc["host_name"] = socket.gethostname()
             doc["trace_id"] = uuid.uuid4().hex
             # kineto stamps the CUDA stack versions into the trace header;
-            # mirror it (only when present, like a CUPTI-enabled torch).
             try:
                 runtime_ver = _C._cuda.get_version()
                 driver_ver = _C._cuda.get_driver_version()
@@ -955,7 +938,6 @@ def merge_distributed_traces(paths, out_path):
 
 @contextlib.contextmanager
 def record_function(name):
-    """Annotates a user span inside a profiling session (torch parity)."""
     _C._profiler_user_begin(name)
     try:
         yield
@@ -965,7 +947,7 @@ def record_function(name):
 
 @contextlib.contextmanager
 def emit_nvtx():
-    """torch.autograd.profiler.emit_nvtx parity.
+    """
 
     Makes every dispatched op (and every backward node, via the engine)
     emit a matching NVTX range so ``nsys profile`` timelines show
@@ -982,7 +964,7 @@ def emit_nvtx():
 
 @contextlib.contextmanager
 def emit_itt():
-    """Intel VTune/Advisor annotation (torch kineto ITT parity).
+    """
 
     Every dispatched op / backward node emits an ITT task under the
     "tensorplay" domain while active.  Requires libittnotify at runtime;
