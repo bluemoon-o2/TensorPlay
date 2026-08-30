@@ -712,31 +712,6 @@ std::tuple<Tensor, Tensor> kthvalue_cuda(const Tensor& self, int64_t k, int64_t 
             idxs.reshape(out_shape).to(self.device())};
 }
 
-Tensor dist_cuda(const Tensor& self, const Tensor& other, Scalar p) {
-    // Host-staged reference implementation (rare op).
-    std::vector<int64_t> bshape = broadcast_shapes(shape_of(self), shape_of(other));
-    Tensor a = self.to(DType::Float64).expand(bshape).contiguous().to(Device(DeviceType::CPU));
-    Tensor b = other.to(DType::Float64).expand(bshape).contiguous().to(Device(DeviceType::CPU));
-    const double* ap = a.data_ptr<double>();
-    const double* bp = b.data_ptr<double>();
-    int64_t n = a.numel();
-    double pd = p.toDouble();
-    double result = 0;
-    if (pd == std::numeric_limits<double>::infinity()) {
-        for (int64_t i = 0; i < n; ++i) result = std::max(result, std::fabs(ap[i] - bp[i]));
-    } else if (pd == -std::numeric_limits<double>::infinity()) {
-        result = std::numeric_limits<double>::infinity();
-        for (int64_t i = 0; i < n; ++i) result = std::min(result, std::fabs(ap[i] - bp[i]));
-    } else if (pd == 0.0) {
-        for (int64_t i = 0; i < n; ++i) if (ap[i] != bp[i]) result += 1;
-    } else {
-        double s2 = 0;
-        for (int64_t i = 0; i < n; ++i) s2 += std::pow(std::fabs(ap[i] - bp[i]), pd);
-        result = std::pow(s2, 1.0 / pd);
-    }
-    return Tensor::zeros({}, DType::Float64, self.device()).fill_(Scalar(result));
-}
-
 Tensor renorm_cuda(const Tensor& self, Scalar p, int64_t dim, Scalar maxnorm) {
     int64_t nd = self.dim();
     dim = wrap_dim(dim, nd);
@@ -1496,7 +1471,6 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, TierReduceOpsKernels) {
     m.impl("std_mean", std_mean_cuda);
     m.impl("mode", mode_cuda);
     m.impl("kthvalue", kthvalue_cuda);
-    m.impl("dist", dist_cuda);
     m.impl("renorm", renorm_cuda);
     m.impl("trace", trace_cuda);
     m.impl("diag", diag_cuda);

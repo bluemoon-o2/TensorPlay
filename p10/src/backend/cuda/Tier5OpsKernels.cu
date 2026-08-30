@@ -40,8 +40,6 @@ Tensor cholesky_inverse_cpu(const Tensor&, bool);
 Tensor cholesky_solve_cpu(const Tensor&, const Tensor&, bool);
 std::tuple<Tensor, Tensor> triangular_solve_cpu(const Tensor&, const Tensor&, bool, bool, bool);
 std::tuple<Tensor, Tensor, Tensor> svd_cpu(const Tensor&, bool, bool);
-Tensor pairwise_distance_cpu(const Tensor&, const Tensor&, double, double, bool);
-Tensor pdist_cpu(const Tensor&, double);
 Tensor hinge_embedding_loss_cpu(const Tensor&, const Tensor&, Scalar);
 Tensor margin_ranking_loss_cpu(const Tensor&, const Tensor&, const Tensor&, Scalar);
 } // namespace cpu
@@ -181,16 +179,6 @@ std::tuple<Tensor, Tensor, Tensor> svd_cuda(const Tensor& self, bool some, bool 
     auto r = cpu::svd_cpu(to_host(self), some, compute_uv);
     return {to_device(std::get<0>(r), dev), to_device(std::get<1>(r), dev),
             to_device(std::get<2>(r), dev)};
-}
-Tensor pairwise_distance_cuda(const Tensor& x1, const Tensor& x2, double p, double eps,
-                              bool keepdim) {
-    Device dev = x1.device();
-    return to_device(cpu::pairwise_distance_cpu(to_host(x1), to_host(x2), p, eps, keepdim),
-                     dev);
-}
-Tensor pdist_cuda(const Tensor& self, double p) {
-    Device dev = self.device();
-    return to_device(cpu::pdist_cpu(to_host(self), p), dev);
 }
 // ---------------------------------------------------------------------------
 // (LSTMCell / GRUCell / SimpleCell<tanh_f|relu_f>) running the fused-cell
@@ -479,8 +467,6 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, Tier5OpsKernels) {
     m.impl("cholesky_solve", cholesky_solve_cuda);
     m.impl("triangular_solve", triangular_solve_cuda);
     m.impl("svd", svd_cuda);
-    m.impl("pairwise_distance", pairwise_distance_cuda);
-    m.impl("pdist", pdist_cuda);
     m.impl("lstm", lstm_cuda);
     m.impl("gru", gru_cuda);
     m.impl("rnn_relu", rnn_relu_cuda);
