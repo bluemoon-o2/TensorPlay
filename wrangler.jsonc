@@ -1,6 +1,0 @@
-{
-  "$schema": "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
-  "name": "tensorplay-pypi",
-  "pages_build_output_dir": "./release_site",
-  "compatibility_date": "2026-08-24"
-}

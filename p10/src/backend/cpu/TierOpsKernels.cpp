@@ -28,7 +28,12 @@
 #include <limits>
 #include <cstring>
 #include <utility>
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
 #include <type_traits>
+#include <optional>
+#include <string>
 
 namespace tensorplay {
 namespace cpu {
@@ -104,11 +109,14 @@ Tensor binary_float_kernel(const Tensor& a_in, const Tensor& b_in, F f, const ch
         static_cast<std::vector<int64_t>>(b_in.shape()));
     DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
     if (!isFloatingType(dt)) dt = DType::Float32;
-    Tensor ac = a_in.to(dt).expand(out_shape).contiguous();
-    Tensor bc = b_in.to(dt).expand(out_shape).contiguous();
-    Tensor out = Tensor::empty(out_shape, dt, a_in.device());
+    // Reduced-width inputs are evaluated in Float32 and narrowed once at the
+    // end; the loops below only ever address float or double buffers.
+    DType compute_dt = (dt == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor ac = a_in.to(compute_dt).expand(out_shape).contiguous();
+    Tensor bc = b_in.to(compute_dt).expand(out_shape).contiguous();
+    Tensor out = Tensor::empty(out_shape, compute_dt, a_in.device());
     int64_t n = out.numel();
-    if (dt == DType::Float64) {
+    if (compute_dt == DType::Float64) {
         const double* ap = ac.data_ptr<double>();
         const double* bp = bc.data_ptr<double>();
         double* dp = out.data_ptr<double>();
@@ -123,7 +131,7 @@ Tensor binary_float_kernel(const Tensor& a_in, const Tensor& b_in, F f, const ch
             for (int64_t i = begin; i < end; ++i) dp[i] = static_cast<float>(f(ap[i], bp[i]));
         });
     }
-    return out;
+    return (dt == compute_dt) ? out : out.to(dt);
 }
 
 template <typename Pred>
@@ -315,8 +323,13 @@ Tensor reduce_dims_impl(const Tensor& self, std::vector<int64_t> dims_in,
 std::pair<Tensor, Tensor> mean_var_over_dims(const Tensor& self, std::vector<int64_t> dims_in,
                                              bool unbiased, bool keepdim) {
     int64_t nd = self.dim();
+    std::vector<int64_t> dims = dims_in;
+    if (dims.empty()) {
+        // No dim named: reduce over every axis.
+        for (int64_t i = 0; i < nd; ++i) dims.push_back(i);
+    }
     std::vector<bool> reduced(nd, false);
-    for (auto& d : dims_in) { d = wrap_dim(d, nd); reduced[d] = true; }
+    for (auto& d : dims) { d = wrap_dim(d, nd); reduced[d] = true; }
     bool all_reduced = true;
     for (bool b : reduced) if (!b) all_reduced = false;
     if (all_reduced) { for (int64_t i = 0; i < nd; ++i) reduced[i] = true; }
@@ -421,7 +434,8 @@ struct LseState { double m; double s; bool nan_flag; };
 // ===========================================================================
 
 Tensor rsub_scalar_cpu(const Tensor& self, Scalar other, Scalar alpha) {
-    // BinaryOps.cpp:1203: other * alpha - self (weak scalar promotion)
+    // Reversed subtraction: other - alpha * self, under weak scalar promotion.
+    // alpha scales the subtrahend, which is self here, not other.
     DType dt = scalar_promote(self.dtype(), other);
     Tensor sc = self.to(dt).contiguous();
     Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(sc.shape()), dt, self.device());
@@ -433,7 +447,7 @@ Tensor rsub_scalar_cpu(const Tensor& self, Scalar other, Scalar alpha) {
         ctype* dp = out.data_ptr<ctype>(); \
         ctype ov = static_cast<ctype>(o), av = static_cast<ctype>(al); \
         parallel_for(0, n, GRAIN_SIZE, [&](int64_t b, int64_t e) { \
-            for (int64_t i = b; i < e; ++i) dp[i] = static_cast<ctype>(ov * av - sp[i]); \
+            for (int64_t i = b; i < e; ++i) dp[i] = static_cast<ctype>(ov - av * sp[i]); \
         }); \
         break; \
     }
@@ -446,25 +460,35 @@ Tensor rsub_scalar_cpu(const Tensor& self, Scalar other, Scalar alpha) {
 }
 
 Tensor rsub_tensor_cpu(const Tensor& self, const Tensor& other, Scalar alpha) {
-    // BinaryOps.cpp:1169
+    // other - alpha * self: the same arithmetic as sub with the operands
+    // exchanged, so alpha still scales the subtrahend.
     return binary_same_kernel<true>(self, other,
         [alpha](auto s, auto o) {
             using T = decltype(o);
             if constexpr (is_complex_type_v<T> || std::is_floating_point_v<T>) {
-                return o * alpha.to<T>() - s;
+                return o - s * alpha.to<T>();
             } else {
-                return static_cast<T>(o * alpha.to<double>() - s);
+                return static_cast<T>(o - s * alpha.to<double>());
             }
         }, "rsub");
 }
 
 static Tensor true_divide_core(const Tensor& a, const Tensor& b) {
     // BinaryOps.cpp:954: integral inputs promote to the default float type.
+    // A complex operand keeps its own width instead -- the float loop only
+    // addresses real buffers, so it would drop the imaginary halves.
+    if (isComplexType(a.dtype()) || isComplexType(b.dtype())) {
+        return binary_same_kernel<true>(a, b,
+            [](auto x, auto y) { return x / y; }, "true_divide");
+    }
     return binary_float_kernel(a, b, [](double x, double y) { return x / y; }, "true_divide");
 }
 Tensor true_divide_tensor_cpu(const Tensor& self, const Tensor& other) { return true_divide_core(self, other); }
 Tensor true_divide_scalar_cpu(const Tensor& self, Scalar other) {
-    return true_divide_core(self, Tensor::full({}, other, DType::Float32, self.device()));
+    // A Float32 stand-in would widen Half/BFloat16 inputs; the weak-scalar
+    // rule keeps the tensor dtype unless the scalar itself is floating.
+    return true_divide_core(
+        self, Tensor::full({}, other, scalar_promote(self.dtype(), other), self.device()));
 }
 Tensor divide_tensor_cpu(const Tensor& self, const Tensor& other) { return true_divide_core(self, other); }
 Tensor divide_scalar_cpu(const Tensor& self, Scalar other) { return true_divide_scalar_cpu(self, other); }
@@ -487,8 +511,15 @@ Tensor remainder_tensor_cpu(const Tensor& self, const Tensor& other) {
     }, "remainder");
 }
 Tensor remainder_scalar_cpu(const Tensor& self, Scalar other) {
-    return remainder_tensor_cpu(self, Tensor::full({}, other, DType::Undefined, self.device())
-                                            .to(self.dtype()));
+    // Forcing the scalar into self's dtype would truncate a float divisor
+    // against an integral tensor; the pair promotes first.
+    const DType dt = scalar_promote(self.dtype(), other);
+    return remainder_tensor_cpu(self.to(dt), Tensor::full({}, other, dt, self.device()));
+}
+
+Tensor remainder_scalar_tensor_cpu(Scalar self, const Tensor& other) {
+    const DType dt = scalar_promote(other.dtype(), self);
+    return remainder_tensor_cpu(Tensor::full({}, self, dt, other.device()), other.to(dt));
 }
 
 Tensor fmod_tensor_cpu(const Tensor& self, const Tensor& other) {
@@ -503,16 +534,31 @@ Tensor fmod_tensor_cpu(const Tensor& self, const Tensor& other) {
     }, "fmod");
 }
 Tensor fmod_scalar_cpu(const Tensor& self, Scalar other) {
-    return fmod_tensor_cpu(self, Tensor::full({}, other, DType::Undefined, self.device()).to(self.dtype()));
+    const DType dt = scalar_promote(self.dtype(), other);
+    return fmod_tensor_cpu(self.to(dt), Tensor::full({}, other, dt, self.device()));
 }
 
-Tensor subtract_tensor_cpu(const Tensor& self, const Tensor& other) {
-    return binary_same_kernel<true>(self, other, [](auto x, auto y) { return x - y; }, "subtract");
+Tensor subtract_tensor_cpu(const Tensor& self, const Tensor& other, Scalar alpha) {
+    // alpha == 1 is by far the common call, and the scaled form costs a
+    // Scalar conversion per element, so it keeps its own loop.
+    if (!alpha.isComplex() && alpha.toDouble() == 1.0) {
+        return binary_same_kernel<true>(self, other,
+            [](auto x, auto y) { return x - y; }, "subtract");
+    }
+    return binary_same_kernel<true>(self, other,
+        [alpha](auto x, auto y) {
+            using T = decltype(x);
+            if constexpr (is_complex_type_v<T> || std::is_floating_point_v<T>) {
+                return x - y * alpha.to<T>();
+            } else {
+                return static_cast<T>(x - y * alpha.to<double>());
+            }
+        }, "subtract");
 }
-Tensor subtract_scalar_cpu(const Tensor& self, Scalar other) {
+Tensor subtract_scalar_cpu(const Tensor& self, Scalar other, Scalar alpha) {
     DType dt = scalar_promote(self.dtype(), other);
     return subtract_tensor_cpu(self.to(dt),
-                               Tensor::full({}, other, dt, self.device()));
+                               Tensor::full({}, other, dt, self.device()), alpha);
 }
 Tensor multiply_tensor_cpu(const Tensor& self, const Tensor& other) {
     return binary_same_kernel<true>(self, other, [](auto x, auto y) { return x * y; }, "multiply");
@@ -539,6 +585,76 @@ Tensor multiply_scalar_cpu(const Tensor& self, Scalar other) {
         return static_cast<decltype(x)>(x * other.to<double>());
     }, "multiply");
 }
+// ---------------------------------------------------------------------------
+// Division with an explicit rounding mode
+// ---------------------------------------------------------------------------
+namespace {
+
+enum class DivRounding { kTrue, kTrunc, kFloor };
+
+DivRounding parse_div_rounding(const std::optional<std::string>& mode) {
+    if (!mode.has_value()) return DivRounding::kTrue;
+    if (*mode == "trunc") return DivRounding::kTrunc;
+    if (*mode == "floor") return DivRounding::kFloor;
+    TP_THROW(RuntimeError,
+             std::string("div expected rounding_mode to be one of None, 'trunc' "
+                         "or 'floor' but found '") + *mode + "'");
+}
+
+// The hardware quotient truncates toward zero, so a remainder whose sign
+// disagrees with the divisor sits one step above the floor.
+template <typename T>
+inline T int_floor_div(T x, T y) {
+    T q = static_cast<T>(x / y);
+    T r = static_cast<T>(x - q * y);
+    if (r != T(0) && ((r < T(0)) != (y < T(0)))) q = static_cast<T>(q - T(1));
+    return q;
+}
+
+Tensor div_rounded_core(const Tensor& a, const Tensor& b, DivRounding rounding) {
+    if (rounding == DivRounding::kTrue) return true_divide_core(a, b);
+    // Rounded division stays in the input dtype: an integral pair must come
+    // back integral, which the float promotion of true division loses.
+    const bool floor_mode = (rounding == DivRounding::kFloor);
+    return binary_same_kernel(a, b, [floor_mode](auto x, auto y) -> decltype(x) {
+        using T = decltype(x);
+        if constexpr (std::is_integral_v<T>) {
+            if (y == T(0)) TP_THROW(RuntimeError, "ZeroDivisionError");
+            return floor_mode ? int_floor_div<T>(x, y) : static_cast<T>(x / y);
+        } else {
+            // Half/BFloat16 round through Float32, the width their arithmetic
+            // is defined at; float and double keep their own.
+            using C = std::conditional_t<std::is_same_v<T, double>, double, float>;
+            const C q = static_cast<C>(x) / static_cast<C>(y);
+            return static_cast<T>(floor_mode ? std::floor(q) : std::trunc(q));
+        }
+    }, "div");
+}
+
+Tensor div_rounded_scalar(const Tensor& self, Scalar other, DivRounding rounding) {
+    if (rounding == DivRounding::kTrue) return true_divide_scalar_cpu(self, other);
+    const DType dt = scalar_promote(self.dtype(), other);
+    return div_rounded_core(self.to(dt), Tensor::full({}, other, dt, self.device()),
+                            rounding);
+}
+
+}  // namespace
+
+Tensor div_mode_tensor_cpu(const Tensor& self, const Tensor& other,
+                           std::optional<std::string> rounding_mode) {
+    return div_rounded_core(self, other, parse_div_rounding(rounding_mode));
+}
+Tensor div_mode_scalar_cpu(const Tensor& self, Scalar other,
+                           std::optional<std::string> rounding_mode) {
+    return div_rounded_scalar(self, other, parse_div_rounding(rounding_mode));
+}
+Tensor floor_divide_cpu(const Tensor& self, const Tensor& other) {
+    return div_rounded_core(self, other, DivRounding::kFloor);
+}
+Tensor floor_divide_scalar_cpu(const Tensor& self, Scalar other) {
+    return div_rounded_scalar(self, other, DivRounding::kFloor);
+}
+
 Tensor negative_cpu(const Tensor& self) {
     if (isComplexType(self.dtype())) {
         return complex_unary_op_kernel(self, [](auto x) { return -x; });
@@ -690,17 +806,11 @@ Tensor digamma_cpu(const Tensor& self) {
     }, "digamma");
 }
 Tensor i0_cpu(const Tensor& self) {
-    // Modified Bessel I0 via power series: sum_k ((|x|/2)^k / k!)^2
+    // Modified Bessel I0.  The Chebyshev expansion holds across the whole
+    // range; the ((|x|/2)^k / k!)^2 series it replaces needs more terms than
+    // any fixed cap allows once |x| passes ~50.
     return float_math_kernel(self, [](double v) {
-        double half = 0.5 * std::fabs(v);
-        double term = 1.0, sum = 1.0;
-        for (int k = 1; k < 60; ++k) {
-            term *= half / static_cast<double>(k);
-            double term2 = term * term;
-            sum += term2;
-            if (term2 < 1e-18 * sum) break;
-        }
-        return sum;
+        return tensorplay::special_math::modified_bessel_i0_forward(v);
     }, "i0");
 }
 Tensor nan_to_num_cpu(const Tensor& self, Scalar nan,
@@ -745,8 +855,7 @@ Tensor nan_to_num_cpu(const Tensor& self, Scalar nan,
 
 Tensor xlogy_cpu(const Tensor& a, const Tensor& b) {
     return binary_float_kernel(a, b, [](double x, double y) {
-        if (x == 0.0) return 0.0;
-        return x * std::log(y);
+        return tensorplay::special_math::calc_xlogy(x, y);
     }, "xlogy");
 }
 Tensor logaddexp_cpu(const Tensor& a, const Tensor& b) {
@@ -770,6 +879,11 @@ Tensor copysign_cpu(const Tensor& a, const Tensor& b) {
         return std::copysign(x, y);
     }, "copysign");
 }
+Tensor copysign_scalar_cpu(const Tensor& self, Scalar other) {
+    // The sign comes from the scalar alone, so the divisor width never
+    // participates in promotion -- Float32 carries every sign bit exactly.
+    return copysign_cpu(self, Tensor::full({}, other, DType::Float32, self.device()));
+}
 Tensor hypot_cpu(const Tensor& a, const Tensor& b) {
     return binary_float_kernel(a, b, [](double x, double y) {
         return std::hypot(x, y);
@@ -782,9 +896,33 @@ Tensor atan2_cpu(const Tensor& a, const Tensor& b) {
     }, "atan2");
 }
 Tensor nextafter_cpu(const Tensor& a, const Tensor& b) {
-    return binary_float_kernel(a, b, [](double x, double y) {
-        return std::nextafter(x, y);
-    }, "nextafter");
+    // The step must happen in the element dtype: a double-precision step from
+    // a Float32 value rounds back to the original number when narrowed.
+    std::vector<int64_t> out_shape = broadcast_shapes(
+        static_cast<std::vector<int64_t>>(a.shape()),
+        static_cast<std::vector<int64_t>>(b.shape()));
+    DType dt = promoteTypes(a.dtype(), b.dtype());
+    if (!isFloatingType(dt)) dt = DType::Float32;
+    Tensor ac = a.to(dt).expand(out_shape).contiguous();
+    Tensor bc = b.to(dt).expand(out_shape).contiguous();
+    Tensor out = Tensor::empty(out_shape, dt, a.device());
+    int64_t n = out.numel();
+    if (dt == DType::Float64) {
+        const double* ap = ac.data_ptr<double>();
+        const double* bp = bc.data_ptr<double>();
+        double* dp = out.data_ptr<double>();
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
+            for (int64_t i = begin; i < end; ++i) dp[i] = std::nextafter(ap[i], bp[i]);
+        });
+    } else {
+        const float* ap = ac.data_ptr<float>();
+        const float* bp = bc.data_ptr<float>();
+        float* dp = out.data_ptr<float>();
+        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
+            for (int64_t i = begin; i < end; ++i) dp[i] = std::nextafter(ap[i], bp[i]);
+        });
+    }
+    return out;
 }
 Tensor gcd_cpu(const Tensor& a, const Tensor& b) {
     DType dt = promoteTypes(a.dtype(), b.dtype());
@@ -824,7 +962,98 @@ Tensor heaviside_cpu(const Tensor& a, const Tensor& values) {
 // Clamp family
 // ===========================================================================
 
+namespace clamp_row {
+#if defined(__x86_64__)
+inline bool avx512_ok() {
+    static const bool ok = __builtin_cpu_supports("avx512f") != 0 &&
+                           __builtin_cpu_supports("avx512vl") != 0 &&
+                           __builtin_cpu_supports("avx512dq") != 0;
+    return ok;
+}
+
+// NaN propagation: the finite bound is the first source of max/min so a NaN
+// lane (second source) flows through untouched, matching the scalar ternary.
+__attribute__((target("avx512f")))
+inline void f32_512(const float* in, float* out, int64_t n, float lo, float hi) {
+    const __m512 vlo = _mm512_set1_ps(lo), vhi = _mm512_set1_ps(hi);
+    int64_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m512 v = _mm512_loadu_ps(in + i);
+        v = _mm512_min_ps(vhi, _mm512_max_ps(vlo, v));
+        _mm512_storeu_ps(out + i, v);
+    }
+    for (; i < n; ++i) {
+        float v = in[i];
+        v = v < lo ? lo : v;
+        v = v > hi ? hi : v;
+        out[i] = v;
+    }
+}
+
+__attribute__((target("avx512f")))
+inline void f64_512(const double* in, double* out, int64_t n, double lo, double hi) {
+    const __m512d vlo = _mm512_set1_pd(lo), vhi = _mm512_set1_pd(hi);
+    int64_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m512d v = _mm512_loadu_pd(in + i);
+        v = _mm512_min_pd(vhi, _mm512_max_pd(vlo, v));
+        _mm512_storeu_pd(out + i, v);
+    }
+    for (; i < n; ++i) {
+        double v = in[i];
+        v = v < lo ? lo : v;
+        v = v > hi ? hi : v;
+        out[i] = v;
+    }
+}
+#endif
+}  // namespace clamp_row
+
+namespace {
+// Shared contiguous implementation: one streaming pass, no intermediate
+// tensor, bounds applied together.  NaN input stays NaN (comparisons are
+// false), matching the per-bound ternary kernels below.
+template <typename T>
+Tensor clamp_range_contig(const Tensor& self, T lo, T hi, bool has_lo, bool has_hi) {
+    Tensor self_c = self.contiguous();
+    Tensor result = Tensor::empty(static_cast<std::vector<int64_t>>(self.shape()), self.dtype(), self.device());
+    const T* in = self_c.data_ptr<T>();
+    T* out = result.data_ptr<T>();
+    const int64_t n = self_c.numel();
+    tensorplay::parallel::parallel_for(0, n, 8192, [&](int64_t b, int64_t e) {
+        for (int64_t i = b; i < e; ++i) {
+            T v = in[i];
+            if (has_lo && v < lo) v = lo;
+            if (has_hi && v > hi) v = hi;
+            out[i] = v;
+        }
+    });
+    return result;
+}
+}  // namespace
+
 Tensor clamp_min_scalar_cpu(const Tensor& self, Scalar min) {
+    if (self.dtype() == DType::Float32 && self.is_contiguous()) {
+        Tensor self_c = self.contiguous();
+        Tensor result = Tensor::empty(static_cast<std::vector<int64_t>>(self.shape()), self.dtype(), self.device());
+        float lo = static_cast<float>(min.toDouble());
+        const float* in = self_c.data_ptr<float>();
+        float* out = result.data_ptr<float>();
+        const int64_t n = self_c.numel();
+#if defined(__x86_64__)
+        if (clamp_row::avx512_ok()) {
+            tensorplay::parallel::parallel_for(0, n, 8192, [&](int64_t b, int64_t e) {
+                clamp_row::f32_512(in + b, out + b, e - b, lo,
+                                   std::numeric_limits<float>::infinity());
+            });
+            return result;
+        }
+#endif
+        tensorplay::parallel::parallel_for(0, n, 8192, [&](int64_t b, int64_t e) {
+            for (int64_t i = b; i < e; ++i) out[i] = in[i] < lo ? lo : in[i];
+        });
+        return result;
+    }
     double lo = min.toDouble();
     return dtype_unary_kernel(self, [lo](auto x) -> decltype(x) {
         using T = decltype(x);
@@ -832,6 +1061,27 @@ Tensor clamp_min_scalar_cpu(const Tensor& self, Scalar min) {
     }, "clamp_min");
 }
 Tensor clamp_max_scalar_cpu(const Tensor& self, Scalar max) {
+    if (self.dtype() == DType::Float32 && self.is_contiguous()) {
+        Tensor self_c = self.contiguous();
+        Tensor result = Tensor::empty(static_cast<std::vector<int64_t>>(self.shape()), self.dtype(), self.device());
+        float hi = static_cast<float>(max.toDouble());
+        const float* in = self_c.data_ptr<float>();
+        float* out = result.data_ptr<float>();
+        const int64_t n = self_c.numel();
+#if defined(__x86_64__)
+        if (clamp_row::avx512_ok()) {
+            tensorplay::parallel::parallel_for(0, n, 8192, [&](int64_t b, int64_t e) {
+                clamp_row::f32_512(in + b, out + b, e - b,
+                                   -std::numeric_limits<float>::infinity(), hi);
+            });
+            return result;
+        }
+#endif
+        tensorplay::parallel::parallel_for(0, n, 8192, [&](int64_t b, int64_t e) {
+            for (int64_t i = b; i < e; ++i) out[i] = in[i] > hi ? hi : in[i];
+        });
+        return result;
+    }
     double hi = max.toDouble();
     return dtype_unary_kernel(self, [hi](auto x) -> decltype(x) {
         using T = decltype(x);
@@ -852,6 +1102,57 @@ Tensor clamp_max_tensor_cpu(const Tensor& self, const Tensor& max) {
 }
 Tensor clip_cpu(const Tensor& self, std::optional<Scalar> min, std::optional<Scalar> max) {
     if (min.has_value() && max.has_value()) {
+        const double lo = min->toDouble();
+        const double hi = max->toDouble();
+        if (self.dtype() == DType::Float32 && self.is_contiguous()) {
+            Tensor self_c = self.contiguous();
+            Tensor result = Tensor::empty(static_cast<std::vector<int64_t>>(self.shape()), self.dtype(), self.device());
+            const float lo32 = static_cast<float>(lo), hi32 = static_cast<float>(hi);
+            const float* in = self_c.data_ptr<float>();
+            float* out = result.data_ptr<float>();
+            const int64_t n = self_c.numel();
+#if defined(__x86_64__)
+            if (clamp_row::avx512_ok()) {
+                tensorplay::parallel::parallel_for(0, n, 8192, [&](int64_t b, int64_t e) {
+                    clamp_row::f32_512(in + b, out + b, e - b, lo32, hi32);
+                });
+                return result;
+            }
+#endif
+            tensorplay::parallel::parallel_for(0, n, 8192, [&](int64_t b, int64_t e) {
+                for (int64_t i = b; i < e; ++i) {
+                    float v = in[i];
+                    v = v < lo32 ? lo32 : v;
+                    v = v > hi32 ? hi32 : v;
+                    out[i] = v;
+                }
+            });
+            return result;
+        }
+        if (self.dtype() == DType::Float64 && self.is_contiguous()) {
+            Tensor self_c = self.contiguous();
+            Tensor result = Tensor::empty(static_cast<std::vector<int64_t>>(self.shape()), self.dtype(), self.device());
+            const double* in = self_c.data_ptr<double>();
+            double* out = result.data_ptr<double>();
+            const int64_t n = self_c.numel();
+#if defined(__x86_64__)
+            if (clamp_row::avx512_ok()) {
+                tensorplay::parallel::parallel_for(0, n, 8192, [&](int64_t b, int64_t e) {
+                    clamp_row::f64_512(in + b, out + b, e - b, lo, hi);
+                });
+                return result;
+            }
+#endif
+            tensorplay::parallel::parallel_for(0, n, 8192, [&](int64_t b, int64_t e) {
+                for (int64_t i = b; i < e; ++i) {
+                    double v = in[i];
+                    v = v < lo ? lo : v;
+                    v = v > hi ? hi : v;
+                    out[i] = v;
+                }
+            });
+            return result;
+        }
         Tensor r = clamp_min_scalar_cpu(self, *min);
         return clamp_max_scalar_cpu(r, *max);
     }
@@ -1896,7 +2197,13 @@ std::vector<Tensor> broadcast_tensors_cpu(const std::vector<Tensor>& tensors) {
 Tensor block_diag_cpu(const std::vector<Tensor>& tensors) {
     // 2-D rectangular blocks; result dtype = promoted inputs; empty call
     // yields a (1, 0) tensor.
-    if (tensors.empty()) return Tensor::empty({1, 0}, DType::Float32);
+    if (tensors.empty()) {
+        return Tensor::empty(
+            std::vector<int64_t>{1, 0},
+            std::optional<DType>(DType::Float32),
+            std::nullopt,
+            false);
+    }
     const Device& device = tensors[0].device();
     DType out_dtype = tensors[0].dtype();
     int64_t rows = 0, cols = 0;
@@ -2593,6 +2900,13 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("subtract.Scalar", subtract_scalar_cpu);
     m.impl("multiply.Tensor", multiply_tensor_cpu);
     m.impl("multiply.Scalar", multiply_scalar_cpu);
+    m.impl("remainder.Scalar_Tensor", remainder_scalar_tensor_cpu);
+    m.impl("div.Tensor_mode", div_mode_tensor_cpu);
+    m.impl("div.Scalar_mode", div_mode_scalar_cpu);
+    m.impl("divide.Tensor_mode", div_mode_tensor_cpu);
+    m.impl("divide.Scalar_mode", div_mode_scalar_cpu);
+    m.impl("floor_divide", floor_divide_cpu);
+    m.impl("floor_divide.Scalar", floor_divide_scalar_cpu);
     m.impl("negative", negative_cpu);
     m.impl("positive", positive_cpu);
     // Comparisons / logic
@@ -2624,10 +2938,11 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("digamma", digamma_cpu);
     m.impl("i0", i0_cpu);
     m.impl("nan_to_num", nan_to_num_cpu);
-    m.impl("xlogy.Tensor", xlogy_cpu);
+    m.impl("xlogy", xlogy_cpu);
     m.impl("logaddexp", logaddexp_cpu);
     m.impl("logaddexp2", logaddexp2_cpu);
     m.impl("copysign.Tensor", copysign_cpu);
+    m.impl("copysign.Scalar", copysign_scalar_cpu);
     m.impl("hypot", hypot_cpu);
     m.impl("atan2", atan2_cpu);
     m.impl("nextafter", nextafter_cpu);

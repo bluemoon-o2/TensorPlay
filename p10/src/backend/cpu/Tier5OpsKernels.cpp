@@ -426,7 +426,7 @@ Tensor cholesky_solve_cpu(const Tensor& self, const Tensor& input2, bool upper) 
             std::vector<double> xcol(n);
             for (int64_t i = 0; i < n; ++i) xcol[i] = B[i * rhs + c];
             triangular_solve_vec(L, n, xcol, false, false, false);   // L y = b
-            triangular_solve_vec(L, n, xcol, true, false, false);    // L^T x = y
+            triangular_solve_vec(L, n, xcol, false, true, false);    // L^T x = y
             for (int64_t i = 0; i < n; ++i) B[i * rhs + c] = xcol[i];
         }
         put_batch_block(out, B, bidx, n * rhs);
@@ -473,7 +473,7 @@ std::tuple<Tensor, Tensor, Tensor> svd_cpu(const Tensor& self, bool some, bool c
     Tensor U = Tensor::empty(flip ? [&]{auto v=shape_of(self); v[nd-2]=m; v[nd-1]=r; return v;}()
                                   : shape_of(self),
                              self.dtype(), self.device());
-    Tensor S = Tensor::empty([&]{auto v=shape_of(self); v.pop_back(); v.push_back(r); return v;}(),
+    Tensor S = Tensor::empty([&]{auto v=shape_of(self); v[nd - 2] = r; v.pop_back(); return v;}(),
                              self.dtype(), self.device());
     std::vector<int64_t> vh_shape = shape_of(self);
     vh_shape[nd - 2] = r;
@@ -557,7 +557,10 @@ std::tuple<Tensor, Tensor, Tensor> svd_cpu(const Tensor& self, bool some, bool c
                     Vhout[jj * k + i2] = W[i2 * wn + j] / denom;
             }
         }
-        put_batch_block(S, sv, bidx, r);
+        // S must follow the same descending permutation as the U / Vh columns.
+        std::vector<double> sv_out(static_cast<size_t>(r), 0.0);
+        for (int64_t jj = 0; jj < r; ++jj) sv_out[static_cast<size_t>(jj)] = sv[static_cast<size_t>(ord[jj])];
+        put_batch_block(S, sv_out, bidx, r);
         put_batch_block(U, Uout, bidx, (flip ? m : wm) * r);
         put_batch_block(Vh, Vhout, bidx, r * (flip ? k : wn));
     }
@@ -578,8 +581,8 @@ Tensor pairwise_distance_cpu(const Tensor& x1, const Tensor& x2, double p, doubl
         TP_THROW(RuntimeError, "pairwise_distance: inputs must be at least 1-dimensional");
     }
     const int64_t dim = diff.dim() - 1;
-    return detail::redispatch_norm_function(diff,
-                                            std::vector<int64_t>{dim}, p, keepdim);
+    return detail::redispatch_norm_dim_function(
+        diff, std::vector<int64_t>{dim}, p, keepdim);
 }
 
 Tensor pdist_cpu(const Tensor& self, double p) {

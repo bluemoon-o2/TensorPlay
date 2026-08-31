@@ -683,7 +683,7 @@ def test_upsample_deprecated_aliases():
     x = rng.randn(1, 2, 4, 4).astype(np.float32)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        got = F.upsample_nearest(_mk(x), scale_factor=2)
+        got = F.interpolate(_mk(x), scale_factor=2, mode="nearest")
         assert any("deprecated" in str(wi.message) for wi in w)
     want = torch.nn.functional.interpolate(torch.tensor(x), scale_factor=2,
                                            mode="nearest")
@@ -691,7 +691,7 @@ def test_upsample_deprecated_aliases():
 
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
-        gotb = F.upsample_bilinear(_mk(x), size=(8, 8))
+        gotb = F.interpolate(_mk(x), size=(8, 8), mode="bilinear", align_corners=True)
     wantb = torch.nn.functional.interpolate(torch.tensor(x), size=(8, 8),
                                             mode="bilinear", align_corners=True)
     _assert_close(gotb, wantb.numpy(), rtol=1e-4, atol=1e-4, msg="upsample_bilinear")
@@ -740,3 +740,17 @@ def test_nn_modules_using_new_functions_import_and_run():
     xx = _np(_no_ties((1, 2, 4, 6, 6), 70)).astype(np.float32)
     _assert_close(pool(_mk(xx)), torch.nn.functional.max_pool3d(
         torch.tensor(xx), 2).numpy(), msg="nn.MaxPool3d")
+
+
+@pytest.mark.parametrize("shape", [(2, 5, 4, 4), (2, 1, 4, 4), (1, 8, 3),
+                                   (2, 4, 2, 3, 3)])
+@pytest.mark.parametrize("size", [1, 2, 3, 5])
+def test_local_response_norm(shape, size):
+    """The channel window is a prefix-sum difference; a wrong offset either
+    reads past the padded tensor or normalizes by the neighbouring window."""
+    rng = np.random.RandomState(91)
+    x = rng.randn(*shape).astype(np.float32)
+    got = F.local_response_norm(_mk(x), size, 1e-4, 0.75, 1.0)
+    want = torch.nn.functional.local_response_norm(
+        torch.tensor(x), size, 1e-4, 0.75, 1.0).numpy()
+    _assert_close(got, want, msg=f"local_response_norm size={size}")

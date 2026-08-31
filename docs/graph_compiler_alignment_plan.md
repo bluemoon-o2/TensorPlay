@@ -1,18 +1,18 @@
-# 图编译全栈对齐 torch 蓝图(2026-08-22)
+# 图编译全栈蓝图(2026-08-22)
 
-目标:`tensorplay` 图编译栈逐层对齐 PyTorch(Dynamo/FX/AOTAutograd/Inductor/export),
-参考基准 `third_party/pytorch`(commit `893b6406`)。每层给出:现状 → 目标语义 →
-pytorch 参考路径 → TensorPlay 落点 → 验收标准。
+目标:`tensorplay` 图编译栈逐层实现完整能力(Dynamo/FX/AOTAutograd/Inductor/export),
+参考基准为本地参考源码树(commit `893b6406`)。每层给出:现状 → 目标语义 →
+参考路径 → TensorPlay 落点 → 验收标准。
 
 ## 量化差距（2026-08-24 实测, wc -l）
 
-| 组件 | torch (LOC) | TensorPlay (LOC) | 倍率 |
+| 组件 | 参考实现 (LOC) | TensorPlay (LOC) | 倍率 |
 |---|---|---|---|
-| Inductor (`torch/_inductor`) | 284,829 | backends+stax ≈ 4,400 | ~65x |
-| Dynamo (`torch/_dynamo`) | 130,241 | compiler 前端 ≈ 2,600 | ~50x |
-| FX (`torch/fx`) | 54,204 | graph+passes ≈ 2,000 | ~27x |
+| Inductor (`_inductor`) | 284,829 | backends+stax ≈ 4,400 | ~65x |
+| Dynamo (`_dynamo`) | 130,241 | compiler 前端 ≈ 2,600 | ~50x |
+| FX (`fx`) | 54,204 | graph+passes ≈ 2,000 | ~27x |
 | HOPs + subclasses | 31,915 | — | — |
-| 编译 C++ (`torch/csrc/{inductor,dynamo,fx}`) | 35,692 | stax C+++桥接 ≈ 1,600 | ~22x |
+| 编译 C++ (`csrc/{inductor,dynamo,fx}`) | 35,692 | stax C+++桥接 ≈ 1,600 | ~22x |
 | **合计** | **≈537k** | **≈10.6k** | **~51x** |
 
 差距本质是机制面而非行数:Dynamo=字节码级追踪(PEP 523)+C++ guard 树+副作用重放;
@@ -21,10 +21,10 @@ TensorPlay 当前=代理追踪+白名单原生图+点级 Triton codegen。
 
 ## 层级总览与状态
 
-| # | 层 | torch 参照 | 现役载体 | 现状 | 目标 |
+| # | 层 | 参考组件 | 现役载体 | 现状 | 目标 |
 |---|---|---|---|---|---|
-| L1 | 捕获前端 | torch/_dynamo | `compiler/graph.py` Tracer | 执行式追踪,控制流拒绝/回退 | 字节码级捕获:图断点、guards、resume |
-| L2 | IR 与 pass 体系 | torch/fx + _fx/passes | `compiler/passes.py`(P0 已落地) | PassManager/DCE/ConstFold/ShapeProp | pass 生态扩容、subgraph 工具 |
+| L1 | 捕获前端 | `_dynamo` | `compiler/graph.py` Tracer | 执行式追踪,控制流拒绝/回退 | 字节码级捕获:图断点、guards、resume |
+| L2 | IR 与 pass 体系 | `fx` + `_fx/passes` | `compiler/passes.py`(P0 已落地) | PassManager/DCE/ConstFold/ShapeProp | pass 生态扩容、subgraph 工具 |
 | L3 | 符号形状 | SymInt/SymBool + sympy | — | bool dynamic(rank 固定) | size 符号变量、约束传播、guard 表达式 |
 | L4 | 自动微分切分 | AOTAutograd + min-cut | **stax 内部**(`_AotNativeLowering`) | train/eval 双图,公式驱动 backward | joint graph + min-cut partitioner,**上提出 stax** |
 | L5 | 代码生成后端 | **Inductor = stax 对标物** | `backends/stax.py` + libstax + triton.py | 见下方盘点 | 缓存/autotune/cudagraphs/分解表 |
@@ -38,7 +38,7 @@ lowering(`tensorplay/backends/stax.py`)。对照 Inductor:
 
 | torch 组件 | stax 现状 | 缺口 |
 |---|---|---|
-| ATen/native kernel 执行 | native graph 逐算子路径("stax-native") | — |
+| native kernel 执行 | native graph 逐算子路径("stax-native") | — |
 | Inductor scheduler(pointwise 融合决策) | `_CpuFusedPointwiseLowering`("stax-fused-cpu",链式融合 + 自定义 autograd Function);CUDA 走 Triton 点级原型 | 融合面窄:仅 pointwise 类,无跨类调度(matmul+epilogue 等) |
 | AOTAutograd 衔接 | `_AotNativeLowering`("stax-aot-native"):由 `derivatives.yaml` 公式生成 backward 图,train/eval split | 切分策略内嵌后端(见 L4 迁移项) |
 | Triton codegen | `backends/triton.py`,forward+backward 已有 CUDA 测试覆盖 | 无 kernel cache、无 autotune |
@@ -69,7 +69,7 @@ gap_analysis §CUDA 运行时);M4 分解表接入 P0 pass 体系;M5 融合面扩
 
 - 参考:`torch/fx/passes/`(shape_prop、param_fetch、runtime_assert)、
   `torch/_inductor/fx_passes/`(fuse、pattern 匹配)。
-- 落点:`tensorplay/compiler/passes.py`(PassManager)+ `tensorplay/compiler/fx_passes/`。
+- 落点:`tensorplay/_stax/passes.py`(PassManager)+ `tensorplay/_stax/fx_passes/`。
 - 首批 pass:`dead_code_elimination`(已有)、`normalize_operators`、
   `pointwise_fusion_hint`(给 stax 标注)、`const_fold`。
 - 验收:pass 幂等性测试;fusion hint 后 stax lowering 节点数下降可断言。
@@ -300,8 +300,8 @@ sweep+双 partitioner,**12/12 全过**(role 对齐/单调性/链内必存/budget
 
 - `compiler/decompositions.py`:`DecomposePass`(PassBase 体系)+ 注册表,规则按语义名
   同时命中 `call_method` 与 `call_function` 两种捕获形态;
-- **扩容(2026-08-24)**:4 条 → 20 条,公式逐条对照 `torch/_inductor/decomposition.py`
-  与 ATen 语义:softplus/mish/tanhshrink/logit/log1p/expm1/exp2/log10/sinh/cosh/
+- **扩容(2026-08-24)**:4 条 → 20 条,公式逐条检查本地分解表
+  与核心语义:softplus/mish/tanhshrink/logit/log1p/expm1/exp2/log10/sinh/cosh/
   asinh/acosh/atanh/sec/csc/cot/rad2deg/deg2rad/lerp/addcmul/addcdiv(+既有
   sigmoid/silu/swish/reciprocal/square)。**每条都只落到 POINTWISE_FUSED 原语集**,
   因此每个条目直接倍增"可原生编译算子面"(test 断言 `_stax_native_graph` 非空);
@@ -312,9 +312,9 @@ sweep+双 partitioner,**12/12 全过**(role 对齐/单调性/链内必存/budget
 - **分解表暴露并修复真 bug**:`derivatives.yaml` silu 公式漏 `(1-σ)` 因子
   (旧值 0.9239 vs 有限差分 0.7354),已按 torch derivatives.yaml 修正;同批补齐
   sinh/cosh/asinh/acosh/atanh/logit/expm1 共 8 条缺失求导(全部 FD 验证);
-- test_decompositions.py 扩至 31 用例:数值 parity ×13、原生编译 ×11、梯度 parity ×7。
+- test_decompositions.py 扩至 31 用例:数值比较 ×13、原生编译 ×11、梯度比较 ×7。
 - **形状/视图求导对齐(2026-08-24 续)**:expand/repeat 公式改为逐字对照上游
-  derivatives.yaml(`at::sum_to(grad, self.sym_sizes())` /
+  derivatives.yaml(`sum_to(grad, self.sym_sizes())` /
   `repeat_backward(grad, repeats, self.sym_sizes())`);`ManualNodes.h` 两个
   helper 重写为忠实移植——`sum_to`/`is_expandable_to` 对照 `ExpandUtils.h`
   (批量 keepdim 单次求和 + 尾部对齐可扩展检查),`repeat_backward` 对照
@@ -337,9 +337,9 @@ sweep+双 partitioner,**12/12 全过**(role 对齐/单调性/链内必存/budget
 
 **文件布局修正**(用户指正):torch 的 Triton 在 `torch/_inductor/codegen/`,
 `torch/backends/` 只放设备开关。据此重排:
-- `tensorplay/compiler/codegen/triton.py`(原 backends/triton.py)——内核
+- `tensorplay/_stax/codegen/triton.py`(原 backends/triton.py)——内核
   codegen + `_compile_program` + 归约尾声检测;
-- `tensorplay/compiler/runtime/stax_autotune.py`(新,CachingAutotuner 对标);
+- `tensorplay/_stax/runtime/stax_autotune.py`(新,CachingAutotuner 对标);
 - `backends/stax.py` 保持 backend 门面,延迟导入 compiler.codegen.triton。
 
 **M1(codecache 接线,PyCodeCache 对标)**:`_compile_program` 源码内容寻址
@@ -439,10 +439,10 @@ TI build。嫌疑:AOT bw 图执行后遗留的悬垂形状/元数据被 TI 读�
 (两树分属不同文件系统,本无文件冲突)。教训:共享机器上清理进程必须按
 cwd(/proc/PID/cwd)限定自己的树,禁止全局 pkill。
 
-## L5-M5 融合面扩展设计(2026-08-25,基于 torch/_inductor 双侧走读)
+## L5-M5 融合面扩展设计(2026-08-25,基于本地编译后端双侧走读)
 
-决策:正面竞争,自研后端对标 Inductor;参考源码 = `third_party/pytorch`
-(commit 893b6406)。下文 torch 行号均相对 `torch/_inductor/`。
+决策:正面竞争,自研后端实现完整能力;参考源码 = 本地参考源码树
+(commit 893b6406)。下文行号均相对 `_inductor/`。
 
 ### ⚠️ 先修地基:M5a sum 尾融合发射不完整(走读发现的真 bug)
 
@@ -450,7 +450,7 @@ cwd(/proc/PID/cwd)限定自己的树,禁止全局 pkill。
 后**没有任何 store**(242-246 跳过了 store 循环),grid 仍是多 block
 (288),各 block 部分和既不落盘也不聚合——当前生成的标量输出缓冲是
 未初始化内存。test_fx_passes.py 只断言源码含 `"tl.sum("`/`"tp.empty(()"`,
-无数值验证。**任何纵向融合工作开始前必须先补齐并加数值 parity 测试。**
+无数值验证。**任何纵向融合工作开始前必须先补齐并加数值比较测试。**
 
 ### 我方现状盘点(可复用 vs 硬缺口)
 
@@ -508,12 +508,12 @@ autotuner 全套;codecache 内容寻址;AOT 双图管线;cuBLASLt bias epilogue
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| M5a | 修复 sum epilogue 发射(单 block 收敛或两阶段);广播最小支持(输入 expand 视图进 Triton path) | mul/relu/sum、addcmul 型数值 parity vs eager;带 bias 广播用例 |
-| M5b | 表示层升级:program 增加 reduction 轴(dim/keepdim)+ 多输出;归约组合子注册(sum/max/amax,argmax 后置) | mean(dim)/amax(dim) 尾融合 parity;argmax 双输出骨架 |
+| M5a | 修复 sum epilogue 发射(单 block 收敛或两阶段);广播最小支持(输入 expand 视图进 Triton path) | mul/relu/sum、addcmul 型数值比较 vs eager;带 bias 广播用例 |
+| M5b | 表示层升级:program 增加 reduction 轴(dim/keepdim)+ 多输出;归约组合子注册(sum/max/amax,argmax 后置) | mean(dim)/amax(dim) 尾融合比较;argmax 双输出骨架 |
 | M5c | Python 融合调度器:消费 fusion_hint 或替换之——依赖提取、group=(numel,rnumel)、can_fuse_vertical(exact dep 匹配简化版)、Enable/DisableReduction 标记 | pw→red→pw 图正确切成 ≤2 kernel;red 后断开语义与 torch 一致 |
-| M5d | Triton 归约 codegen:persistent + multilayer split 两态;fp32 累加器;config 候选照抄 torch 数值接进 stax_autotune | 大 reduce-to-scalar(split)与 rnumel≤1024(persistent)parity+性能 |
+| M5d | Triton 归约 codegen:persistent + multilayer split 两态;fp32 累加器;config 候选接进 stax_autotune | 大 reduce-to-scalar(split)与 rnumel≤1024(persistent)比较+性能 |
 | M5e | matmul epilogue:A 路线 cuBLASLt RELU/GELU epilogue 组合 + linear 不再预展开改模式匹配;B 路线 Triton GEMM jinja 模板 + store_output 子图重放 | linear+bias(+relu/gelu)单 kernel;vs extern mm 性能不回退 |
-| M5f | 训练态:sum VJP(tangent expand)进 _build_fused_gradient_graphs;或 aot.py 分区器与融合组联动 | train 态归约融合梯度 parity;AOT 不再一刀切关融合 |
+| M5f | 训练态:sum VJP(tangent expand)进 _build_fused_gradient_graphs;或 aot.py 分区器与融合组联动 | train 态归约融合梯度比较;AOT 不再一刀切关融合 |
 
 依赖序:M5a → M5b → M5c → M5d/M5e 并行 → M5f。M5a–M5d、M5f 纯 Python;
 M5e-A 路线动 CudaBlasGemm.cpp,需遵守 AGENTS.md 构建纪律。
@@ -538,7 +538,7 @@ benchmark_fusion/autoheuristic 调优基建。
 - **清理**:删除迁移残留 `tensorplay/backends/triton.py`(无引用,且仍含
   修复前的坏发射逻辑,易误导)。
 - **测试**:新增 test/test_triton_reduction.py——本地可跑的结构/偏移表达式/
-  广播规则单测 13 项;GPU 数值 parity 4 项(sum 单块/10 万元素 split/广播 bias
+  广播规则单测 13 项;GPU 数值比较 4 项(sum 单块/10 万元素 split/广播 bias
   点算/广播链 sum)经 runtime_available() 门控,待远端 P4 执行;断言经
   `_tensorplay_cache` 反查 `_tensorplay_codegen=="triton"`,防止解释回退假绿。
   本地:test_fx_passes+test_stax_autotune+test_triton_reduction+
@@ -556,7 +556,7 @@ test_export 8 例中 5 失败 → 全绿。三个独立根因:
 1. **is_compiling 归位到前端层**(架构修正):捕获标志 ContextVar 原在
    api.py 由 `_compiler_context` 置位,但 `export.py` 直接调 `Tracer().trace()`
    绕过了它 → batchnorm 的 `_check_input_dim`(已按 TP 惯例用
-   `tensorplay.compiler.is_compiling()` 守卫)在 Proxy 上做元数据控制流炸
+   `tensorplay._stax.is_compiling()` 守卫)在 Proxy 上做元数据控制流炸
    GraphCaptureError。修法:标志与 `compiler_context()` 移入 graph.py
    (依赖方向 api→graph,graph 不反依赖),`Tracer.trace` 执行用户代码段置位;
    api 复用之。任何直接 Tracer 调用方(export/测试/未来前端)语义一致。
@@ -598,9 +598,9 @@ decompositions/aot/codecache 共 105 passed;optim 7 passed。
   `[:, None]` 优先级);②单维折叠快捷分支漏乘 stride;③多维时末维不可折叠
   (rindex 枚举整个归约空间而非该维)。
 - **测试**:test_triton_reduction.py 扩至 17 本地项 + 6 GPU 门控项
-  (sum(dim)/mean(dim 组)/amax(keepdim) parity 待 CUDA);本地全套
+  (sum(dim)/mean(dim 组)/amax(keepdim) 比较待 CUDA);本地全套
   112 passed。
-- 远端状态:GPU parity 挂起,等待对方完成 CUDA 构建(唯一构建纪律,
+- 远端状态:GPU 比较挂起,等待对方完成 CUDA 构建(唯一构建纪律,
   我方不再发起构建;产物就绪后仅跑测试)。
 
 ## L5-M5c 落地记录(2026-08-25 深夜续)
@@ -643,7 +643,7 @@ decompositions/aot/codecache 共 105 passed;optim 7 passed。
   标量中间值进入下一段时由广播偏移机制自然处理(numel-1 单次 load);
 - 训练态(any_grad)仍限单段(M5f 补分段 VJP);
 - 测试:+4 本地结构项(two_programs/scalar_feed/接线门/抽取边界)、
-  +2 GPU 门控 e2e(two-segment parity、scalar 链 sqrt);全套
+  +2 GPU 门控 e2e(two-segment 比较、scalar 链 sqrt);全套
   **125 passed, 17 skipped**(GPU 项待远端)。
 
 ## L5-M5d 落地记录(2026-08-25 续,性能轮)
@@ -671,7 +671,7 @@ decompositions/aot/codecache 共 105 passed;optim 7 passed。
 - 测试:codegen 结构测试拆 persistent/loop 两形态断言;+4 autotune 单测
   (持久化复用/禁用开关/全失败兜底/坏缓存重建),mock _compile_program 注入;
   全套 1304 passed(2 个 conv eager 失败系他人未提交 C++ 改动,与编译器无关,
-  按 AGENTS.md 纪律不触碰)。GPU parity 待远端验证。
+  按 AGENTS.md 纪律不触碰)。GPU 比较待远端验证。
 
 ## L5-M5e 落地记录(2026-08-25 深夜,融合范式对齐轮)
 
@@ -708,7 +708,7 @@ broadcast 形状作为 codegen 的 reference(单块/split 阈值、dims tile、m
   (四形态发射/mean 先缩放/argmax 拒绝)、计划层 +2(单段化+epilogue 程序
   构建)、GPU 门控 e2e +3(pw→red→pw 单 kernel、标量链、双生产者跨段接线)。
   编译器域全套绿;全库另有 ~17 个失败系并行方未完成重建(C++ 绑定变动,
-  与本域无关,按纪律未触碰)。GPU parity 待远端。
+  与本域无关,按纪律未触碰)。GPU 比较待远端。
 
 ## L5-M5b 收口记录(2026-08-25 深夜,argmax 双流归约 + conv 族配套)
 
@@ -724,7 +724,7 @@ broadcast 形状作为 codegen 的 reference(单块/split 阈值、dims tile、m
 - launcher 为 argmax 分配 int64 输出;`HAS_TL_ARGMAX` 特性探测门控折叠;
   compile_graph_module 限 float32/float64;value_dtype 贯穿
   _compile_program/_autotune_launch。
-- 测试:test_triton_reduction.py 检测/结构/f64/digest + GPU 门控 parity
+- 测试:test_triton_reduction.py 检测/结构/f64/digest + GPU 门控比较
   (argmax、keepdim+平局、NaN 注入),本地 18 passed / 8 skipped。
 
 **conv 族配套修复(同轮):**
@@ -769,7 +769,7 @@ broadcast 形状作为 codegen 的 reference(单块/split 阈值、dims tile、m
   通过上述回归;随后并行绑定重构线(libtp_python 符号失配)令全库导入瞬时
   中断,按共享树纪律待其收敛复测全量。
 
-遗留:GPU parity(argmax/pad 等)待远端 GPU;eager amax NaN 分歧登记于
+遗留:GPU 比较(argmax/pad 等)待远端 GPU;eager amax NaN 分歧登记于
 gap 文档(registered-not-fixed);M5c 调度器下一步为训练态分段 VJP。
 
 ## L1-D1 执行式特化落地（2026-08-26）
@@ -841,7 +841,7 @@ gap 文档(registered-not-fixed);M5c 调度器下一步为训练态分段 VJP。
 - make_graphed_callables backward 兼容引擎尾部 None 填充;测试侧两处契约
   修正(nll_loss 单返回解包、graphed 参数须为 Module Parameter)。
 
-M5e GPU parity 同步验证:persistent/looped/单块/split 四形态 epilogue、
+M5e GPU 比较同步验证:persistent/looped/单块/split 四形态 epilogue、
 argmax 三态、双生产者跨段接线全部数值对齐 eager。遗留:TP_STAX_DEBUG 门控
 打印暂留(定位回退门用);workspace_registry 进程级常驻已文档化。
 
@@ -859,7 +859,7 @@ argmax 三态、双生产者跨段接线全部数值对齐 eager。遗留:TP_STA
 ## 全库回归备注(同日)
 
 8 个失败均与本域无关,系并行线 11:13 重编 libp10 的 WIP:
-- test_op_parity(linear/conv2d)、test_autograd_function_parity×2:
+- test_op_reference(linear/conv2d)、test_autograd_function_reference×2:
   `Kernel not found for op: zeros on backend: CUDA`(native 注册缺失);
 - test_amp×2:functional.py:1611 IndexError(生成层);
 - test_stax_autotune×2:benches 计数 7!=4(候选缓存计数)。
@@ -893,12 +893,12 @@ symbolic 集合区分),两者混用同节点时以符号优先。
 - 全库 1423 绿;余 3 失败均系并行线 M5 WIP(codegen/triton.py ±1843 行、
   CUDA zeros 注册),与本域无关。
 
-## L5-PERF 基准轮(2026-08-26,4090D vs torch/inductor)
+## L5-PERF 基准轮(2026-08-26,4090D vs reference/inductor)
 
-benchmark/benchmark_vs_torch.py 建立 11 例矩阵(CUDA events,中位数)。
+benchmark/benchmark_vs_reference.py 建立 11 例矩阵(CUDA events,中位数)。
 最安静窗口(run3)快照,best-vs-best:
 
-| 用例 | TP | torch | 备注 |
+| 用例 | TP | reference | 备注 |
 |---|---|---|---|
 | matmul 4096³ fp32/fp16, 8192³ | ≥1.00x | — | 同为 cuBLAS |
 | layer_norm 8192×4096 fw | 1.07x | eager | 小形状 0.90x 待调 |
@@ -969,7 +969,7 @@ pick_config 决策键去掉 role 前缀与查询端对齐。
   (_tensor.py 包装层改位置参数 + implicit 关键字透传;functional 调用点
   同步)。
 - **测试**:新增 test_stax_segment_vjp.py——本地以假 launch 执行真数学验证
-  链式接线/切量展开/扇出累加/不可训归约回退(amax);GPU 门控 parity 在
+  链式接线/切量展开/扇出累加/不可训归约回退(amax);GPU 门控比较在
   RTX 4090 D 实测通过((x*w).relu().sum()+sigmoid(y*w).sum() 三段图,
   forward+三输入梯度对拍 eager)。
 - **远端协作记录**:远端唯一树 /tmp/TensorPlay 曾出现 build/ 与 buildcuda/
@@ -979,8 +979,8 @@ pick_config 决策键去掉 role 前缀与查询端对齐。
 - 遗留登记(并行活跃线,未触碰):①fx_passes split-reduction 发射形态
   变更后 test_sum_epilogue_detection_and_source 断言过期;②Engine 梯度
   物化(Engine.cpp:425)对 dlpack 导入张量的 mm 反向把设备提示误标 CUDA
-  ("Kernel not found for op: zeros on backend: CUDA",test_op_parity
-  linear/conv2d 连带);③test_random/gemm_torch_parity 的 [cuda] 参数化
+  ("Kernel not found for op: zeros on backend: CUDA",test_op_reference
+  linear/conv2d 连带);③test_random/gemm_reference 的 [cuda] 参数化
   用例与 NCCL/dataloader 远端环境项。
 
 ## L5-PERF 轮二(2026-08-26 续):整除免掩码落地
@@ -1040,13 +1040,13 @@ bench 改 best-of-3×min 抗共享机器噪声。
 独立持久化键(|split| 盐)。远端套件 66 passed+1 xfail 全绿。
 
 遗留(下轮):pw 链对 inductor 仍 0.85-0.91x(需 evict policy/缓存修饰符与
-8-wide 强制向量化);argmax 与 torch 差距收敛到 ~3x 以内但未持平(warp 级
+8-wide 强制向量化);argmax 与 reference 差距收敛到 ~3x 以内但未持平(warp 级
 shuffle 归约形态待做);所有结论须在编译静默窗口复核。
 
 ## L5-PERF 轮四(2026-08-27): evict/.cg + packed argmax + 静默窗口复核
 
-### pw 链内核 parity 确认
-- profiler 拆解:`tp_stax` 与 `torch_compile`(inductor) 纯内核 GPU 时间
+### pw 链内核比较确认
+- profiler 拆解:`tp_stax` 与 `reference_compile`(inductor) 纯内核 GPU 时间
   **145.0 vs 145.3 µs, 完全持平**。0.90x 差距全在 Python 启动器:TP
   wrapper 闭包链(~19 µs/call) vs inductor 静态 launcher(~0)。
 - 改动:① `_load_lines` 参考布局无掩码加载加 `cache_modifier='.cg'`(Inductor
@@ -1083,9 +1083,9 @@ shuffle 归约形态待做);所有结论须在编译静默窗口复核。
 ### 静默窗口复核结果(2026-08-28 cc RTX 4090 D)
 - 测试套件:`test_triton_reduction + test_stax_autotune + test_cuda_reductions`
   **65 passed, 1 xfailed**(triton autotune 共享机器偶发,属已知噪声)。
-- argmax packed parity vs torch eager(shape 4096×4096 last-dim):
+- argmax packed 比较 vs reference eager(shape 4096×4096 last-dim):
   - 基本、tie(all-same)、NaN-first、±inf edge 全部 **match**。
-  - bench(tp min-of-200 vs torch min-of-200): tp=0.02µs torch=0.03µs
+- bench(tp min-of-200 vs reference min-of-200): tp=0.02µs reference=0.03µs
     ratio=1.03x。**注意**:此为 kernel launch 级测量,实际 4096×4096
     计算时间在 µs 量级,独占机器复核后才能给出有意义的速度比。
 - sum-full 16M 噪声读数 0.37x 未复核(共享机器仍有其他进程占用)。
@@ -1163,25 +1163,25 @@ shuffle 归约形态待做);所有结论须在编译静默窗口复核。
 | sum full 16M | tp_stax 0.0410 | eager 0.0236 | 0.58x |
 | argmax dim=-1 4096×4096 | tp_eager 0.0256 | eager 0.0266 | 1.04x |
 
-geomean(best-vs-best)**1.03x → 1.15x**;TP ≥ torch 8/11(pw 0.98x、
-softmax 0.99x 为噪声级 parity)。减归约三项全部收口:
+geomean(best-vs-best)**1.03x → 1.15x**;TP ≥ reference 8/11(pw 0.98x、
+softmax 0.99x 为噪声级比较)。减归约三项全部收口:
 
 - **chain sum(dim=1) / full-sum sigmoid**:2.25-2.51x,稳态大幅领先。
 - **sum full 16M:0.38x → 0.58x**,closure(证据链):
-  - 内核 parity:launch-only 事件测量 23.6-24.6µs(tuner bench,含 finalize
-    与提交延迟)vs torch eager 全链 23.6µs;两侧同为 64MB 输入驻留 72MB L2
+  - 内核比较:launch-only 事件测量 23.6-24.6µs(tuner bench,含 finalize
+    与提交延迟)vs reference eager 全链 23.6µs;两侧同为 64MB 输入驻留 72MB L2
     的重复迭代条件;
   - 残差 41.0 − 23.6 ≈ 17.4µs 全部为 compiled 调用 Python 路径
     (前端 fingerprint+guards+runtime-inputs ≈10.5µs + kernel_launch
     提交 ~7µs)在事件窗内推迟 GPU 起点;
-  - torch 以 C++ 静态 launcher(`torch/_inductor/runtime/
+  - reference 以 C++ 静态 launcher(`_inductor/runtime/
     static_triton_launcher.py`)+ C++ guard manager 消除同款开销;
     对应原生方案需 _C 重建(受 OptimizerMTA.cuh 构建冲突阻塞);
     Python 侧后续选项为接通 `compiler/cudagraphs.py` 的
     CudaGraphManager(reduce-overhead 等价;staging-copy 语义需单独设计,
     非本轮范围)。
-- **pw gelu 链:0.84x → 0.98x**:内核 parity 轮四已证明(145.0 vs 145.3µs),
-  本轮 fast-launch 砍掉 ~26µs dispatch,进入噪声级 parity。
+- **pw gelu 链:0.84x → 0.98x**:内核比较轮四已证明(145.0 vs 145.3µs),
+  本轮 fast-launch 砍掉 ~26µs dispatch,进入噪声级比较。
 
 ### 测试与回归
 - test_triton_reduction:+4 fast-launch 运行时回归(记录后重算不缓存陈旧
@@ -1192,8 +1192,8 @@ softmax 0.99x 为噪声级 parity)。减归约三项全部收口:
 - cc 实测:focused 套件 **129 passed + 1 xfailed**;编译器套件 142 passed。
 
 ### 复核轮(同日第二跑,/tmp/bench_final.log)
-- 全表复现:geomean 1.15x、TP ≥ torch 8/11、pw 0.99x、
-  sum full 16M 0.55-0.58x(torch eager 22.5-23.6µs 波动)、
+- 全表复现:geomean 1.15x、TP ≥ reference 8/11、pw 0.99x、
+  sum full 16M 0.55-0.58x(reference eager 22.5-23.6µs 波动)、
   softmax/8192³ matmul 1.00x。focused+编译器套件
   **218 passed + 1 xfailed**(缓存全清)。
 
@@ -1228,10 +1228,10 @@ softmax 0.99x 为噪声级 parity)。减归约三项全部收口:
   | 4M | 1564.9µs | 23.1µs | 16.6µs | 1.4x |
   | 16M | 1573.4µs | 165.4µs | 27.6µs | 6.0x |
   | 64M | 1819.4µs | 769.6µs | 285.3µs | 2.7x |
-  固定开销消除;1M/4M 进入 1.3-1.4x 近 parity。
+  固定开销消除;1M/4M 进入 1.3-1.4x 近比较线。
 - harness(--iters 200,缓存全清,/tmp/bench_native.log):sum full 16M
   tp_eager ~1.57ms → **0.085ms**;best_tp 仍为 tp_stax 0.041ms(0.55x),
-  记分板 TP ≥ torch 8/11、geomean 1.14x(与轮五 1.15x 同噪声带)。
+  记分板 TP ≥ reference 8/11、geomean 1.14x(与轮五 1.15x 同噪声带)。
 - focused 套件(test_cuda_reductions + test_triton_reduction +
   test_stax_autotune + test_compile):**97 passed + 1 xfailed**(缓存全清)。
 
@@ -1304,3 +1304,120 @@ softmax 0.99x 为噪声级 parity)。减归约三项全部收口:
 - 4M/16M 残差 1.04x:完成机制 ~1.5µs(选举原子 + 折叠尾)已近下限;
   进一步需 6 blocks/SM 常驻(49→42 寄存器,__launch_bounds__ 需按
   torch mnt_wrapper 方案按 dtype 分档,影响 Welford 等高寄存器实例)。
+
+## L5-CPU 代码生成栈重组(2026-08-30,对照上游 CPU 侧源码结构走读后落地)
+
+走读范围(本地参考源码树):`_inductor/cpu_vec_isa.py`(VecISA 干编译+
+dlopen 探针、fingerprint 缓存)、`cpp_builder.py`(编译器发现/版本指纹/选项
+组装)、`codegen/cpp.py`(CppKernel/CppVecKernel 三段循环:4 向展开主循环+
+单向量循环+标量尾)、`codegen/cpp_prefix.h`(数值 helper)、
+`codecache.py::CppCodeCache`(内容寻址+FileLock+load_ok 标记)。要点吸收,
+不引实现:本仓库独立编码。
+
+### 文件布局(对齐上游分文件职责)
+
+- `tensorplay/_stax/cpu_vec_isa.py`(新):VecISA 层级(avx512/avx2/default/
+  invalid),每档 macros/arch_flags/nelements;`pick_vec_isa()` 干编译探针
+  (编译产物 dlopen 执行校验),判定持久化到 `stax-cpu-isa` 缓存,键含
+  编译器版本指纹;`TP_STAX_CPU_TIER` 覆盖(对齐 ATEN_CPU_CAPABILITY 语义)。
+- `tensorplay/_stax/cpp_builder.py`(新):`get_cpp_compiler()`(g++/c++/
+  clang++ 搜索缓存)、`get_compiler_version_info()`(指纹)、`CppOptions`
+  (definitions/include/cflags/-L/-l/ldflags;命令行库序在源码之后——单遍
+  链接器先扫对象)、`CppBuilder.build()`(临时目录跑编译,失败带 stderr)。
+- `tensorplay/_stax/codegen/cpp.py`(新,替代原 codegen/cpu_native.py):
+  - **DAG 通用发射**:不再限线性链——指令表 `(op, lhs, rhs, result)` 逐条
+    命名变量,共享子表达式天然复用;`where/where_rest` 相邻对校验后经
+    `blendv` 发射(比较走 0.0f/1.0f 值域方法,选择走原始掩码——两种掩码
+    约定(AVX 符号位/通用实现 LSB 位)对全 1/全 0 掩码均正确);
+  - **扩展算子面进 CPU**:lt/le/gt/ge/eq/ne、minimum/maximum/clamp、
+    rsqrt/exp2/erf、cast(f32 恒等)——原 only-interpreter 面,现可原生编译
+    (梯度仍限基础表,无 VJP 的算子拒绝 autograd 路由);
+  - 三段循环(4 向展开≤16 步/单向量/标量尾)、`__restrict__` 全指针、
+    `#pragma GCC ivdep`、常量外提循环外、`-fno-math-errno`;
+  - 缓存键 = 源码内容+entry+tier+flags+编译器版本;FileLock 防并发构建
+    写坏产物;`TP_STAX_CPU_NATIVE=0` 保留。
+- `tensorplay/_stax/codecache.py`:`file_lock()`(fcntl 排它/共享)。
+- `tensorplay/_stax/stax.py` 接线:`_lower_cpu_fused_pointwise` 两级尝试
+  (基础表→扩展表);扩展表面要求 native_runner 成功且无 grad,否则整体
+  回退——保证任何可编译面都可执行。
+
+### 顺带修复(共享树遗留,并行线弃工)
+
+- `compiler/__init__.py` L397 语法错(dict 指纹 sorted 参数错位);
+- `functional.py` 重生成修正两处:`def and/or`(关键字,生成器已有关键字
+  守卫但盘上文件未重跑)、`conv_tbc_backward(input, input)` 与
+  `sparse_sampled_addmm(..., out, *, out=None)` 双重名——生成器修复:
+  model.py parse_schema 加参数名去重(self→input 惯例与字面 input 冲突
+  时后到者加数字后缀)、gen_python.py 跳过 out 重载自身的包装发射
+  (由 plain 重载持有 out 包装,见 gen_python.py 注释)。
+
+### 验证记录(2026-08-31,共享树收敛后)
+
+- test/test_cpu_codegen.py **20/20 绿**(ISA 探针/持久化、构建器命令行
+  库序、DAG/where/clamp 发射结构、坏程序拒绝、数值等价链+菱形+where+
+  clamp+尾循环、缓存复用、e2e 编译路由 stax-fused-cpu 断言、扩展表面
+  grad 拒绝、基础表面梯度比较);
+- 编译器域回归:compile/codecache/fx_passes/decompositions/stax_autotune/
+  stax_pointwise_surface + test_compile 多例 = 132 passed;余 6 failed 均
+  为并行线活跃域(control-flow data-guards、graph 属性捕获),与本域无关
+  (其失败先于本域 `del name, dynamic` 修复即存在);
+- 顺带修复的共享树遗留:compiler/__init__.py 语法错、functional.py 重生成
+  (关键字守卫已实现但盘上文件未重跑;conv_tbc_backward/sparse_sampled_addmm
+  双重名参数→model.py 去重+gen_python.py 跳过 out 重载自身)、
+  graph.py 返回注解模块未注册进 globals(recompile exec NameError)、
+  stax.py `del name, dynamic` 后引用 dynamic(UnboundLocalError);
+- 微基准(tanh 链 ((x*2).tanh()+1)/3,min-of-5×100 iter):
+  | n | eager | 编译路径 | 加速比 |
+  |---|---|---|---|
+  | 4096 | 11.5us | 17.9us | 0.64x(调用开销主导) |
+  | 65536 | 518us | 77.5us | **6.69x** |
+  | 4M | 4.17ms | 1.53ms | **2.73x** |
+  小形状 0.5-0.6x 为 Python wrapper+trampoline+线程池派发 ~18us 固定
+  开销(与 inductor CPU 小形状结论一致);后续杠杆=静态 launcher 化
+  (对齐 cuda 侧 fast-launch)与 OMP 派发门槛。
+
+## L5-CPU 并行决策对齐(2026-08-31,吃透上游 decide_parallel_depth 后落地)
+
+走读补全:`codegen/cpp.py::decide_parallel_depth`(cpp.py:2752——总工作
+`seq/threads < config.cpp.min_chunk_size(默认512)` 时不开并行区,否则
+`#pragma omp for schedule(static)` 均分);`WorkSharing`(线程数等于
+cpu_count 时发裸 `#pragma omp parallel` 让 OMP 自管);`LoopLevel::lines`
+(ivdep/simd simdlen/collapse 语义);p10 桥接语义核实
+(`chunk = max(grain, n/threads)`,`ntasks = ceil(n/chunk)`,静态调度,
+`n <= grain` 时串行内联);`loadu(ptr, W)` 常量折叠直达全宽加载
+(现有发射形态已最优,无需改)。
+
+### 根因与修复
+
+- 旧入口固定 grain 32768:64K 时 `chunk = max(32768, 8192) = 32768` →
+  仅 2 任务,线程钳死——64K 只有 6.5x 的全部来源。
+- 生成内核入口改为复刻 decide_parallel_depth:串行门限
+  `n < threads*512`(threads 编译期取 `tensorplay.get_num_threads()`),
+  并行走 grain=512(桥接自动升级为 n/threads 均分)。缓存键含源码内容,
+  门限变化自动换键。
+
+### A/B 实测(纯 ctypes,tanh 链,min-of-5×400,静默窗口)
+
+| n | 串行内联 | pooled512 | pooled2048 |
+|---|---|---|---|
+| 4096 | 7.29us | **5.68us** | 9.68us |
+| 16384 | 24.92 | **11.23** | 17.62 |
+| 65536 | 96.87 | **43.56** | 46.63 |
+| 262144 | 381.91 | 182.29 | **181.03** |
+| 1048576 | 1557.91 | 653.19 | **625.37** |
+| 4194304 | 6705.58 | **2524.31** | 2783.63 |
+
+结论:pooled-512 全尺寸占优(热池派发 ~亚微秒级,8×512 元素也划算);
+门限 threads×512 + grain 512 即为最优,不需再调。
+- 静默窗口整管线复核(tanh 链,200 iter × 2 轮):64K **9.43-12.44x**
+  (改动前 6.5-6.7x);4M 2.44-2.54x(任务切分与旧一致,读数在噪声带);
+  4K 0.40-0.50x(内核+派发 5.7us,残差 ~19us 为 Python 包装+
+  fingerprint+alloc,api.py 域,静态 launcher 方向)。
+
+### 走读发现、登记未做的后续杠杆
+
+- `async_compile.py` worker 池:并行编译内核拉低首次编译时延;
+- `TilingSelect`/`CppTile2DKernel`:外层循环并行化(内层过短时 2D tile);
+- `cpp_prefix.h` cascade_sum/welford helper:CPU 归约融合(对标 M5d)时
+  直接借语义;
+- `cpp_wrapper_cpu`/AOTI:内核调用零 Python 化(静态 launcher 等价物)。

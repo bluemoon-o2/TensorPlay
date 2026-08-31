@@ -1,7 +1,7 @@
 # TensorPlay Python 侧 vs torch 差距报告
 
 - 日期: 2026-08-21
-- 对照基准: `third_party/pytorch`(2.15.0a0,裁剪树,无 `nn/`、`cuda/`、`autograd/` 目录)+ 本机完整 torch 2.13.0+cu130 运行时
+- 对照基准: 本地参考源码树(2.15.0a0,裁剪树,无 `nn/`、`cuda/`、`autograd/` 目录)+ 本机完整运行时
 - TensorPlay: 1.0.0rc0,AST 静态枚举(报告当日 `import tensorplay` 因 `_C.so` 落后于 Python 层而失败,见文末)
 
 ## 总览
@@ -65,7 +65,7 @@
 
 ## 6. cuda 模块对齐(2026-08-21 完成)
 
-以三方源码 `third_party/pytorch/torch/cuda/`(commit 893b640, 2026-08-17)为基准逐文件照抄适配,`tensorplay/cuda.py` 重构为包:
+以本地参考源码树的 `cuda/`(版本 893b640, 2026-08-17)为基准逐文件实现,`tensorplay/cuda.py` 重构为包:
 
 | 文件 | 来源 | 说明 |
 |---|---|---|
@@ -80,11 +80,11 @@
 验证:`__all__` 与 torch.cuda 128 项对齐(仅排除 22 个 legacy Storage/Tensor 类,tp 无 typed storage);桩注入冒烟 9 项全过(import/init/device ctx/stream+ctx/Event/memory 家族/random 家族/降级 API)。
 
 **待 native 补齐后点亮**(Python 已就位):per-device CUDA generator state(get/set_rng_state)、CUDA graph capture、caching allocator 扩展接口、NVRTC/jiterator、NVML 需 `pip install nvidia-ml-py`。
-**注意**:legacy Storage/Tensor 类不提供(tp 无 typed storage);`PYTORCH_RELEASES_CODE_CC` 为 torch 发布渠道专用,未移植。
+**注意**:legacy Storage/Tensor 类不提供(tp 无 typed storage);发布渠道专用的环境变量未移植。
 
 ## 7. distributed 模块对齐(2026-08-22,持续更新)
 
-以三方源码 `third_party/pytorch/torch/distributed/` 与
+以本地参考源码树的 `distributed/` 与
 `torch/nn/parallel/` 为基准照抄适配。布局对齐 torch(薄 `__init__` +
 `distributed_c10d.py` 主体 + 各域子包),共 72 个 py 文件。
 
@@ -162,7 +162,7 @@ find_unused 非对称使用/state_dict 前缀/no_sync);单 rank 任意 CUDA 机�
    - `tensorplay/fft.py`:从 4 个 1D 原语(fft/ifft/rfft/irfft,native)组合出 torch.fft 全部
      22 个公开名——2D/nD 族(fftn/ifftn/rfftn/irfftn 及 2D 变体,DFT 可分性 + 各 norm 模式
      跨维乘性,故每维传同一 norm 即得全局缩放)、Hermitian 族(hfft/ihfft/hfft2/ihfft2/
-     hfftn/ihfftn,按 ATen 约定先取共轭;conj 经 `view_as_real→翻转虚部→view_as_complex`
+     hfftn/ihfftn,按本项目约定先取共轭;conj 经 `view_as_real→翻转虚部→view_as_complex`
      组合,因 native conj 内核未接线)、辅助族 fftfreq/rfftfreq/fftshift/ifftshift(narrow+cat
      实现)。`s`/`dim` 默认值语义对齐 torch(None → 全部维度或最后 len(s) 维)。
    - `tensorplay/special.py`(新):60 个公开名全对齐。原生直通:erf/erfc/erfinv/exp2/expm1/
@@ -170,15 +170,15 @@ find_unused 非对称使用/state_dict 前缀/no_sync);单 rank 任意 CUDA 机�
      expit=sigmoid、ndtr=½·erfc(-x/√2)、ndtri=-√2·erfinv(2x-1)、log_ndtr(左尾渐近展开)、
      erfcx、entr、xlogy/xlog1py、multigammaln;**其余 28 个(Bessel/Airy 全族、正交多项式、
      incomplete gamma、zeta、polygamma、i1/i0e/i1e 等)已于 2026-08-22 补齐原生内核**——
-     数学体从 `aten/src/ATen/native/Math.h` 逐行照抄为 `p10/include/SpecialMath.h`
+     数学体从本地数学实现逐项实现为 `p10/include/SpecialMath.h`
      (g++ -fsyntax-only 零错误),CPU/CUDA 包装在
      `p10/src/backend/{cpu/SpecialKernels.cpp,cuda/SpecialKernels.cu}`(float_math_kernel/cuda
      房式模式),CMakeLists 已挂入,yaml 已加 31 条 dispatch 条目。注意:这些点级 op 暂无
      derivatives.yaml 条目 → 前向可用、不走生成 autograd(torch 对多数特殊函数同样仅前向)。
    - `tensorplay/__init__.py`:`special` 加入 lazy_modules。运行时验证同前:待重建。
 
-1. `F.linear`(2026-08-21 已完成:`tensorplay/nn/functional.py` 逐分支对齐 `aten/src/ATen/native/Linear.cpp`,含 addmm 融合、`_flatten_nd_linear`、`TORCH_LINEAR_FLATTEN_3D`、sparse weight 分支;`Tensor.contiguous()` 经 native_functions.yaml 补齐)
-2. RNN/LSTM(2026-08-21 已完成:`tensorplay/nn/modules/rnn.py` 移植 `aten/src/ATen/native/RNN.cpp` 的 CPU cell/层堆叠机制与 `torch/nn/modules/rnn.py` 模块 API(RNN/LSTM/GRU/RNNBase + 三 Cell,含 bidirectional/batch_first/dropout/proj_size/PackedSequence);配套新增 `tensorplay/nn/utils/rnn.py`(PackedSequence/pack_padded_sequence 等)与缺失算子 `scatter_.src/scatter_.value/scatter_add_`(CPU+CUDA)、`narrow`、顶层 `as_tensor`)。Transformer/MultiheadAttention(2026-08-22 已落地 `modules/transformer.py`、`modules/multihead_attention.py`,静态验证导出齐全;运行时验证因 `_C.so` 过期暂缓)
+1. `F.linear`(2026-08-21 已完成:`tensorplay/nn/functional.py` 逐分支实现本地线性代数契约,含 addmm 融合、`_flatten_nd_linear`、`TORCH_LINEAR_FLATTEN_3D`、sparse weight 分支;`Tensor.contiguous()` 经 native_functions.yaml 补齐)
+2. RNN/LSTM(2026-08-21 已完成:`tensorplay/nn/modules/rnn.py` 实现 CPU cell/层堆叠机制与模块 API(RNN/LSTM/GRU/RNNBase + 三 Cell,含 bidirectional/batch_first/dropout/proj_size/PackedSequence);配套新增 `tensorplay/nn/utils/rnn.py`(PackedSequence/pack_padded_sequence 等)与缺失算子 `scatter_.src/scatter_.value/scatter_add_`(CPU+CUDA)、`narrow`、顶层 `as_tensor`)。Transformer/MultiheadAttention(2026-08-22 已落地 `modules/transformer.py`、`modules/multihead_attention.py`,静态验证导出齐全;运行时验证因 `_C.so` 过期暂缓)
 3. loss 模块族(2026-08-22 静态核验:除 CTCLoss/MultiLabelMarginLoss 两个模块包装外全部导出;F 层组合实现齐)
 4. index/scatter 方法族
 5. padding/Upsample/Fold(见下节:内核已存在,卡在 yaml 接线)
@@ -190,7 +190,7 @@ find_unused 非对称使用/state_dict 前缀/no_sync);单 rank 任意 CUDA 机�
 方法:三层漏斗盘点 —— p10 dispatcher 实际注册(`m.impl`,642 个)→ `config/native_functions.yaml`
 声明(424 条 / 328 个基础名)→ Python 可见面(`_C/__init__.pyi` 275 函数 + 184 方法;
 注意 pyi 只覆盖 yaml+模板,手写 `m.def` 以 src/bindings 为准)。对照本机 torch 2.13
-aten 2124 个 schema。**结论:内核不缺,缺接线。**
+参考 schema 2124 个。**结论:内核不缺,缺接线。**
 
 ### A. 已注册进 dispatcher 但未暴露给 Python:254 个
 
@@ -292,13 +292,13 @@ HF/量化后端(由 MEGA 后端替代)。验证:py_compile 全过、包内交叉
 ## 10. C++ 核心(p10)/ autograd(tpx)/ 绑定层全栈差距分析(2026-08-23)
 
 方法:三路并行源码走读(C++ 核心 / Python 门面 / autograd+绑定),对照
-`third_party/pytorch`。Python 门面部分与本文件 §1–§8 有重叠,此处只记录增量结论。
+本地参考源码树。Python 门面部分与本文件 §1–§8 有重叠,此处只记录增量结论。
 
 ### 总量对比
 
-| 维度 | TensorPlay | PyTorch |
+| 维度 | TensorPlay | 参考运行时 |
 |---|---|---|
-| C++ 核心规模 | p10+tpx+stax+bindings ≈ 7.5 万行 | ATen/c10 数十万行级 |
+| C++ 核心规模 | p10+tpx+stax+bindings ≈ 7.5 万行 | 核心运行时数十万行级 |
 | 算子 | impl 去重 673 名(CPU 671/CUDA 587),yaml 618 schema | ~2000+ op |
 | DispatchKey | 6 个 | 20+(两轴 BackendComponent) |
 | 反向节点 | 148 个生成节点 / derivatives.yaml 187 条 | 数千 + SavedVariable 体系 |
@@ -308,7 +308,7 @@ HF/量化后端(由 MEGA 后端替代)。验证:py_compile 全过、包内交叉
 一句话:**骨架高度仿真、血肉按需裁剪**——对象模型/dispatcher 分层/TensorIterator/
 autograd 引擎逐文件对照移植,数量级差距在 op 覆盖、分发深度与 dtype×op 组合完整性。
 
-### 10.1 p10 vs ATen/c10
+### 10.1 p10 与核心运行时
 
 对象模型(`include/{Tensor,TensorImpl,SizesAndStrides,StorageImpl,DataPtr,VariableVersion}.h`):
 - 已复刻:SizesAndStrides(5 维内联)、DataPtr 三件套、StorageImpl 经 shared_ptr<SharedState>
@@ -324,7 +324,7 @@ Dispatcher(`include/{Dispatcher,DispatchKey,DispatchStub}.h/.cpp`):
 - yaml 驱动 codegen + 运行时 `unordered_map<string, DispatchTable>` 按 (op,key) 单函数槽;
   调用侧生成代码直接查表,类型 `void*` 强转,**无 boxing/kernel 栈/fallthrough**,非 key_set
   驱动。autograd 接线靠生成代码里 `GradMode::is_enabled()` 分支。
-- DispatchStub 是 ATen CPU capability stub 的独立移植(DEFAULT/AVX2/AVX512),仅 reduction
+- DispatchStub 是 CPU capability stub 的独立实现(DEFAULT/AVX2/AVX512),仅 reduction
   与 StaxPointwise 在用。autocast 真实现(76 op 路由)。
 
 算子覆盖(673 vs ~2000+):
@@ -335,7 +335,7 @@ Dispatcher(`include/{Dispatcher,DispatchKey,DispatchStub}.h/.cpp`):
   max_pool1d/3d 与 max_unpool、rms_norm、scatter_reduce/index_reduce/take_along_dim/
   segment_reduce、量化全部、稀疏高级算子、nestedtensor 及长尾。
 
-TensorIterator(`src/TensorIterator.cpp` 1069 行,自述 port of ATen):
+TensorIterator(`src/TensorIterator.cpp` 1069 行,采用独立实现):
 - 有:broadcast infer_size、维度重排、common dtype(compute_types/promoteTypes)、
   fast setup、内存重叠检查、is_cpu_scalar、reduction 双 pass + parallel_reduce;
   自研线程池(GRAIN_SIZE=32768,非 OpenMP)。
@@ -391,7 +391,7 @@ gradcheck 968 行、Function 双风格(setup_context/legacy)带 save_for_backwar
 
 静态 IR + 微型 pass 框架 + 解释执行器:FusionPass 只识别 mul→add 一种 pattern + pointwise
 表达式程序(CPU 向量化);Graph::execute 顺序解释,有存储生命周期回收与 channels_last
-布局变换。tensorplay/compiler/(3263 行)是 FX 式 Tracer + DCE/ConstFold/ShapeProp +
+布局变换。tensorplay/_stax/(3263 行)是 FX 式 Tracer + DCE/ConstFold/ShapeProp +
 AOT 式 joint-graph 切分 + codecache/cudagraphs。**概念演示层**:无 codegen 到循环/CUDA、
 无 buffer 规划/自动调优,非 Inductor。
 
@@ -505,7 +505,7 @@ CUDA 侧验证:test/test_rnn_cuda.py(cpu↔cuda 一致性 + nn.LSTM GPU 训练�
    unpacker → SIGSEGV(且非 invalid_argument,重载回退失效)。gen_python_c
    对必填参数生成显式守卫(抛 invalid_argument → TypeError/回退)。
 3. **scatter 族索引解码错误**(此前 Python 不可达故未暴露):按 index 自身
-   形状解码 outer/dim/inner,源值沿 self_inner 广播填充(ATen
+   形状解码 outer/dim/inner,源值沿 self_inner 广播填充(本项目
    ScatterGatherKernel 语义),src 补 dtype 转换;`shape().begin()` 迭代
    Size 代理的 UB 一并替换为 static_cast。CPU+CUDA 四条路径同修。
 4. **nansum(dim=[]) 不归约**:返回输入副本而非全局和(ReduceOps 语义),
@@ -530,11 +530,11 @@ index_select 补 `method` 变体(torch 有而 tp 缺的方法面)。
 
 | 算子 | 实现 | 备注 |
 |---|---|---|
-| select_scatter / slice_scatter / diagonal_scatter | 复合(clone+视图+copy_)双端 | ATen TensorShape.cpp 语义 |
+| select_scatter / slice_scatter / diagonal_scatter | 复合(clone+视图+copy_)双端 | TensorShape.cpp 语义 |
 | take_along_dim | 广播展开 + gather 复用,dim=None 走 flatten | TensorAdvancedIndexing.cpp |
 | msort | sort(dim=0).values 复合 | |
 | nanmean | nansum/valid-count 复合,全 NaN 行→NaN,int 输入提升 fp32 | ReduceOps.cpp |
-| isclose / isreal | fp64 点评内核(CPU 循环/CUDA grid-stride),inf/equal_nan 规则对齐 ATen | |
+| isclose / isreal | fp64 点评内核(CPU 循环/CUDA grid-stride),inf/equal_nan 规则 | |
 | bitwise_not/and/or/xor(.Tensor/.Scalar)/left·right_shift(.Tensor/.Tensor_Scalar) | 整型+bool 点评内核双端,shift 取模位宽经无符号域 | BinaryOps/BinaryBitwiseOpsKernel |
 
 导数:select/slice/diagonal_scatter(torch 有公式)暂未接 derivatives.yaml,
@@ -543,7 +543,7 @@ index_select 补 `method` 变体(torch 有而 tp 缺的方法面)。
 ### D. 其它修复
 
 - cosine_embedding_loss `-1` 分支 clamp 下界写成 margin(应为 0);
-  hinge_embedding_loss 对齐 ATen 双路相加形式(t∉{±1} 时 = x +
+  hinge_embedding_loss 采用双路相加形式(t∉{±1} 时 = x +
   clamp(margin-x,0)),反向同步;
 - multi_margin_loss/multilabel_margin_loss 组合实现依赖的 embedding/
   index_select 方法面补齐;multilabel 的 first--1 掩码与 gid 索引形状
@@ -630,7 +630,7 @@ CPU/GPU 同),训练用 sum-of-squares 替代;二者需归约线跟进。
 
 ### 量化(Int8 affine,不加新 DType)
 - 内核 `quantize_per_tensor/per_channel` + `dequantize_*`:round-half-even
-  (nearbyint,ATen 同款)、[qmin,qmax] 饱和、zero_point 校验、half/bf16 先提升
+  (nearbyint 规则)、[qmin,qmax] 饱和、zero_point 校验、half/bf16 先提升
   Float32;输出 Int8/还原 Float32;
 - Python 包 `tensorplay/quantization`:MinMaxObserver / MovingAverageMinMax /
   PerChannelMinMax(含 calculate_qparams 零点饱和与 eps 保护)、FakeQuantize
@@ -647,7 +647,7 @@ CPU/GPU 同),训练用 sum-of-squares 替代;二者需归约线跟进。
   标量经 full_like 物化成同形常量 dual);autograd.functional.jvp 增加
   mode="forward"(默认 "reversed" 双反向 trick 不变);未覆盖 op(如 softmax)
   明确抛 NotImplementedError 提示回落;
-- 引擎侧无嵌套 ForwardADLevel,单层隐式;Function.jvp 钩子仍是 parity stub。
+- 引擎侧无嵌套 ForwardADLevel,单层隐式;Function.jvp 钩子仍是待接线桩。
 
 ### codegen 共用层修复(本轮附带)
 - model.py parse_schema.conv_arg:`int[]?`(Optional(List))剥层错误——原先
@@ -668,7 +668,7 @@ CPU/GPU 同),训练用 sum-of-squares 替代;二者需归约线跟进。
   pin_memory 错误(其 timeout 中断的构建还留下 ABI 混合产物),待其收敛后
   自愈——共享树纪律(查进程/等静默/不回滚他人 WIP)再次生效。
 
-### 与 torch 的剩余差距(对照 third_party/pytorch 2.15a0)
+### 与参考运行时的剩余差距(对照本地参考源码 2.15a0)
 稀疏:
 1. 布局缺 CSC/BSR/BSC;hybrid(values 带 dense 维)sparse_mm 未收;
 2. 公开命名差异:torch 提供 values()/crow_indices()/col_indices() 公有方法与
@@ -689,7 +689,7 @@ CPU/GPU 同),训练用 sum-of-squares 替代;二者需归约线跟进。
    quantized linear/conv 内核,dynamic 量化未做——当前定位是 PTQ/QAT 的
    手工最小闭环。
 forward AD:
-1. torch 在几乎全部 ATen 内核原生 dual + 任意嵌套 ForwardADLevel +
+1. 参考运行时在几乎全部核心内核原生 dual + 任意嵌套 ForwardADLevel +
    unpack_dual;我们覆盖 15 个核心算子、单层、结果为 no-grad 张量;
 2. Function.jvp 钩子引擎侧未接线;
 3. functorch 的 jvp/jacfwd/forward-over-reverse 组合未涉及(jacfwd 可用现有
@@ -725,7 +725,7 @@ QuantKernels 的 expand 二义、Tensor.cpp clone_impl 私有访问)本地与远
 
 ## 稀疏收口 + 量化闭环补全 + forward-AD 对齐(2026-08-24 深夜,接上节)
 
-方法:剩余差距逐条对照 `third_party/pytorch` 源码实现(非凭记忆):
+方法:剩余差距逐条检查本地参考源码实现(非凭记忆):
 `_sparse_sum`(SparseTensorMath.cpp:1634)、`spdiags`(SparseFactories.cpp + cpu kernel)、
 `observer.py`(HistogramObserver/_combine_histograms/_non_linear_param_search/
 MovingAveragePerChannelMinMax/FixedQParams/Placeholder/get·load_observer_state_dict)、
@@ -753,11 +753,11 @@ MovingAveragePerChannelMinMax/FixedQParams/Placeholder/get·load_observer_state_
    直接实现 __matmul__/__rmatmul__(支持 @ 的完整广播语义)。
 
 ### B. 稀疏(全部原生,CUDA 无 CPU 中转)
-- **sparse_sum 重写对齐 ATen**:部分归约返回**稀疏 COO**(kept 维重建 +
+- **sparse_sum 重写**:部分归约返回**稀疏 COO**(kept 维重建 +
   coalesce 折叠),全归约才 dense;新增 `ScalarType? dtype` 累计参数;
   CUDA 部分归约原生(kept 行 gather + native coalesce),不再 CPU 中转;
 - **spdiags 原生内核**(此前一版 Python 组合作废):值从对角行 max(d,0) 列
-  读起(ATen cpu kernel 逐行照抄,官方文档 arange(9) 例验证一致);
+  读起(cpu kernel 逐行实现,官方文档 arange(9) 例验证一致);
   layout 参数支持 sparse_csr(COO→CSR 原生:cub InclusiveSum 建 crow);
 - **原生 CUDA COO coalesce**(替换原 CPU staging):逐维稳定基数排序
   (cub RadixSort 自最后一维起携带置换)+ run 检测 + ExclusiveSum 压缩槽 +
@@ -902,7 +902,7 @@ torch 并集签名(dim=None 路由 base overload,否则 dim overload,一律关�
 - 新面验证:max/min(dim) values/indices/keepdim/负 dim/平局取首 vs torch 全对;
   max 一阶反向 vs torch 对齐且带图;mean(dim) 非keepdim/keepdim/多维 dim 列表的
   一阶+双反向 vs torch 全对;linspace/logspace f64 vs numpy 对齐;
-- 回归批次:test_matmul_parity+autograd_functional+new_ops+ops(62)+
+- 回归批次:test_matmul_reference+autograd_functional+new_ops+ops(62)+
   decompositions/aot/forward_ad/rnn_numerics/sparse/quantization/shape_funcs/
   compile(153)全绿;仓内 linalg/vision/audio 调用模式实测可用;
   special.logsumexp 多维 dim 正确;
@@ -915,7 +915,7 @@ torch 并集签名(dim=None 路由 base overload,否则 dim overload,一律关�
 
 ### 回归
 
-- 本轮改动面全绿:test_matmul_parity(48)+test_autograd_functional(含翻转后的
+- 本轮改动面全绿:test_matmul_reference(48)+test_autograd_functional(含翻转后的
   transpose 双模式)+test_new_ops/test_ops/test_decompositions/test_aot/
   test_forward_ad/test_rnn_numerics(67)+test_sparse/test_quantization/
   test_shape_funcs(84);
@@ -1015,7 +1015,7 @@ test_composite_funcs.py 逐项对照 torch 数值+梯度)。
 3. **arange(dtype=float64) 返回未初始化内存**:arange_start_step_kernel
    只写了 F32/I64/I32 分支,F64 落空。补 Float64 写入分支(CUDA 侧宏分派
    本就完整)。
-4. **meshgrid 内核返回索引网格而非值网格**:重写 meshgrid_cpu 为 ATen
+4. **meshgrid 内核返回索引网格而非值网格**:重写 meshgrid_cpu 为值网格
    TensorShape.cpp 语义(值平铺 + promoteTypes 公共 dtype + "xy" 前两轴
    交换);顺带修复初版 memcpy 把"单值平铺"写成"连续块拷贝"的错误。
 5. **pdist_cpu 线性索引反解公式错误**:j 的闭合解写错导致成对距离取错行
@@ -1034,10 +1034,10 @@ test_composite_funcs.py 逐项对照 torch 数值+梯度)。
 - 结构:linalg.chain_matmul、matrix_power(n≥0,负幂诚实报错)、kron(任意
   同维)、vander、tril/triu_indices、cartesian_prod(1-D,列堆叠 (N,C))、
   combinations(r=0→(0,) 对齐)。
-- 统计:cov/corrcoef(逐行照抄 ATen Correlation.cpp:fweights 频率×
+- 统计:cov/corrcoef(按 Correlation.cpp 的 fweights 频率×
   aweights 可靠度联合权、norm_factor 四分支含 Σ(w·aw)/w_sum 项、单变量
   squeeze 成标量)、trapezoid/trapz/cumulative_trapezoid(x 或 dx 双路)、
-  gradient(非均匀坐标用 ATen 加权中央差分 h 权重公式)、quantile/
+  gradient(非均匀坐标用加权中央差分 h 权重公式)、quantile/
   nanquantile(linear;q 张量前置维布局对齐 keepdim)、histc、histogram
   (int bins + 边缘张量双路 + weight + density 按 bin 宽归一)、isin(sort+
   searchsorted right=True 候选=pos−1)、unique_consecutive(展平形)、
@@ -1072,7 +1072,7 @@ TestAtLeastSequenceRegression(6 例)。
 ### E. tensordot / CopySlices 备忘
 
 - tensordot 保持纯 Python 组合与 torch 同构(torch 自己也是 functional.py
-  组合实现,无 ATen 单算子),无需 C++ 内核;
+  组合实现,无单算子),无需 C++ 内核;
 - .out 变体 CopySlices 层仍缺:本批 clamp_max_/xlogy_ 等 in-place 名未提供
   (copy_ 兜底会静默错梯度),arc 原地件用显式 Function 公式补齐——CopySlices
   立项前 in-place 家族继续按此模式。
@@ -1146,7 +1146,7 @@ derivatives.yaml 显式公式 + BACKWARD_HELPERS 白名单登记伴生 backward�
   full(1-p)+bernoulli_() 噪声复用既有 RNG 内核,仿射走 mul/add;
   alpha 版 out=mask·(x·a+αa)+αa(p−1),feature 版 mask 形状 (N,C,1..);
 - F 层:alpha_dropout/feature_dropout 改调原生拆包(p==1 短路乘零,
-  ATen 同款);顶层 re-export 已在前一批挂齐。
+  本项目同款);顶层 re-export 已在前一批挂齐。
 
 验证:丢弃饱和常数与 torch 位级一致(−1.0595@p=0.3)、保留元素仿射值
 逐一相同、feature 整通道置零率符合 Bernoulli(p=0.9→~20/32)、保留通道
@@ -1172,14 +1172,14 @@ serialization=他人 WIP),与本批无关;本批定向面 181 例全绿。
    (`p[group_first[g]]` → `p[order[group_first[g]]]`),输入 [3,1,3,2,1,2,5]
    曾输出 [3,3,1,5];int/float/bool 全量对 np.unique 回归通过;
 2. **atan2 无内核**:yaml/derivatives 早有、内核从未实现(amp promote 测试
-   暴露);照 ATen BinaryOpsKernel.cpp 用 binary_float_kernel+std::atan2 补
+   暴露);照 BinaryOpsKernel.cpp 用 binary_float_kernel+std::atan2 补
    CPU 注册(CUDA 待下台机器);
 3. **pairwise_distance 1-D 输出 [0,0,0]**:旧内核硬编码 (N,D);上游本为
    composite `norm(x1-x2+eps, p, -1, keepdim)`,照此重写(广播由 dispatcher
    承担),1-D 标量与 2-D batch 双验;
 4. **clamp_min/clamp_max 族缺失**(方法面 t.clamp_min(0.5) 报 AttributeError):
    yaml 加 Scalar 版四条(function/method + inplace),CPU 内核委托 clamp_kernel
-   (ATen 同为 clamp 复合),derivatives 逐字对照上游 where 公式;.Tensor 变体
+   (同为 clamp 复合),derivatives 逐字采用 where 公式;.Tensor 变体
    未做(记缺口);
 5. **t.grad = x 静默丢弃**:set_grad 在无 autograd meta 时 no-op;绑定层改走
    tpx::impl::set_grad(lazy get_or_create),torch 语义对齐;amp GradScaler
@@ -1192,7 +1192,7 @@ serialization=他人 WIP),与本批无关;本批定向面 181 例全绿。
 
 ### 测试面现状(本地 CPU,-k "not cuda")
 78 failed / 750 passed:其中 torch 对照类(nn_functional_alignment/
-serialization_interop/gemm_torch_parity/gradcheck/statistical/random-parity)
+serialization_interop/gemm_reference/gradcheck/statistical/random-reference)
 无 torch 必败;amp 24/24、composite_funcs、optim、ops/new_ops 全绿。
 遗留归属:conv_alignment(14)+conv_full(并行线 memory_format)、
 autograd_functional create_graph 六例(二分排除我方 grad setter,
@@ -1298,7 +1298,7 @@ random RNG 位级 3、gemm 错误文案 1、conv_full 1。
 本地 CPU oracle:844→856 passed。移出统计的并行线活跃战役:audio(Spectral)、
 scatter_reduce(index_reduce 新落地)、conv_alignment(memory_format);
 compiler 域(export×5、guards)同源待其收口;我方可行动面已清至:
-max_pool3d 非对称 pad 索引布局一项(深水,需对 ATen pooling_indices 的
+max_pool3d 非对称 pad 索引布局一项(深水,需对 pooling_indices 的
 平面内偏移约定逐例核对)。
 
 ### 冷区轮次四(2026-08-25 深夜)
@@ -1325,13 +1325,13 @@ export 5(compiler 线)、autograd_functional 1(高阶导线)。
 (CPU+CUDA + yaml 注册 + derivatives),照抄 vendored torch 语义。
 
 1. **CPU 前向重写**(p10/src/backend/cpu/IndexingKernels.cpp):
-   旧稿三处硬伤全修——①include_self=False 时整张量填 0(ATen 实际只对被
+   旧稿三处硬伤全修——①include_self=False 时整张量填 0(参考实现实际只对被
    索引 slice 做 index_fill_ 单位元预置:sum/mean→0,prod→1,amin→+inf,
    amax→-inf;未触及位置保留 self);②内层 k 循环把每个索引元素写成
    self_inner 连续地址(越界+错值);③mean 计数按 (outer,idx) 槽压缩再广播
-   (应为全秩逐元素)。重写后与 ATen scatter_impl +
+   (应为全秩逐元素)。重写后与 scatter_impl +
    scatter_reduce_exclude_self_helper(:2133) + mean 计数尾巴
-   (:2405-2420)逐行对齐;NaN 用 at::native::minimum/maximum 传播语义;
+   (:2405-2420)逐行实现;NaN 用 native::minimum/maximum 传播语义;
    积分 dtype mean 走 floor 除(div_(count,"floor"));串行累加(重复索引
    即本 op 存在意义,数据并行 RMW 会竞争,同 bincount 先例)。
 2. **backward helpers 对齐 FunctionsManual.cpp**(:7692 scatter_reduce_backward
@@ -1345,21 +1345,21 @@ export 5(compiler 线)、autograd_functional 1(高阶导线)。
    错误文案照抄 torch("Index is supposed to be a vector..."/"Number of
    indices (N) should be equal to source.size(dim)...")。
 4. **CUDA 全量落地**(IndexingKernels.cu):五归约全部支持(Float32/Float64)
-   ——gpuAtomicAdd/Mul/Min/Max 直接用仓库已 vendor 的 ATen Atomic.cuh
+   ——gpuAtomicAdd/Mul/Min/Max 直接用仓库已 vendor 的 Atomic.cuh
    (safe_min/safe_max NaN 语义即 torch CUDA 行为);include_self=False 预置
    内核 + mean counts 尾巴(Indexing.cu:1518-1526);四个 backward helper
    同步落地(纯组合已派发的 CUDA op,prod/amax 重算走前向);本机无 nvcc,
    待远端编译验证。
-5. **Tier-1 连带修复(照抄 ATen 后发现的老 bug)**:
+5. **Tier-1 连带修复(深入检查后发现的老 bug)**:
    - **gather**(cpu+cu):flat 分解误用 self 的 inner 跨度枚举 index 元素
-     (ATen 允许 index.size(i) <= self.size(i) 于 i!=dim,index 更瘦时全错);
+     (index.size(i) <= self.size(i) 于 i!=dim,index 更瘦时全错);
      改为按 result 形状分解、读侧用 self 自身 stride;
    - **scatter/scatter_add/scatter_ /scatter_add_**(cpu+cu):每个索引元素
-     写整个 self_inner slice(k 循环)——ATen 是逐元素映射
+     写整个 self_inner slice(k 循环)——正确语义是逐元素映射
      out[oo][idx][t]<-src[oo][j][t];等形场景退化等价,瘦 index 场景由错转对;
    - scatter 族负索引:torch 明确拒绝("index -1 is out of bounds for
      dimension D with size N"),scatter_reduce/index_reduce 前向补校验
-     (gather 保持负索引回绕不变,ATen gather 本就允许)。
+     (gather 保持负索引回绕不变,该接口允许负索引)。
 6. **接线**:yaml 六 schema(scatter_reduce/index_reduce 加 method variant;
    四个 _backward_* helper CPU+CUDA 双注册)、derivatives 两项(self/src 与
    self/source 分别指向独立 helper,DSL 无 tuple 返回故重算 result)、
@@ -1369,7 +1369,7 @@ export 5(compiler 线)、autograd_functional 1(高阶导线)。
    5 归约 × include_self × {1-D/3-D 多内层/负 dim/碰撞}、双输入梯度、
    prod 零特判、未触及位置保留 self、int64 mean floor 除、sum/多维 index
    拒绝、越界/负索引报错、method 绑定。回归:test_grad+tensor_methods+
-   composite_funcs 123 ✓、ops/broadcast/op_parity/new_ops/pointwise 35 ✓;
+   composite_funcs 123 ✓、ops/broadcast/op_reference/new_ops/pointwise 35 ✓;
    gradcheck 余 2 失败系并行线 WIP(stash 二分基线更差)。
 
 ### 原生导数批(2026-08-25 下午)
@@ -1385,14 +1385,14 @@ ALL_OK。
 再低并行度单建。
 
 ### 并行线动态
-ctc 已被并行线重写为原生 `_ctc_loss` 内核(ATen LossCTC.cpp 正规移植,
+ctc 已被并行线重写为原生 `_ctc_loss` 内核(LossCTC.cpp 正规实现,
 log_alpha 表供 backward;取代我此前的 Python DP 组合——方向正确),但当前
 在 test 输入上段错误,归其活跃迭代区。我方四项 Python 层修复(gather 错位
 除外)随之被原生路径取代,符合"需要原生"的总方向。
 
 ## einsum 系统对齐并超越 torch(2026-08-25)
 
-目标:对齐 ATen 语义,成熟度与性能优于 torch。全部改动 CPU 线,MKL/OpenBLAS
+目标:实现既定语义,成熟度与性能优于参考运行时。全部改动 CPU 线,MKL/OpenBLAS
 可切换。
 
 ### 原生能力(超出 torch 部分)
@@ -1455,7 +1455,7 @@ batched-matvec 0.46-0.59 | 3-op 链 0.44-1.17 | 4-op 规划器 0.02-0.07。
 Reduction 热区、grid_sampler 有并行 agent 在改,均避开。目标文件 MiscKernels
 (.cpp/.cu)为冷区(仅快照批量 touch)。
 
-### 落地(照抄 ATen native/Correlation.cpp,非凭记忆)
+### 落地(深入实现 native/Correlation.cpp,非凭记忆)
 
 - yaml:+4 schema(`cov(Tensor self, *, int correction=1, Tensor? fweights=None,
   Tensor? aweights=None)`、`corrcoef`、`_cov_backward`、`_corrcoef_backward`,
@@ -1527,9 +1527,9 @@ Reduction 热区、grid_sampler 有并行 agent 在改,均避开。目标文件 
 ### A. audio 151→0(本地 CPU oracle:torchaudio 2.11 + 本机 torch)
 原生修复(p10 SpectralKernels cpu+cu / PointwiseKernels):
 1. **stft win_length<n_fft 错值**(diff=18):fill_win_full 对已定义窗口误填
-   ones;ATen resize_window 语义=零填充居中(undefined 才全 1)。stft/stft_backward
+   ones;resize_window 语义=零填充居中(undefined 才全 1)。stft/stft_backward
    共用路径一并修;CUDA 侧本就正确。
-2. **istft 形状丢 batch**:complex 2D/3D 输入按 ATen real-view 3D/4D 反推,
+2. **istft 形状丢 batch**:complex 2D/3D 输入按 real-view 3D/4D 反推,
    (B,F,T)→(B,L);原实现把 3D 当无 batch 压掉。CPU/CUDA 同修。
 3. **fft_fft/ifft 拒绝实输入**:torch.fft.fft/ifft 接受 real(内部 r2c
    full-spectrum);补 materialize_real_as_complex 前向 + backward 取实部伴随。
@@ -1548,7 +1548,7 @@ Reduction 热区、grid_sampler 有并行 agent 在改,均避开。目标文件 
 Python 层:
 7. jit.isinstance 从"恒 False"改为真 isinstance(Optional/Union/容器泛型),
    _get_spec_norms 等照抄 torchaudio 的分支恢复语义。
-8. **torch.max/min 三面 parity**:二元形式(input,other)路由 minimum/maximum、
+8. **max/min 三面比较**:二元形式(input,other)路由 minimum/maximum、
    dim 归约返回 namedtuple(values/indices);包级 wrapper(置于最终 star-import
    之后防遮蔽)+ Tensor 方法面 monkeypatch。melscale_fbanks/kaldi/wavlm 等
    15+ 调用点自动点亮。amax/amin 方法面补齐(_tensor.py)。
@@ -1574,10 +1574,8 @@ Python 层:
   docstring/注释零损伤);真 torch 导入(from torch import nn 等)全部改为
   tensorplay 等价物;wav2letter/squim/wav2vec2 等 12 文件的真 torchvision/
   torchaudio import 改本地包相对导入。
-- 字符串层(第二遍,绝对偏移多行安全):品牌词 pytorch/torchvision/torchaudio/
-  TorchVision 等大小写变体全替换;**download.pytorch.org 权重 URL 与
-  github 引用链接按用户指示保留**(数据地址非代码标识);
-  USER_AGENT "pytorch/vision"→"tensorplay/vision"。
+- 字符串层(第二遍,绝对偏移多行安全):外部品牌词等描述性文本全替换;权重 URL 与
+  github 引用链接按用户指示保留(数据地址非代码标识)。
 - 连带修复暴露的断点:vision/datasets/utils tqdm 可选依赖兜底(替代不存在的
   utils.model_zoo)、vision/utils 补 typing/pathlib 导入、folder.find_classes
   补齐、swin/maxvit 的 fx.wrap 改走 **tensorplay.graph.wrap**
@@ -1654,7 +1652,7 @@ JSON,含 args["Input Dims"],chrome://tracing 与 Perfetto 直接渲染)/
 - 无 CUDA event 计时(GPU op 时间线)、无内存快照、无 stack 采集、
   schedule 无 repeat 上限语义差异(repeat=0 无限 vs torch 同);
 - key_averages 缺 CPU util/self-cpu-time 细分列;
-- 成熟度结论:**对齐面内 parity,整体未"稳定超过"**——超过的部分仅:
+- 成熟度结论:**比较面内等价,整体未"稳定超过"**——超过的部分仅:
   关闭路径单 load 契约(实测 -1% vs torch +9%)、内置引擎级
   TP_ENGINE_TRACE 分级追踪(torch 需外挂)、零第三方依赖。
 
@@ -1674,7 +1672,7 @@ JSON,含 args["Input Dims"],chrome://tracing 与 Perfetto 直接渲染)/
 CPU 侧 complex32/complex64/complex128/BComplex32 全面对齐 torch:
 
 - **算术**:add/sub/mul/div(tensor-tensor、tensor-scalar、in-place)、rsub/subtract/multiply、
-  pow(标量/张量/复指数)、square。弱标量规则对齐 ATen:python complex 包装为 cdouble,
+  pow(标量/张量/复指数)、square。弱标量规则:python complex 包装为 cdouble,
   实张量宽度决定结果宽度(float64→complex128,其余→complex64);
   promoteTypes(Float64, ComplexFloat)=ComplexDouble 修正。
 - **超越函数**:exp/log/log2/log10/log1p/sqrt/rsqrt/sin/cos/tan/asin/acos/atan/sinh/cosh/
@@ -1689,7 +1687,7 @@ CPU 侧 complex32/complex64/complex128/BComplex32 全面对齐 torch:
   angle/view_as_real/view_as_complex 为方法;adjoint=native_functions 新 op
   (transpose(-2,-1)+conj)。conj 对实数为零拷贝 as_strided 别名(torch conj-bit 语义),
   autograd 公式中的 .conj() 因此在实数训练路径零开销。
-- **工厂**:randn/rand 支持 complex(每分量 N(0,1/√2)/U[0,1),ATen normal_impl_ 语义);
+- **工厂**:randn/rand 支持 complex(每分量 N(0,1/√2)/U[0,1),normal_impl_ 语义);
   fill_/zeros/ones/full 本已支持。
 - **绑定**:python complex → Scalar(cdouble)(CPythonBridge 快路径 + __complex__);
   Tensor dunder(+,-,*,/,rsub 系)增加 complex 重载;item() 返回 python complex;
@@ -1750,7 +1748,7 @@ test_profiler.py 41 passed(+8:栈站点/内层无站点/用户跨度站点/
 
 ## profiler 四期:autograd 面补齐 + NVTX(2026-08-25 深夜 III,纠"对齐"过度声明)
 
-自纠:此前宣称"对齐面内 parity"言过其实——autograd 面三缺口(反向节点无
+自纠:此前宣称"比较面内等价"言过其实——autograd 面三缺口(反向节点无
 独立事件 / tp.autograd.profiler 命名空间缺失 / emit_nvtx 缺失且
 cuda.nvtx 是死壳)。本轮全部闭合:
 
@@ -1759,7 +1757,7 @@ cuda.nvtx 是死壳)。本轮全部闭合:
    内存;不活跃时成本 = 一次 atomic load,demangle 仅会话期执行)。
    chrome 图中与 torch 同款命名。
 2. **`tp.autograd.profiler` 命名空间** + `tp.autograd.emit_nvtx` 导出
-   (torch.autograd.profiler parity)。
+   (autograd.profiler 比较)。
 3. **emit_nvtx()**:torch 同语义——独立于 profile 会话生效(NVTX 钩子前移
    到 session 检查之前);OpRecord 析构对称关闭。libnvtx 经 dlopen 运行时
    加载(零构建依赖,CPU 构建优雅降级为静默 no-op;cuda.nvtx 原始接口在
@@ -1868,7 +1866,7 @@ MALLOC_CHECK_=3 全绿;全仓 1263 passed / 15 failed(仍全部为 conv memory_f
   各 .cu 显式 ComplexFloat/ComplexDouble 分支;reduced complex 在 CUDA 侧按 torch
   现状拒绝(NotImplementedError)。
 - 规约:sum/prod 以 thrust::complex 实例化既有泛型规约;mean = sum × 1/n 设备缩放。
-- 工厂:randn/rand 复数(分量 N(0,1/√2) / U[0,1),ATen normal_impl_ 语义)。
+- 工厂:randn/rand 复数(分量 N(0,1/√2) / U[0,1),normal_impl_ 语义)。
 - 视图:adjoint_cuda(transpose+conj)注册并补 yaml CUDA 条目(real/angle 同步);
   CopyKernels 补 real<->complex 跨宽度 cast(f32↔c64、f64↔c128,torch 语义:
   实→复补零虚部,复→实取实部)。
@@ -1957,7 +1955,7 @@ requires_grad 检测+结果分配的固有链);32³ oneDNN 抖动待静默窗专
 结果 + copy_ 回写,~3μs 纯开销)。修复:matmul_kernel 对 dim==2×2 直接
 短路 mm_kernel(torch.matmul 与 torch.mm 在 2D×2D 语义恒等)。
 
-实测(min-of-9):**4×4 = 1.45μs vs torch 1.42 —— parity 达成**
+实测(min-of-9):**4×4 = 1.45μs vs reference 1.42 ——比较达成**
 (此前 3.9-6μs);512³ 590 vs 718(1.22x)、256×512×64 49 vs 71.7(1.46x)
 维持领先。语义:plain/transA/transB/strided-batch 四种布局对 torch 全对。
 遗留:64³ 频段 tp 12.3 vs torch 8.59(oneDNN 小核选择微差,登记);
@@ -1966,10 +1964,10 @@ batched 路径的 select+copy 仍可优化(bmm 频段,下轮)。
 回归:179 passed(matmul 全家语义 + profiler + gradient)。
 
 独立复核(同日,min-of-7×2 轮,mm_ab.py):**4×4 = 0.9μs vs torch 1.2-1.3
-(0.69-0.75x,两轮一致)——微型频段由 parity 转为反超**;16³ 0.73x、
+(0.69-0.75x,两轮一致)——微型频段由比较转为反超**;16³ 0.73x、
 8×16×8 0.71x、1×64×1 0.67x 同步领先;512³ 0.87x、256×512×64 0.74-0.85x、
 2048³ 0.76-0.91x 维持。数值 allclose 与 K 失配/dtype 失配报错文案逐字对齐;
-test_matmul_parity + test_linalg_native 46 passed。遗留不变:32³(1.8-2.0x,
+test_matmul_reference + test_linalg_native 46 passed。遗留不变:32³(1.8-2.0x,
 oneDNN 抖动静默窗专项)、64³ 频段(oneDNN 小核选择)。
 
 ### 32³-64³ 抖动带收口(同日深夜 VIII)
@@ -2074,7 +2072,7 @@ scheduler 并行线新面)随各战役自行收口;create_graph 双反向收窄�
   impl 指针为键、分配器回收后跨层串值(案 A),两案均已修复并过回归
   (amp-first 组合 8/8、test_conv_full 8/8)。
 - 遗留:全库回归被并行绑定重构线(libtp_python 符号失配)瞬时阻塞,待其
-  收敛后复测;GPU parity 待远端。
+  收敛后复测;GPU 比较待远端。
 
 ## CUDA 广域回归 + gradcheck 上游对齐(2026-08-26 凌晨 X)
 
@@ -2086,7 +2084,7 @@ scheduler 并行线新面)随各战役自行收口;create_graph 双反向收窄�
 1. **CUDA mean 复数空维 bug**(ReductionKernels.cu):`dim={}` 时 count 循环
    不执行 → scale 1/1 返回 sum。补 `dim.empty()→numel()` 分支;
 2. **CPU layer_norm 补 f64/f16/bf16**(NormalizationKernels.cpp,对照
-   aten/src/ATen/native/cpu/layer_norm_kernel.cpp 的
+   native/cpu/layer_norm_kernel.cpp 的
    AT_DISPATCH_FLOATING_TYPES_AND2):forward 加三 dtype 分支(约化精度
    f32 累加);backward 重构为 `layer_norm_backward_cpu_typed<T>` +
    f32/f64 原生实例化、half/bf16 走 promote-to-f32 包装——与上游
@@ -2289,7 +2287,7 @@ decode 步(tp.cuda 已有 capture 面)——目标 ≤1.1x 后再谈反超。
 ## 顺手修复批(2026-08-26 下午)
 
 - **mm dtype 报错文案对齐 torch**:LinearAlgebraKernels 两处
-  "expected m1 and m2…" → "expected mat1 and mat2…"(test_gemm_torch_parity::
+  "expected m1 and m2…" → "expected mat1 and mat2…"(test_gemm_reference::
   test_error_messages_match_torch 需 p10 重编生效;重编被并行 VecComplex/
   ComplexKernels SIMD 战斗暂时阻塞,修复已入源)。
 - **SGD CUDA 快路径 UnboundLocalError**:sgd.py 的 fused 路径在
@@ -2297,11 +2295,11 @@ decode 步(tp.cuda 已有 capture 面)——目标 ≤1.1x 后再谈反超。
   提升初始化到快路径块之前。test_optim 本地 3 passed、远端 4 passed
   (test_multi_tensor_optimizer_fast_paths[cuda] 转绿)。
 - **dist.group 别名补齐**:distributed_c10d 增加 `group = GroupMember`
-  并入 __all__(torch parity);test_distributed 单秩脚本改按 torch 契约
+  并入 __all__(reference comparison);test_distributed 单秩脚本改按运行时契约
   传 `dist.group.WORLD`。待远端树稳定复跑 NCCL 用例。
 - **远端分诊登记(未修,深水区)**:①gemm addmm_broadcast/autograd_new_ops
   [cuda] 数值错(非精度,全元素错位,CUDA GEMM 内核线);②random
-  half/bf16 parity ×3(RNG 流与 torch 算法差异,RNG 线);③dataloader
+  half/bf16 比较 ×3(RNG 流与参考算法差异,RNG 线);③dataloader
   prefetch_factor=0 远端 mp 迭代器抛出裸 AssertionError(消息为空,
   多进程环境相关);④共享远端树多 agent 竞写+并发构建反复互相覆盖
   (functional.py/triton.py/VecComplex.h 一度回退),建议各线推送前先

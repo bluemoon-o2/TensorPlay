@@ -23,6 +23,8 @@
 #include <cstring>
 #include <utility>
 #include <type_traits>
+#include <optional>
+#include <string>
 
 namespace tensorplay {
 namespace cuda {
@@ -35,7 +37,19 @@ namespace cuda {
     } \
   } while (0)
 
+// Canonical division from the arithmetic unit.  The complex branch of
+// true_divide reuses it instead of restating the promotion table.
+Tensor div_kernel(const Tensor& self, const Tensor& other);
+
 namespace {
+
+// Weak scalar participation: a scalar only promotes the tensor dtype when it
+// carries a floating type of its own.
+inline DType scalar_promote(DType t, const Scalar& s) {
+    if (!isFloatingType(s.dtype())) return t;
+    if (isFloatingType(t)) return t;
+    return DType::Float32;
+}
 
 constexpr int kThreads = 256;
 
@@ -256,15 +270,20 @@ template <typename F>
 Tensor binary_float_cuda(const Tensor& a_in, const Tensor& b_in, F f, const char* name) {
     DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
     if (!isFloatingType(dt)) dt = DType::Float32;
-    Tensor ac = a_in.to(dt).expand(broadcast_shapes(shape_of(a_in), shape_of(b_in))).contiguous();
-    Tensor bc = b_in.to(dt).expand(shape_of(ac)).contiguous();
-    Tensor out = Tensor::empty(shape_of(ac), dt, a_in.device());
+    // Reduced-width inputs are evaluated in Float32 and narrowed once at the
+    // end; the launches below only ever address float or double buffers.
+    DType compute_dt = (dt == DType::Float64) ? DType::Float64 : DType::Float32;
+    Tensor ac = a_in.to(compute_dt)
+                    .expand(broadcast_shapes(shape_of(a_in), shape_of(b_in)))
+                    .contiguous();
+    Tensor bc = b_in.to(compute_dt).expand(shape_of(ac)).contiguous();
+    Tensor out = Tensor::empty(shape_of(ac), compute_dt, a_in.device());
     int64_t n = out.numel();
-    if (n == 0) return out;
+    if (n == 0) return (dt == compute_dt) ? out : out.to(dt);
     dim3 grid, block;
     launch_ew(grid, block, n);
     auto stream = getCurrentCUDAStream().stream();
-    if (dt == DType::Float64) {
+    if (compute_dt == DType::Float64) {
         fm_binary_f64_kernel<<<grid, block, 0, stream>>>(
             n, ac.data_ptr<double>(), bc.data_ptr<double>(), out.data_ptr<double>(), f);
     } else {
@@ -272,7 +291,7 @@ Tensor binary_float_cuda(const Tensor& a_in, const Tensor& b_in, F f, const char
             n, ac.data_ptr<float>(), bc.data_ptr<float>(), out.data_ptr<float>(), f);
     }
     CUDA_CHECK(cudaGetLastError());
-    return out;
+    return (dt == compute_dt) ? out : out.to(dt);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,10 +327,11 @@ Tensor rsub_scalar_cuda(const Tensor& self, Scalar other, Scalar alpha) {
     Tensor full = Tensor::full({}, other, dt, self.device())
                       .expand(shape_of(sc)).contiguous();
     double al = alpha.toDouble();
+    // other - alpha * self: alpha scales the subtrahend, which is self here.
     return binary_same_cuda(sc, full,
                             [al] __device__ (auto s, auto o) {
                                 using T = decltype(o);
-                                return static_cast<T>(o * al - s);
+                                return static_cast<T>(o - al * s);
                             },
                             "rsub");
 }
@@ -321,18 +341,24 @@ Tensor rsub_tensor_cuda(const Tensor& self, const Tensor& other, Scalar alpha) {
     return binary_same_cuda(self, other,
                             [al] __device__ (auto s, auto o) {
                                 using T = decltype(o);
-                                return static_cast<T>(o * al - s);
+                                return static_cast<T>(o - al * s);
                             },
                             "rsub");
 }
 
 Tensor true_divide_tensor_cuda(const Tensor& self, const Tensor& other) {
+    // The float loop only addresses real buffers, so a complex operand takes
+    // the canonical division path instead.
+    if (isComplexType(self.dtype()) || isComplexType(other.dtype())) {
+        return div_kernel(self, other);
+    }
     return binary_float_cuda(self, other,
                              [] __device__ (double x, double y) { return x / y; }, "true_divide");
 }
 Tensor true_divide_scalar_cuda(const Tensor& self, Scalar other) {
-    return binary_float_cuda(self, Tensor::full({}, other, DType::Float32, self.device()),
-                             [] __device__ (double x, double y) { return x / y; }, "true_divide");
+    // A Float32 stand-in would widen Half/BFloat16 inputs.
+    const DType dt = scalar_promote(self.dtype(), other);
+    return true_divide_tensor_cuda(self, Tensor::full({}, other, dt, self.device()));
 }
 Tensor divide_tensor_cuda(const Tensor& self, const Tensor& other) {
     return true_divide_tensor_cuda(self, other);
@@ -356,8 +382,14 @@ Tensor remainder_tensor_cuda(const Tensor& self, const Tensor& other) {
                             "remainder");
 }
 Tensor remainder_scalar_cuda(const Tensor& self, Scalar other) {
-    return remainder_tensor_cuda(
-        self, Tensor::full({}, other, DType::Undefined, self.device()).to(self.dtype()));
+    // Forcing the scalar into self's dtype would truncate a float divisor
+    // against an integral tensor; the pair promotes first.
+    const DType dt = scalar_promote(self.dtype(), other);
+    return remainder_tensor_cuda(self.to(dt), Tensor::full({}, other, dt, self.device()));
+}
+Tensor remainder_scalar_tensor_cuda(Scalar self, const Tensor& other) {
+    const DType dt = scalar_promote(other.dtype(), self);
+    return remainder_tensor_cuda(Tensor::full({}, self, dt, other.device()), other.to(dt));
 }
 Tensor fmod_tensor_cuda(const Tensor& self, const Tensor& other) {
     return binary_same_cuda(self, other,
@@ -370,16 +402,26 @@ Tensor fmod_tensor_cuda(const Tensor& self, const Tensor& other) {
                             "fmod");
 }
 Tensor fmod_scalar_cuda(const Tensor& self, Scalar other) {
-    return fmod_tensor_cuda(
-        self, Tensor::full({}, other, DType::Undefined, self.device()).to(self.dtype()));
+    const DType dt = scalar_promote(self.dtype(), other);
+    return fmod_tensor_cuda(self.to(dt), Tensor::full({}, other, dt, self.device()));
 }
-Tensor subtract_tensor_cuda(const Tensor& self, const Tensor& other) {
+Tensor subtract_tensor_cuda(const Tensor& self, const Tensor& other, Scalar alpha) {
+    // alpha == 1 is by far the common call and keeps the unscaled loop.
+    if (!alpha.isComplex() && alpha.toDouble() == 1.0) {
+        return binary_same_cuda(self, other,
+                                [] __device__ (auto x, auto y) { return x - y; }, "subtract");
+    }
+    const double al = alpha.toDouble();
     return binary_same_cuda(self, other,
-                            [] __device__ (auto x, auto y) { return x - y; }, "subtract");
+                            [al] __device__ (auto x, auto y) {
+                                using T = decltype(x);
+                                return static_cast<T>(x - y * al);
+                            }, "subtract");
 }
-Tensor subtract_scalar_cuda(const Tensor& self, Scalar other) {
-    return subtract_tensor_cuda(self,
-                                Tensor::full({}, other, self.dtype(), self.device()));
+Tensor subtract_scalar_cuda(const Tensor& self, Scalar other, Scalar alpha) {
+    const DType dt = scalar_promote(self.dtype(), other);
+    return subtract_tensor_cuda(self.to(dt),
+                                Tensor::full({}, other, dt, self.device()), alpha);
 }
 Tensor multiply_tensor_cuda(const Tensor& self, const Tensor& other) {
     return binary_same_cuda(self, other,
@@ -394,6 +436,75 @@ Tensor multiply_scalar_cuda(const Tensor& self, Scalar other) {
                             },
                             "multiply");
 }
+
+// ---------------------------------------------------------------------------
+// Division with an explicit rounding mode
+// ---------------------------------------------------------------------------
+namespace {
+
+enum class DivRounding { kTrue, kTrunc, kFloor };
+
+DivRounding parse_div_rounding(const std::optional<std::string>& mode) {
+    if (!mode.has_value()) return DivRounding::kTrue;
+    if (*mode == "trunc") return DivRounding::kTrunc;
+    if (*mode == "floor") return DivRounding::kFloor;
+    TP_THROW(RuntimeError,
+             std::string("div expected rounding_mode to be one of None, 'trunc' "
+                         "or 'floor' but found '") + *mode + "'");
+}
+
+Tensor div_rounded_core(const Tensor& a, const Tensor& b, DivRounding rounding) {
+    if (rounding == DivRounding::kTrue) return true_divide_tensor_cuda(a, b);
+    // Rounded division stays in the input dtype: an integral pair must come
+    // back integral, which the float promotion of true division loses.
+    const bool floor_mode = (rounding == DivRounding::kFloor);
+    return binary_same_cuda(a, b, [floor_mode] __device__ (auto x, auto y) -> decltype(x) {
+        using T = decltype(x);
+        if constexpr (std::is_integral_v<T>) {
+            if (y == T(0)) return T(0);
+            T q = static_cast<T>(x / y);
+            if (floor_mode) {
+                // The quotient truncates toward zero, so a remainder whose
+                // sign disagrees with the divisor sits one step above the
+                // floor.
+                T r = static_cast<T>(x - q * y);
+                if (r != T(0) && ((r < T(0)) != (y < T(0)))) q = static_cast<T>(q - T(1));
+            }
+            return q;
+        } else {
+            // Half/BFloat16 round through Float32, the width their arithmetic
+            // is defined at; float and double keep their own.
+            using C = std::conditional_t<std::is_same_v<T, double>, double, float>;
+            const C q = static_cast<C>(x) / static_cast<C>(y);
+            return static_cast<T>(floor_mode ? ::floor(q) : ::trunc(q));
+        }
+    }, "div");
+}
+
+Tensor div_rounded_scalar(const Tensor& self, Scalar other, DivRounding rounding) {
+    if (rounding == DivRounding::kTrue) return true_divide_scalar_cuda(self, other);
+    const DType dt = scalar_promote(self.dtype(), other);
+    return div_rounded_core(self.to(dt), Tensor::full({}, other, dt, self.device()),
+                            rounding);
+}
+
+}  // namespace
+
+Tensor div_mode_tensor_cuda(const Tensor& self, const Tensor& other,
+                            std::optional<std::string> rounding_mode) {
+    return div_rounded_core(self, other, parse_div_rounding(rounding_mode));
+}
+Tensor div_mode_scalar_cuda(const Tensor& self, Scalar other,
+                            std::optional<std::string> rounding_mode) {
+    return div_rounded_scalar(self, other, parse_div_rounding(rounding_mode));
+}
+Tensor floor_divide_cuda(const Tensor& self, const Tensor& other) {
+    return div_rounded_core(self, other, DivRounding::kFloor);
+}
+Tensor floor_divide_scalar_cuda(const Tensor& self, Scalar other) {
+    return div_rounded_scalar(self, other, DivRounding::kFloor);
+}
+
 Tensor negative_cuda(const Tensor& self) {
     return dtype_unary_cuda(self,
                             [] __device__ (auto x) { return static_cast<decltype(x)>(-x); },
@@ -570,16 +681,9 @@ Tensor digamma_cuda(const Tensor& self) {
     }, "digamma");
 }
 Tensor i0_cuda(const Tensor& self) {
+    // Chebyshev expansion, valid over the whole range; see i0_cpu.
     return float_math_cuda(self, [] __device__ (double v) {
-        double half = 0.5 * ::fabs(v);
-        double term = 1.0, sum = 1.0;
-        for (int k = 1; k < 60; ++k) {
-            term *= half / static_cast<double>(k);
-            double term2 = term * term;
-            sum += term2;
-            if (term2 < 1e-18 * sum) break;
-        }
-        return sum;
+        return tensorplay::special_math::modified_bessel_i0_forward(v);
     }, "i0");
 }
 Tensor nan_to_num_cuda(const Tensor& self, Scalar nan,
@@ -630,8 +734,7 @@ Tensor nan_to_num_cuda(const Tensor& self, Scalar nan,
 
 Tensor xlogy_cuda(const Tensor& a, const Tensor& b) {
     return binary_float_cuda(a, b, [] __device__ (double x, double y) {
-        if (x == 0.0) return 0.0;
-        return x * ::log(y);
+        return tensorplay::special_math::calc_xlogy(x, y);
     }, "xlogy");
 }
 Tensor logaddexp_cuda(const Tensor& a, const Tensor& b) {
@@ -652,6 +755,11 @@ Tensor copysign_cuda(const Tensor& a, const Tensor& b) {
     return binary_float_cuda(a, b, [] __device__ (double x, double y) {
         return ::copysign(x, y);
     }, "copysign");
+}
+Tensor copysign_scalar_cuda(const Tensor& self, Scalar other) {
+    // The sign comes from the scalar alone, so the divisor width never
+    // participates in promotion -- Float32 carries every sign bit exactly.
+    return copysign_cuda(self, Tensor::full({}, other, DType::Float32, self.device()));
 }
 Tensor hypot_cuda(const Tensor& a, const Tensor& b) {
     return binary_float_cuda(a, b, [] __device__ (double x, double y) {
@@ -1397,6 +1505,13 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, TierOpsKernels) {
     m.impl("subtract.Scalar", subtract_scalar_cuda);
     m.impl("multiply.Tensor", multiply_tensor_cuda);
     m.impl("multiply.Scalar", multiply_scalar_cuda);
+    m.impl("remainder.Scalar_Tensor", remainder_scalar_tensor_cuda);
+    m.impl("div.Tensor_mode", div_mode_tensor_cuda);
+    m.impl("div.Scalar_mode", div_mode_scalar_cuda);
+    m.impl("divide.Tensor_mode", div_mode_tensor_cuda);
+    m.impl("divide.Scalar_mode", div_mode_scalar_cuda);
+    m.impl("floor_divide", floor_divide_cuda);
+    m.impl("floor_divide.Scalar", floor_divide_scalar_cuda);
     m.impl("negative", negative_cuda);
     m.impl("positive", positive_cuda);
     m.impl("greater", greater_cuda);
@@ -1426,10 +1541,11 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, TierOpsKernels) {
     m.impl("digamma", digamma_cuda);
     m.impl("i0", i0_cuda);
     m.impl("nan_to_num", nan_to_num_cuda);
-    m.impl("xlogy.Tensor", xlogy_cuda);
+    m.impl("xlogy", xlogy_cuda);
     m.impl("logaddexp", logaddexp_cuda);
     m.impl("logaddexp2", logaddexp2_cuda);
     m.impl("copysign.Tensor", copysign_cuda);
+    m.impl("copysign.Scalar", copysign_scalar_cuda);
     m.impl("hypot", hypot_cuda);
     m.impl("nextafter", nextafter_cuda);
     m.impl("gcd", gcd_cuda);

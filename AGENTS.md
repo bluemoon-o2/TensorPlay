@@ -1,5 +1,35 @@
 # TensorPlay Agent 工作规则
 
+## 注释红线（最高优先级，严禁违反）
+
+本仓库是独立实现。**严禁在任何源码的注释或描述性文本中出现对上游框架
+（PyTorch / ATen / torch 系）的引用、出处声明或"对齐/对照"表述**——这是抄袭/侵权风险，
+属于硬性红线，违反即打回。
+
+- **适用范围**：一切 `//`、`/* */`、`#`、Python docstring、以及字符串形式的描述性文本
+  （错误消息、警告、`print`/日志输出、生成代码里内嵌的注释模板）。
+- **禁止内容**（大小写不敏感）：
+  - 品牌词与命名空间：`pytorch`、`torch.`、`torch/`、`aten`、`ATen`、`at::`、
+    `torchvision/torchaudio/torchgen/TorchScript` 等；
+  - 上游路径与文件名：`aten/src/ATen/...`、`native_functions.yaml`、`torch/csrc/...`、
+    `third_party/pytorch/...`（`third_party/` 目录内的 vendored 文件本身除外）；
+  - 出处/对照表述：`port of`、`ported from`、`mirrors`、`mirroring`、`aligned with`、
+    `parity`、`copied from`、`same as upstream`、`as in <上游文件>:<行号>` 等任何把上游
+    实现当出处、基准或对照物的说法。
+- **写法要求**：注释只描述本项目的语义、数学公式、复杂度与设计取舍。行为约定写成
+  中性的规范描述（例如"除零返回 inf"），不要写成"与某某一致"。
+- **唯一豁免**：功能性互操作标识——序列化格式标识、外部环境变量名、第三方权重下载
+  URL 等**运行所必需**的代码级字符串。它们只能出现在代码里，严禁出现在注释中；
+  新增此类标识须在 PR 描述中说明必要性。
+- **提交前自检**（对所有自己改动的文件执行，命中注释/描述性文本必须删改后再提交）：
+
+```bash
+grep -rn -i -E 'pytorch|\baten\b|\bat::|mirrors|ported from|parity' <改动的文件>
+```
+
+- 本仓库部分历史文件仍由 root 身份的进程创建（无写权限）。改动这些文件时同样
+  遵守本红线；发现他人新代码违反红线，顺手清理即可（最小改动，不回滚其功能）。
+
 ## 编译纪律（必须遵守）
 
 **编译前必须查进程。** 本仓库常有多个 agent / 开发者同时工作，且共享同一棵源码树。
@@ -38,8 +68,9 @@ ps -eo pid,etime,args | grep -E "ninja|cmake --build|make.*-j|nvcc|cc1plus|cicc"
 - 校验器是 tools/commit_schema.py（commit-msg 钩子、pr-title 工作流共用）；
   本地启用：`pre-commit install --hook-type pre-commit --hook-type commit-msg`。
 - PR 标题同样按此规范校验（合并后成为 squash commit 标题）。
-- **版本不用 cz bump**：版本号遵循 torch 规则（version.txt + tools/generate_tensorplay_version.py；
-  nightly 为 X.Y.0.dev<UTC日期>[+cuXXX|+cpu]）。commitizen 仅用于 `cz changelog` 草稿。
+- **版本不用 cz bump**：版本号遵循 `X.Y.Z` 语义化规则（version.txt +
+  tools/generate_tensorplay_version.py；nightly 为 X.Y.0.dev<UTC日期>[+cuXXX|+cpu]）。
+  commitizen 仅用于 `cz changelog` 草稿。
 - 合并提交、`Revert ...`、fixup!/squash! 提交不受规范约束。
 
 ## 其他注意事项
