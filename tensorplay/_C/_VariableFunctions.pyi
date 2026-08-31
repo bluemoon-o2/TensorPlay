@@ -28,6 +28,9 @@ from tensorplay.types import (
 from tensorplay._C import (
     Device,
     DType,
+    SymBool,
+    SymFloat,
+    SymInt,
     TensorBase,
 )
 
@@ -2080,7 +2083,7 @@ def _cudnn_attention_forward(
     scale: _float | None = None,
     seqused_k: TensorBase | None = None,
     block_table: TensorBase | None = None,
-) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, _int, _int, TensorBase, TensorBase, TensorBase]:  # fmt: skip
+) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, SymInt, SymInt, TensorBase, TensorBase, TensorBase]:  # fmt: skip
     ...
 @overload
 def _cudnn_ctc_loss(
@@ -2244,7 +2247,7 @@ def _efficient_attention_forward(
     scale: _float | None = None,
     seqlen_k: TensorBase | None = None,
     window_size: _int | None = None,
-) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, _int, _int]: ...
+) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, SymInt, SymInt]: ...
 @overload
 def _efficientzerotensor(
     size: _size,
@@ -4503,7 +4506,7 @@ def _scaled_dot_product_cudnn_attention(
     return_debug_mask: _bool = False,
     *,
     scale: _float | None = None,
-) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, _int, _int, TensorBase, TensorBase, TensorBase]:  # fmt: skip
+) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, SymInt, SymInt, TensorBase, TensorBase, TensorBase]:  # fmt: skip
     ...
 def _scaled_dot_product_cudnn_attention_backward(
     grad_out: TensorBase,
@@ -4561,7 +4564,7 @@ def _scaled_dot_product_flash_attention(
     return_debug_mask: _bool = False,
     *,
     scale: _float | None = None,
-) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, _int, _int, TensorBase, TensorBase, TensorBase]:  # fmt: skip
+) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, SymInt, SymInt, TensorBase, TensorBase, TensorBase]:  # fmt: skip
     ...
 @overload
 def _scaled_dot_product_flash_attention(
@@ -4576,7 +4579,7 @@ def _scaled_dot_product_flash_attention(
     return_debug_mask: _bool = False,
     *,
     scale: _float | None = None,
-) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, _int, _int, TensorBase, TensorBase, TensorBase]:  # fmt: skip
+) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, SymInt, SymInt, TensorBase, TensorBase, TensorBase]:  # fmt: skip
     ...
 def _scaled_dot_product_flash_attention_backward(
     grad_out: TensorBase,
@@ -4629,7 +4632,7 @@ def _scaled_dot_product_fused_attention_overrideable(
     return_debug_mask: _bool = False,
     *,
     scale: _float | None = None,
-) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, _int, _int, TensorBase, TensorBase, TensorBase]:  # fmt: skip
+) -> tuple[TensorBase, TensorBase, TensorBase, TensorBase, SymInt, SymInt, TensorBase, TensorBase, TensorBase]:  # fmt: skip
     ...
 def _scaled_dot_product_fused_attention_overrideable_backward(
     grad_out: TensorBase,
@@ -38843,11 +38846,11 @@ def sym_constrain_range_for_size(
 def sym_is_contiguous(
     self: TensorBase,
     memory_format: MemoryFormat = contiguous_format,
-) -> _bool: ...
-def sym_numel(self: TensorBase) -> _int: ...
-def sym_size(self: TensorBase, dim: _int) -> _int: ...
-def sym_storage_offset(self: TensorBase) -> _int: ...
-def sym_stride(self: TensorBase, dim: _int) -> _int: ...
+) -> SymBool: ...
+def sym_numel(self: TensorBase) -> SymInt: ...
+def sym_size(self: TensorBase, dim: _int) -> SymInt: ...
+def sym_storage_offset(self: TensorBase) -> SymInt: ...
+def sym_stride(self: TensorBase, dim: _int) -> SymInt: ...
 def t(self: TensorBase) -> TensorBase:
     r"""
     t(input) -> Tensor

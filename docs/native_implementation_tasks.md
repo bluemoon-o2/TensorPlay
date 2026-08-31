@@ -77,7 +77,7 @@
 - `[x]` `dim`、`numel`、`is_contiguous`、`retains_grad`、`detach`、`as_strided`、`select` 以及稀疏属性和访问器已完成生成/手写所有权拆分，并通过本地编译。
 - `[x]` 生成成员包装器、原生自由函数、dispatcher 注册和底层 TensorImpl 访问的当前冲突点已移除；未使用 skip 标记掩盖本轮实现。
 - `[ ]` 为 metadata、view、sparse、autograd 属性和工厂类方法补齐原生 kernel 声明、CPU/CUDA/Composite 注册和 Python 绑定。
-- `[ ]` 解决 `SymBool`、`SymInt` 等符号标量的 C++ 表示、生成签名、绑定转换、运行时求值和图捕获语义；不能把符号接口删除或静默缩成不兼容的子集。
+- `[~]` `SymBool`、`SymInt`、`SymFloat` 已有独立 C++ 表示、表达式节点、生成返回签名、绑定转换、元数据算子注册和 CPU/composite 执行路径；仍需继续补齐输入 ABI、完整运算族与图捕获语义。
 - `[ ]` 检查所有 out/inplace/view/multi-output 算子的别名标注、版本计数、视图元数据和反向节点连接。
 
 ### 4.4 本轮原生接线
@@ -90,6 +90,7 @@
 - `[x]` codegen 使用完整函数解析、后端索引和生成变体校验；重复签名只在 TP 配置中保留独立命名记录，不会覆盖或静默删除条目。新增 `test_codegen_model.py` 覆盖函数记录、后端元数据、别名列表和固定长度列表。
 - `[x]` 可微视图保存根基底、版本号、尺寸/步长/存储偏移和可重放调用；视图原地修改通过 `CopySlices` 重建根基底历史，多级视图合成重放链；普通同类型视图使用几何路径，元数据变化视图保存函数路径。
 - `[x]` 编译前端、原生后端、图解释器、导出绑定和三套原生 lowering 均按占位符的 schema 目标名取样例值，避免合法化名称与函数签名不一致时丢失输入。
+- `[~]` 符号标量核心已落在 `p10/include/Sym*.h`、`p10/src/Sym*.cpp`、`p10/src/backend/cpu/SymScalarKernels.cpp` 和 Python 绑定；`sym_size`、`sym_numel`、`sym_stride`、`sym_storage_offset`、`sym_is_contiguous` 已返回原生符号类型，并通过 `test/test_sym_scalar_native.py`。
 - `[~]` 其余工厂 Generator 入口、CUDA 实机编译和全树算子覆盖继续按失败证据逐项补齐。
 
 ### 4.2 算子和自动求导
@@ -131,7 +132,7 @@
 1. `[ ]` 读取本清单并确认构建进程处于静默状态。
 2. `[ ]` 先处理生成 Tensor 方法与手写方法的所有权冲突，不添加任何 skip 标记。
 3. `[ ]` 补齐 metadata、view、sparse、autograd 属性的 C++ 原生实现与注册。
-4. `[ ]` 解决符号标量生成和绑定，再做本机 `-j8` 增量构建。
+4. `[~]` 继续补齐符号标量输入、完整运算族和绑定语义，再做本机 `-j8` 增量构建。
 5. `[ ]` 逐个修复编译/链接错误；每轮确认产物新鲜度。
 6. `[ ]` 运行最小 Python、graph、autograd、CPU、CUDA、distributed 回归集。
 7. `[ ]` 根据失败证据继续拆分下一个参考模块；不得为了绿灯裁剪接口、跳过实现或加入降级路径。
@@ -146,3 +147,4 @@
 | 2026-08-31 | codegen 完整函数/后端元数据接入 | `tools/codegen/model.py`、`tools/codegen/main.py`、`test/test_codegen_model.py` | 2792 条记录完成严格解析与保留；测试 `131 passed, 20 skipped` | 继续将结构化、视图和就地生成逻辑接入真实 C++ 所有权 |
 | 2026-08-31 | schema 标签依赖与视图输入元数据 | `tools/codegen/model.py`、`CMakeLists.txt`、`test/test_codegen_model.py` | 视图输入回填覆盖可能返回视图的算子；标签注册表纳入增量依赖；本地 `ninja -C build p10 _C -j2` 通过；测试 `131 passed, 20 skipped` | 继续实现结构化 kernel emitter 与完整 view replay 所有权 |
 | 2026-08-31 | 视图历史重基与签名占位符绑定 | `tpx/include/AutogradMeta.h`、`tpx/include/Autograd.h`、`tpx/include/ManualNodes.h`、`tpx/src/Autograd.cpp`、`tools/codegen/gen_tpx.py`、`tensorplay/_stax/`、`tensorplay/graph/graph_module.py`、`tensorplay/export/_trace.py`、`test/test_view_rebase.py` | 本地 `ninja -C build p10 _C -j2` 119/119；视图/自动求导/编译/codegen 回归 `39 passed, 1 skipped`；产物时间戳晚于改动源文件 | 继续处理符号标量、结构化内核和剩余算子族的完整 C++ 接线 |
+| 2026-08-31 | 原生符号标量核心与 metadata 返回 | `p10/include/Sym*.h`、`p10/src/Sym*.cpp`、`p10/src/backend/cpu/SymScalarKernels.cpp`、`src/bindings/python/SymInt.cpp`、`tools/codegen/`、`test/test_sym_scalar_native.py` | 本地 `ninja -C build _C -j2` 通过；符号标量回归 `4 passed`；修复空输入折叠越界和自同一比较恒等化 | 继续补齐符号输入 ABI、完整魔术方法、图捕获和其余原生算子接线 |
