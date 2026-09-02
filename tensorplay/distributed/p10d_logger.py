@@ -1,6 +1,4 @@
-#
-# records into the same logger instead of a wait counter; the exception
-# logging contract is identical.
+"""Logging decorators for process-group operations."""
 import functools
 import logging
 import time
@@ -17,7 +15,7 @@ _DEFAULT_DESTINATION = "default"
 
 def _get_or_create_logger(destination: str = _DEFAULT_DESTINATION) -> logging.Logger:
     logging_handler, log_handler_name = _get_logging_handler(destination)
-    logger = logging.getLogger(f"core-{log_handler_name}")
+    logger = logging.getLogger(f"p10d-{log_handler_name}")
     logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter(
         "%(asctime)s %(filename)s:%(lineno)s %(levelname)s p:%(processName)s t:%(threadName)s: %(message)s"
@@ -36,8 +34,8 @@ def _get_logging_handler(
     return (log_handler, log_handler_name)
 
 
-global _core_logger
-_core_logger = _get_or_create_logger()
+global _p10d_logger
+_p10d_logger = _get_or_create_logger()
 
 
 def _get_msg_dict(func_name, *args, **kwargs) -> dict[str, Any]:
@@ -74,7 +72,7 @@ def _exception_logger(func: Callable[..., _T]) -> Callable[..., _T]:
         except Exception as error:
             msg_dict = _get_msg_dict(func.__name__, *args, **kwargs)
             msg_dict["error"] = f"{error}"
-            _core_logger.debug(msg_dict)
+            _p10d_logger.debug(msg_dict)
             raise
 
     return wrapper
@@ -87,7 +85,7 @@ def _time_logger(func: Callable[..., _T]) -> Callable[..., _T]:
         try:
             return func(*args, **kwargs)
         finally:
-            _core_logger.debug(
+            _p10d_logger.debug(
                 {"func_name": func.__name__,
                  "elapsed_ms": (time.monotonic() - start) * 1000.0}
             )

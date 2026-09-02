@@ -25,6 +25,12 @@ class _RotateMethod(str, Enum):
 _rotate_method = _RotateMethod.ALL_GATHER
 
 
+def _layout(mesh: Any, placement: Any) -> tuple[Any, ...]:
+    value = getattr(mesh, "ndim")
+    ndim = int(value() if callable(value) else value)
+    return (placement,) + tuple(Replicate() for _ in range(ndim - 1))
+
+
 def set_rotate_method(rotate_method: str) -> None:
     global _rotate_method
     try:
@@ -35,8 +41,10 @@ def set_rotate_method(rotate_method: str) -> None:
 
 def _shard_buffer(buffer: Any, mesh: Any, dim: int) -> Any:
     if isinstance(buffer, DTensor):
-        return buffer.redistribute(placements=[Shard(dim)])
-    return DTensor.from_local(buffer, mesh, [Replicate()]).redistribute(placements=[Shard(dim)]).to_local()
+        return buffer.redistribute(placements=_layout(mesh, Shard(dim)))
+    return DTensor.from_local(buffer, mesh, _layout(mesh, Replicate())).redistribute(
+        placements=_layout(mesh, Shard(dim))
+    ).to_local()
 
 
 @contextlib.contextmanager
@@ -68,7 +76,7 @@ def context_parallel_unshard(mesh: Any, buffers: list[Any], seq_dims: list[int],
     result = []
     for buffer, dim in zip(buffers, seq_dims):
         if isinstance(buffer, DTensor):
-            result.append(buffer.redistribute(placements=[Replicate()]).to_local())
+            result.append(buffer.redistribute(placements=_layout(mesh, Replicate())).to_local())
         else:
             result.append(buffer)
     return result
