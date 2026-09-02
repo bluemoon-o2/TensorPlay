@@ -232,3 +232,15 @@
 | unsharded gradient 读取与 sharded grad 回写 | `_fully_shard/_fsdp_param.py:900` `unsharded_grad_data`；`:906` `unsharded_accumulated_grad_data`；`:917` `_unsharded_gradient`；`:989` `_set_sharded_grad` | `_fully_shard/_fsdp_param.py:1184`、`:1189`、`:1197`；参数结果写回位于 `foreach_reduce:522-777` | 本地参数文件 `1017` 对 `1379`；本地同时保留 `_sharded_grad` 和模块参数 `.grad`，兼容旧运行时读取路径 | `23 / 6` |
 
 本条的持久化代码证据是：`FSDPParamGroup.post_backward` 先收集普通/累积/未使用参数梯度，再在 reshard 前保留梯度引用；`foreach_reduce` 把每个参数的梯度按 shard 维重排到统一 dim-0，按 world size 补齐并通过 `foreach_reduce_scatter_copy_in` 写入单一输入 buffer，随后执行 reduce-scatter、可选 HSDP all-reduce、用户 hook、post-divide，并以 `sharded_size`/连续步长建立每个参数的结果 view。`FSDPParam._set_sharded_grad` 同时保存内部结果和当前 sharded 参数的 `.grad`，`finalize_backward` 与 `reduce_scatter_states` 负责释放引用。当前 `py_compile` 已通过；共享树的 C++ 扩展正在被多个外部构建进程反复覆盖，运行时导入出现 `invalid ELF header/file too short`，因此本条不把损坏产物当作源码失败，也不启动新的构建。参考文件中尚未纳入本条的设备 stream/event overlap、专门 allocator、扩展梯度包装和复杂多组 prefetch 将在后续 FSDP 子项继续收口。因此本条同步 reduce-scatter 梯度生命周期标为 `[x]`，FSDP 总项仍为 `[~]`。
+
+### 9.9 FSDP backward-final callback and no-input-gradient recovery（2026-09-02）
+
+| 子项 | TensorPlay 具体代码位置 | 对应实现位置 | 当前行数对比 | 工作树增删 |
+|---|---|---|---:|---:|
+| GraphTask 回调存储、追加和完成后执行 | `tpx/include/GraphTask.h:55` `final_callbacks_`；`:99` `add_final_callback`；`:104` `run_final_callbacks`；`tpx/include/Engine.h:103` `Engine::queue_callback`；`tpx/src/Engine.cpp:20` `current_graph_task`；`:192` `execute_task`；`:205` `Engine::queue_callback`；`:724` `run_final_callbacks` | `autograd/graph_task.h:188` `final_callbacks_`；`autograd/engine.h:202` `Engine::queue_callback`；`autograd/engine.cpp:393` `GraphTaskGuard`；`:717` `exec_post_processing`；`:1598` `queue_callback` | `GraphTask.h 134` 对 `231`；`Engine.h 140` 对 `299`；`Engine.cpp 741` 对 `1862` | `55 / 0` |
+| Python callback 持有、GIL 保护和入口 | `src/bindings/python/Autograd.cpp:420` `queue_callback`；`tensorplay/_C/_autograd.pyi:38` | `autograd/python_engine.cpp:388` `THPEngine_queue_callback`；`:436` 方法表 | `Autograd.cpp 517` 对 `501`；存根新增 1 行 | `18 / 0` |
+| FSDP 注册、根回调和无输入梯度补偿 | `tensorplay/distributed/fsdp/_fully_shard/_fsdp_state.py:190` `_pre_backward`；`:197` `_root_post_backward_final_callback`；`:221` `_post_backward_output`；`:224` `_register_root_post_backward_final_callback`；`:232` `_reset_iter_state` | `_fully_shard/_fsdp_state.py:386` `_pre_backward`；`:401` `_root_post_backward_final_callback`；`:472` `_register_root_post_backward_final_callback` | `282` 对 `607` | `16 / 4` |
+
+本条的持久化代码证据是：C++ `current_graph_task` 在节点执行期间建立，`Engine::queue_callback` 只向当前 GraphTask 登记回调；GraphTask 完成后按索引逐个取回调，回调自身追加的新回调仍会执行；Python binding 以带 GIL 的调用和自定义释放器保存 Python callable。FSDP 的 `_pre_backward` 在每次 backward 首次进入时登记根回调，根回调在组尚未进入 `POST_BACKWARD` 时先调用 `post_backward()`，再统一 `finalize_backward()`，覆盖 forward 输入没有梯度的路径；`_post_backward_output` 不再提前结束整个 backward 生命周期。
+
+本条涉及的本地文件总量小于对应实现，原因是本地 GraphTask/Engine 仍未包含设备流同步、Future 后处理、异常持久化和多设备线程池等独立能力；这些不是本 callback 子项的隐藏缺口，不能据此把 FSDP 总项标成完成。当前本条 C++/Python 接线和存根均已写入，相关 Python 文件 `py_compile` 通过；共享扩展产物仍被外部并发构建覆盖，运行时验证留待产物稳定后执行。因此本条 backward-final callback 与无输入梯度恢复标为 `[x]`，FSDP 总项继续保持 `[~]`，下一子项必须登记后才能切换。
