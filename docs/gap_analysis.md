@@ -381,7 +381,7 @@ gradcheck 968 行、Function 双风格(setup_context/legacy)带 save_for_backwar
   pickle(getstate/setstate + 显式 `__reduce__`,CPU-only,支持 SharedMemory 通道)、
   dynamic_attr 支持 weakref;异常映射 IndexError/ValueError/TypeError/NotImplementedError/
   RuntimeError 完整,可选暴露 C++ 栈。
-- 缺:`__torch_function__`/`__torch_dispatch__` 协议、Tensor 子类/_make_subclass、
+- 缺:`__tensorplay_function__`/`__tensorplay_dispatch__` 协议、Tensor 子类构造、
   python dispatcher key、`__deepcopy__`(靠 __reduce__ 兜底)、`__cuda_array_interface__`、
   out-of-band pickle(protocol 5)、完整索引方言(python_variable_indexing.cpp 对应物)。
   `tensorplay.Tensor = _C.TensorBase` 直别名,monkey-patch 是唯一扩展途径(_tensor.py 补了

@@ -1421,3 +1421,157 @@ cpu_count 时发裸 `#pragma omp parallel` 让 OMP 自管);`LoopLevel::lines`
 - `cpp_prefix.h` cascade_sum/welford helper:CPU 归约融合(对标 M5d)时
   直接借语义;
 - `cpp_wrapper_cpu`/AOTI:内核调用零 Python 化(静态 launcher 等价物)。
+
+## L5-CPU Size/shape C 级重写 + 内核 C runner(2026-08-31)
+
+走读补充(全部吃透后动手):
+- `src/bindings/python/Size.cpp`:`struct TPSize { PyTupleObject tuple; }` C 级
+  tuple 子类,`tp_base=&PyTuple_Type` 继承序列协议,`wrap_tuple_fn` 把
+  tuple 槽结果(slices/repeat/concat)包回 Size,`nb_add` 桥接
+  `tuple+Size`,自定义 tp_richcompare 后显式委托 tp_hash;
+- `codecache.py::load_pybinding_async`:内核绑定
+  =独立 METH_FASTCALL 模块,`parse_arg<T>` 模板在 C 内经函数指针取
+  `data_ptr`(guards.cpp 提供实现,经环境变量地址注入),输出分配走
+  `_empty_strided_cpu` 瘦入口——稳态调用零 Python 帧、零 pybind 转换;
+- `KernelArgs::cpp_argdefs`(common.py:1875):内核签名=纯指针+字面量,
+  形状在编译期烘焙。
+
+### 落地一:tensorplay.Size 重写为 C 级 tuple 子类(src/bindings/python/Size.cpp)
+
+旧实现是 pybind 包装的 `std::vector<int64_t>` 容器:`__iter__` 走
+`py::make_iterator`(单元素迭代 6.6us);FASTCALL int[] 路径对序列参数
+检查+转换各走一遍 → `_C.empty(size=Size)` 15.2us vs 传 tuple 2.7us
+——这是 4K 小形状 compiled 0.5x 的主要根因(runtime kernel 的
+`empty(inputs[0].shape)` 每调用付出 ~12us 纯绑定税)。
+新实现(采用原生 Size.cpp 结构):
+- `tp_base=&PyTuple_Type`:迭代/len/contains/hash/索引全部走 C tuple
+  槽,`PySequence_Fast` 对 Size 零拷贝;
+- `size_new`:`PyNumber_Index` 归一非 int 元素;
+- `sq_concat`/`sq_repeat`/`mp_subscript` 委托 tuple 实现并把 tuple 结果
+  包回 Size(标量下标直通 int);
+- `size_add`(nb_add)支持 `list/tuple + Size`(解释器探测次序:右操作数
+  子类 nb_add → 左 nb_add → 右 nb_add → sq_concat);
+- `size_richcompare`:list 操作数保元素级 eq(旧 pybind 契约),其余走
+  tuple 比较;`size_hash` 显式委托(自定义 richcompare 阻断继承);
+- `Size_New`/`Size_Check` C 接口导出,`Tensor.shape`/`Tensor.size()` 出
+  口改走 `Size_NewFromSizes` 直造(免 std::vector 中转)。
+实测:迭代 6.6→**0.14us**(47x);`_C.empty(size=Size)` 15.2→**3.96us**;
+行为面(repr/eq list/tuple/双向 add/hash/pickle/numel/slice 返回 Size/
+repeat)测试全保。
+
+### 落地二:生成内核自带 METH_FASTCALL C runner(codegen/cpp.py)
+
+pinned(形状+设备编码进源码)构建时,同一翻译单元内追加:
+- `tp_runner`:METH_FASTCALL,收输入 tensor list → C 内
+  `tpx_py_tensor_cref(...).data_ptr()` 提取指针 → C 内
+  `Tensor::empty(字面量形状, Float32, Device(枚举, index))` 分配输出 →
+  调内核 → `tpx_py_wrap` 返回(全静态链接 libp10/libtp_python,符号已
+  导出,零 ninja 参与);
+- `tp_make_runner` 工厂:PyGILState_Ensure 包裹(ctypes 侧默认释放
+  GIL,直接 PyCFunction_New 必崩——实测 gdb 栈 PyObject_Malloc);
+- runner 返回后 Python 侧 `build_cpu_native_kernel` 直接返回 C 函数,
+  稳态调用路径 = api trampoline(现有 C 层)→ tp_runner,全链零 Python 帧
+  (对齐 load_pybinding_async 的 parse_arg 模式)。
+unpinned(无形状信息)保持 Python 闭包回退,行为不变。
+
+### 验证
+
+- test_cpu_codegen 21/21(含新 C runner 数值对拍);
+- 编译器域回归 91 passed(6 failed 均为已登记并行 WIP 域:strict_native
+  错误消息文案、graph 属性捕获、control-flow data-guards);
+- 整管线静默窗口(tanh 链 vs eager,200iter×2 轮):
+  | n | 前一轮 | 本轮 |
+  |---|---|---|
+  | 4096 | 0.40-0.50x | **1.55-1.87x** |
+  | 65536 | 9.43-12.44x | **19.55-21.41x** |
+  | 4M | 2.44-2.54x | 2.60-2.89x |
+  4K 已反超 eager(绑定税消除);64K 计算占比升高后收益放大;4M 为
+  内存带宽域,读数随背景负载波动。
+
+### 遗留杠杆(按源码走读排序)
+
+1. `parse_arg` 的 tensor 数据指针函数指针注入:当前 runner 经
+   `tpx_py_tensor_cref`(pybind instance 布局探测)取指针,可再省一层
+   类型检查(需 _C 侧环境变量握手,同 guards.cpp 模式);
+2. `async_compile` worker 池并行编译;
+3. `TilingSelect`/`CppTile2DKernel` 2D tile;
+4. `cpp_prefix.h` cascade_sum/welford:CPU 归约融合时借语义。
+
+## L5b: full-C steady state (dispatcher + trampoline direct + index algebra)
+
+Session date: 2026-08-31 (evening), shared-tree session.
+
+### Implemented
+
+1. **Outer C dispatcher** (`_C._stax.CallDispatcher`, installed by
+   `tensorplay.compile`): the object users actually call is now a C
+   vectorcall type. Steady state checks (capture-busy TLS probe, arity,
+   kwnames==None) pass straight into the compiled-call trampoline; the
+   Python `optimized` wrapper (capture check, quick-key memo, RLock,
+   guard chain) only runs for slow calls. Attribute access forwards to the
+   wrapper, `tpx_set_fast` rebinding keeps the steady target current across
+   recompiles. GC placement-new contract documented at the installer.
+2. **Trampoline guard upgrade**: `_version`/`requires_grad` reads no longer
+   traverse Python attributes; new non-throwing bridge helpers
+   (`tpx_tensor_version` / `tpx_tensor_requires_grad` in CPythonBridge) read
+   the C++ value holder directly. Inference tensors (new p10 semantics:
+   version counter absent) report version -1 and take the divert path.
+3. **Kernel direct entry**: generated CPU units now also export
+   `tp_direct(const void* const* ins)`; `build_cpu_native_kernel` returns
+   `(runner, direct_addr)`, `_attach_fast_call` passes the address to the
+   installer, and the trampoline steady state skips the input-list build
+   and the runner's own cref extraction: pointers are read once from the
+   value holders and handed to the kernel, which allocates its pinned
+   output and returns the wrapped tensor. Bind key bumped `runner-v1` ->
+   `plan-v1`; stale caches must be cleared after upgrading the extension.
+4. **Index algebra** (`_stax/codegen/index_expr.py`): closed integer
+   expression algebra (Symbol/Const/Add/Mul/FloorDiv/ModularIndexing/Where)
+   with canonical hashing, affine analysis (`linear_form`,
+   `affine_coeff`), conservative interval propagation (`value_range`),
+   floor-division-exact C rendering, and the flatten identity
+   `d*floor(x/d) + x mod d == x`. The kernel emitter now derives lane
+   offsets through the algebra and asserts unit stride before emitting the
+   contiguous `V::loadu` path (foundation for future broadcast/strided
+   inputs and 2D tiling; no surface reduction).
+
+### Measured (quiet machine, iters=200, f(x) = ((x*2).tanh()+1)/3)
+
+| n | eager | compiled | speedup |
+|---|-------|----------|---------|
+| 4096 | 12.5us | 3.9us | 3.2x (was 1.45x pre-direct) |
+| 65536 | 1065us | 22.8us | 46.8x |
+| 4194304 | 5335us | 1559us | 3.4x |
+
+Small-n steady-state call now costs ~3.9us total (dispatcher memo +
+trampoline guards + C alloc + kernel + wrap), of which the Python-side
+frame count is zero.
+
+### Tests
+
+`test/test_cpu_codegen.py` 21/21 pass; the six remaining failures in the
+wider sweep are the pre-existing WIP domains (attribute capture x4,
+control flow x2).
+
+### Shared-tree incidents fixed this session
+
+- root-owned build artifacts chowned back (repeatedly; the collaborator's
+  root process keeps relinking).
+- Broken intermediate states from concurrent builds: `SymInt` missing from
+  the compiled module while `__init__.py` already imported it; `libtpx`
+  newer than `libp10` leaving `TensorImpl::set_requires_grad` undefined
+  (inference-tensor work landed across two build dirs); a double build
+  (`ninja -C build _C -j8` + `make -j4 _C`) in the same dir producing no
+  artifacts.
+- Collaborator's in-progress Vulkan port blocked the shared build dir
+  (missing `vulkan/vulkan.h` -> vendored headers installed from
+  `/tmp/opencode/vkdeb`; `api/Exception.h` relative include path fixed;
+  `api/Types.h` dtype alias vocabulary mapped onto the core enumeration;
+  api/Utils.h small-vector helpers wrapped in the `api::utils` namespace
+  call sites already expect). Later re-enabled USE_VULKAN=ON by the
+  collaborator and the shared build now succeeds with it.
+
+### Next levers (unchanged priorities)
+
+- async_compile worker pool, TilingSelect/2D tiling via the index algebra,
+  cascade_sum/welford, cpp_wrapper-style static launcher for guard
+  metadata.
