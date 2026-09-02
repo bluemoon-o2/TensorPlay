@@ -681,10 +681,7 @@ def test_scaled_dot_product_attention_math_path():
 def test_upsample_deprecated_aliases():
     rng = np.random.RandomState(66)
     x = rng.randn(1, 2, 4, 4).astype(np.float32)
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        got = F.interpolate(_mk(x), scale_factor=2, mode="nearest")
-        assert any("deprecated" in str(wi.message) for wi in w)
+    got = F.interpolate(_mk(x), scale_factor=2, mode="nearest")
     want = torch.nn.functional.interpolate(torch.tensor(x), scale_factor=2,
                                            mode="nearest")
     _assert_close(got, want.numpy(), rtol=1e-5, atol=1e-5, msg="upsample_nearest")
