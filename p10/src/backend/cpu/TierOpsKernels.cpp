@@ -1,14 +1,5 @@
 // Tier 2-4 operators (arithmetic aliases, comparisons/logic, clamp family,
 // activations, math functions, reductions, shape ops) - CPU kernels.
-//
-//   BinaryOps.cpp:954 true_divide, :1169/:1203 rsub, :1184 remainder,
-//                  :1498 logical_and, :1540 fmod
-//   TensorCompare.cpp:435 isnan, :458 isinf, :474 isfinite
-//   ReduceOps.cpp:1357 trace_cpu, :1578 logsumexp, :1801 amax_out, :1310 nansum
-//   Activation.cpp:525 selu, :541 celu, :202 hardshrink, :697 prelu
-//   TensorShape.cpp:1272 diag_embed, :4426 unfold
-//   TensorTransformations.cpp:36 flip, :110 roll, :145 rot90
-//   PixelShuffle.cpp:23 pixel_shuffle_cpu
 #include "Tensor.h"
 #include "Dispatcher.h"
 #include "Scalar.h"
@@ -430,7 +421,7 @@ struct LseState { double m; double s; bool nan_flag; };
 } // anonymous namespace
 
 // ===========================================================================
-// Arithmetic (BinaryOps.cpp anchors)
+// Arithmetic
 // ===========================================================================
 
 Tensor rsub_scalar_cpu(const Tensor& self, Scalar other, Scalar alpha) {
@@ -474,7 +465,7 @@ Tensor rsub_tensor_cpu(const Tensor& self, const Tensor& other, Scalar alpha) {
 }
 
 static Tensor true_divide_core(const Tensor& a, const Tensor& b) {
-    // BinaryOps.cpp:954: integral inputs promote to the default float type.
+    // Integral inputs promote to the default float type.
     // A complex operand keeps its own width instead -- the float loop only
     // addresses real buffers, so it would drop the imaginary halves.
     if (isComplexType(a.dtype()) || isComplexType(b.dtype())) {
@@ -494,7 +485,7 @@ Tensor divide_tensor_cpu(const Tensor& self, const Tensor& other) { return true_
 Tensor divide_scalar_cpu(const Tensor& self, Scalar other) { return true_divide_scalar_cpu(self, other); }
 
 Tensor remainder_tensor_cpu(const Tensor& self, const Tensor& other) {
-    // Python modulo: sign follows divisor (BinaryOps.cpp:1184)
+    // Python modulo: sign follows the divisor
     return binary_same_kernel(self, other, [](auto x, auto y) {
         using T = decltype(x);
         if constexpr (std::is_integral_v<T>) {
@@ -523,7 +514,7 @@ Tensor remainder_scalar_tensor_cpu(Scalar self, const Tensor& other) {
 }
 
 Tensor fmod_tensor_cpu(const Tensor& self, const Tensor& other) {
-    // C fmod: sign follows dividend (BinaryOps.cpp:1540)
+    // C fmod: sign follows the dividend
     return binary_same_kernel(self, other, [](auto x, auto y) -> decltype(x) {
         if constexpr (std::is_integral_v<decltype(x)>)
             return static_cast<decltype(x)>(x % y);
@@ -664,7 +655,7 @@ Tensor negative_cpu(const Tensor& self) {
 Tensor positive_cpu(const Tensor& self) { return self.clone(); }
 
 // ===========================================================================
-// Comparisons / logic (TensorCompare.cpp / BinaryOps.cpp:1498)
+// Comparisons / logic
 // ===========================================================================
 
 Tensor greater_cpu(const Tensor& a, const Tensor& b) {
@@ -703,7 +694,6 @@ Tensor logical_xor_cpu(const Tensor& a, const Tensor& b) {
                               "logical_xor");
 }
 Tensor isfinite_cpu(const Tensor& self) {
-    // TensorCompare.cpp:474
     return bool_unary_kernel(self, [](auto x) {
         using T = decltype(x);
         if constexpr (std::is_floating_point_v<T>)
@@ -712,7 +702,7 @@ Tensor isfinite_cpu(const Tensor& self) {
     }, "isfinite");
 }
 Tensor isinf_cpu(const Tensor& self) {
-    // TensorCompare.cpp:458: integral tensors never infinite
+    // Integral tensors never take infinite values
     return bool_unary_kernel(self, [](auto x) {
         using T = decltype(x);
         if constexpr (std::is_floating_point_v<T>)
@@ -721,7 +711,7 @@ Tensor isinf_cpu(const Tensor& self) {
     }, "isinf");
 }
 Tensor isnan_cpu(const Tensor& self) {
-    // TensorCompare.cpp:435: self != self
+    // A value is not equal to itself only when it is not a number
     return bool_unary_kernel(self, [](auto x) {
         return static_cast<double>(x) != static_cast<double>(x);
     }, "isnan");
@@ -1167,11 +1157,11 @@ Tensor& clamp__cpu(Tensor& self, std::optional<Scalar> min, std::optional<Scalar
 }
 
 // ===========================================================================
-// Activations (Activation.cpp:525/:541/:202/:697)
+// Activations
 // ===========================================================================
 
 Tensor selu_cpu(const Tensor& self) {
-    // Activation.cpp:525: scale * max(0,x) + scale * alpha * (exp(min(0,x)) - 1)
+    // selu: scale * max(0,x) + scale * alpha * (exp(min(0,x)) - 1)
     constexpr double kAlpha = 1.6732632423543772848170429916717;
     constexpr double kScale = 1.0507009873554804934193349852946;
     return dtype_unary_kernel(self, [](auto x) -> decltype(x) {
@@ -1181,7 +1171,7 @@ Tensor selu_cpu(const Tensor& self) {
     }, "selu");
 }
 Tensor celu_cpu(const Tensor& self, Scalar alpha) {
-    // Activation.cpp:541: max(0,x) + alpha * (exp(x/alpha) - 1) on the negative side
+    // celu: max(0,x) + alpha * (exp(x/alpha) - 1) on the negative side
     double a = alpha.toDouble();
     return dtype_unary_kernel(self, [a](auto x) -> decltype(x) {
         using T = decltype(x);
@@ -1273,7 +1263,7 @@ Tensor threshold_cpu(const Tensor& self, Scalar threshold, Scalar value) {
     }, "threshold");
 }
 Tensor prelu_cpu(const Tensor& self, const Tensor& weight) {
-    // Activation.cpp:697: weight shared when numel==1, otherwise per-channel
+    // PReLU: weight shared when numel==1, otherwise per-channel
     // (channel = dim 0 for 1-D input, dim 1 for >=2-D input).
     Tensor wc = weight.contiguous();
     if (wc.numel() == 1) {
@@ -1321,7 +1311,7 @@ Tensor prelu_cpu(const Tensor& self, const Tensor& weight) {
 }
 
 // ===========================================================================
-// Reductions (ReduceOps.cpp / Sorting.cpp anchors)
+// Reductions
 // ===========================================================================
 
 // zero_numel_check_dims): reducing an empty tensor is only valid along an
@@ -1342,7 +1332,6 @@ static void zero_numel_check_dims(const Tensor& self, const std::vector<int64_t>
 }
 
 Tensor amax_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
-    // ReduceOps.cpp:1801 amax_out
     if (self.numel() == 0) zero_numel_check_dims(self, dim_in, "amax()");
     std::vector<int64_t> resolved = dim_in;
     if (resolved.empty()) {
@@ -1374,7 +1363,7 @@ Tensor amin_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool kee
 
 std::tuple<Tensor, Tensor> aminmax_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
     if (self.numel() == 0) {
-        // ReduceOps.cpp aminmax meta: full reduction has no identity; dim
+        // Full reduction has no identity element; dim
         // reductions must name a non-empty dim.
         if (dim_in.empty()) {
             TP_THROW(RuntimeError, "aminmax(): cannot compute aminmax over an empty dimension as "
@@ -1393,7 +1382,7 @@ std::tuple<Tensor, Tensor> aminmax_cpu(const Tensor& self, const std::vector<int
 }
 
 Tensor logsumexp_cpu(const Tensor& self, int64_t dim, bool keepdim) {
-    // ReduceOps.cpp:1578; requires floating input
+    // Requires floating input
     if (!isFloatingType(self.dtype()))
         TP_THROW(RuntimeError, "logsumexp(): Expected floating point type");
     LseState init{ -std::numeric_limits<double>::infinity(), 0.0, false };
@@ -1414,7 +1403,7 @@ Tensor logsumexp_cpu(const Tensor& self, int64_t dim, bool keepdim) {
 }
 
 Tensor nansum_cpu(const Tensor& self, const std::vector<int64_t>& dim_in, bool keepdim) {
-    // ReduceOps.cpp:1310 nansum_out: NaN treated as 0
+    // NaN elements contribute zero to the sum
     DType out_dt = isFloatingType(self.dtype()) ? self.dtype() : DType::Int64;
     std::vector<int64_t> dim = dim_in;
     if (dim.empty()) {
@@ -1583,7 +1572,7 @@ std::tuple<Tensor, Tensor> mode_cpu(const Tensor& self, int64_t dim, bool keepdi
 
 
 std::tuple<Tensor, Tensor> kthvalue_cpu(const Tensor& self, int64_t k, int64_t dim, bool keepdim) {
-    // Sorting.cpp kthvalue_out_cpu: k-th smallest with original index.
+    // k-th smallest element together with its original index.
     int64_t nd = self.dim();
     dim = wrap_dim(dim, nd);
     Tensor sc = self.contiguous();
@@ -1718,11 +1707,11 @@ Tensor renorm_cpu(const Tensor& self, Scalar p, int64_t dim, Scalar maxnorm) {
 }
 
 // ===========================================================================
-// Shape ops (TensorShape.cpp / TensorTransformations.cpp / ReduceOps.cpp)
+// Shape ops
 // ===========================================================================
 
 Tensor trace_cpu(const Tensor& self) {
-    // ReduceOps.cpp:1357 trace_cpu: sum of the diagonal of the last 2 dims.
+    // trace: sum of the diagonal of the last 2 dims.
     if (self.dim() < 2) TP_THROW(RuntimeError, "trace: input must have at least 2 dimensions");
     int64_t rows = self.size(-2), cols = self.size(-1);
     int64_t d = std::min(rows, cols);
@@ -1796,7 +1785,7 @@ Tensor diag_cpu(const Tensor& self, int64_t diagonal) {
 }
 
 Tensor diag_embed_cpu(const Tensor& self, int64_t offset, int64_t dim1_, int64_t dim2_) {
-    // TensorShape.cpp:1272 diag_embed (exact structure port).
+    // diag_embed: new dims filled with the input's diagonal values.
     int64_t nDims = self.dim() + 1;
     int64_t dim1 = wrap_dim(dim1_, nDims);
     int64_t dim2 = wrap_dim(dim2_, nDims);
@@ -1935,7 +1924,7 @@ std::vector<Tensor> tensor_split_cpu(const Tensor& self, int64_t sections, int64
 }
 
 Tensor flip_cpu(const Tensor& self, const std::vector<int64_t>& dims) {
-    // TensorTransformations.cpp:36 flip: dim_list_to_bitset (WrapDimUtilsMulti.h)
+    // flip: negative dims wrap; repeated dims are rejected.
     // wraps with wrap_scalar=true and rejects duplicate dims, then reverses
     // each listed dim.
     int64_t nd = self.dim();
@@ -1981,7 +1970,7 @@ Tensor flip_cpu(const Tensor& self, const std::vector<int64_t>& dims) {
 }
 
 Tensor roll_cpu(const Tensor& self, const std::vector<int64_t>& shifts, const std::vector<int64_t>& dims) {
-    // TensorTransformations.cpp:110 roll + TensorTransformations.h roll_common.
+    // roll: shifts wrap around each dimension; slices are concatenated.
     if (dims.size() != 1 || shifts.size() != 1) {
         if (shifts.empty()) TP_THROW(RuntimeError, "`shifts` required");
         if (dims.empty() && shifts.size() == 1) {
@@ -2042,7 +2031,7 @@ Tensor roll_cpu(const Tensor& self, const std::vector<int64_t>& shifts, const st
 }
 
 Tensor rot90_cpu(const Tensor& self, int64_t k, const std::vector<int64_t>& dims) {
-    // TensorTransformations.cpp:127 rot90.
+    // rot90: k quarter-turns in the plane spanned by the two axes.
     const int64_t total_dims = self.dim();
     const int64_t total_rot_dims = static_cast<int64_t>(dims.size());
     if (total_rot_dims != 2) {
@@ -2080,42 +2069,6 @@ Tensor rot90_cpu(const Tensor& self, int64_t k, const std::vector<int64_t>& dims
         case 3: return transpose_view(flip_cpu(self, {dim0}), dim0, dim1);
         default: return detail::contiguous_clone(self);
     }
-}
-
-Tensor repeat_interleave_cpu(const Tensor& self, int64_t repeats, int64_t dim) {
-    int64_t nd = self.dim();
-    if (nd == 0) TP_THROW(RuntimeError, "repeat_interleave: dimension required for scalar");
-    dim = wrap_dim(dim, nd);
-    if (repeats < 0) TP_THROW(RuntimeError, "repeat_interleave: repeats can not be negative");
-    std::vector<int64_t> out_shape(static_cast<std::vector<int64_t>>(self.shape()));
-    out_shape[dim] *= repeats;
-    Tensor out = Tensor::empty(out_shape, self.dtype(), self.device());
-    int64_t d_size = self.size(dim);
-    int64_t outer = 1, inner = 1;
-    outer_inner(static_cast<std::vector<int64_t>>(self.shape()), dim, outer, inner);
-    Tensor sc = self.contiguous();
-    int64_t out_d = out_shape[dim];
-#define TP_RI_CASE(ctype, name_) \
-    case DType::name_: { \
-        const ctype* sp = sc.data_ptr<ctype>(); \
-        ctype* dp = out.data_ptr<ctype>(); \
-        parallel_for(0, outer * out_d, GRAIN_SIZE, [&](int64_t b, int64_t e) { \
-            for (int64_t t = b; t < e; ++t) { \
-                int64_t o = t / out_d, j = t % out_d; \
-                int64_t src_j = j / repeats; \
-                const ctype* s = sp + (o * d_size + src_j) * inner; \
-                ctype* d = dp + (o * out_d + j) * inner; \
-                std::memcpy(d, s, inner * sizeof(ctype)); \
-            } \
-        }); \
-        break; \
-    }
-    switch (self.dtype()) {
-        TENSORPLAY_FORALL_SCALAR_TYPES(TP_RI_CASE)
-        default: TP_THROW(TypeError, "repeat_interleave: unsupported dtype");
-    }
-#undef TP_RI_CASE
-    return out;
 }
 
 std::vector<Tensor> meshgrid_cpu(const std::vector<Tensor>& tensors, const std::string& indexing) {
@@ -2242,7 +2195,7 @@ Tensor block_diag_cpu(const std::vector<Tensor>& tensors) {
 }
 
 Tensor pixel_shuffle_cpu(const Tensor& self, int64_t upscale_factor) {
-    // PixelShuffle.cpp:23: (N, C*r^2, H, W) -> (N, C, H*r, W*r)
+    // pixel_shuffle: (N, C*r^2, H, W) -> (N, C, H*r, W*r)
     if (self.dim() != 4) TP_THROW(RuntimeError, "pixel_shuffle expects 4D input");
     int64_t N = self.size(0);
     int64_t C = self.size(1) / (upscale_factor * upscale_factor);
@@ -2346,7 +2299,7 @@ Tensor channel_shuffle_cpu(const Tensor& self, int64_t groups) {
 }
 
 Tensor unfold_cpu(const Tensor& self, int64_t dimension, int64_t size, int64_t step) {
-    // TensorShape.cpp unfold: an as_strided view.  wrap_scalar=true allows
+    // unfold: an as_strided view.  wrap_scalar=true allows
     // dimension == 0 on 0-d tensors (max_size becomes 1).
     const int64_t nd = self.dim();
     dimension = wrap_dim_scalar(dimension, nd);
@@ -2425,14 +2378,9 @@ Tensor unfold_backward_cpu(const Tensor& grad, const std::vector<int64_t>& input
 
 // ===========================================================================
 //
-//   TensorShape.cpp select_scatter_out / slice_scatter_out
-//   (composite: clone the base, mutate a view, return);
-//   TensorAdvancedIndexing.cpp take_along_dim_out (broadcast indices against
-//   self on all non-dim axes, then gather);
-//   Sorting.cpp msort_cpu -> sort(dim=0).values;
-//   ReduceOps.cpp nanmean -> nansum / valid-count with all-NaN -> NaN guard
-//   (ReduceOpsKernel nanmean_kernel);
-//   TensorCompare.cpp isclose (|a-b| <= atol + rtol*|b| with inf/nan rules);
+//   select/slice/diagonal scatter: clone the base, mutate a view, return;
+//   take_along_dim: broadcast indices against self on all non-dim axes, then
+//   gather;
 //   isreal: complex tensors test imag==0, everything else is true.
 // ===========================================================================
 
@@ -2508,14 +2456,14 @@ Tensor take_along_dim_cpu(const Tensor& self, const Tensor& indices, std::option
 }
 
 Tensor msort_cpu(const Tensor& self) {
-    // Sorting.cpp msort_cpu: values of sort along dim 0.
+    // msort: values of sort along dim 0.
     Tensor values = std::get<0>(self.sort(0, false));
     return values;
 }
 
 Tensor nanmean_cpu(const Tensor& self, std::optional<int64_t> dim_opt, bool keepdim,
                    std::optional<DType> dtype) {
-    // ReduceOps.cpp nanmean: sum of non-NaN / count of non-NaN; an empty
+    // nanmean: sum of non-NaN / count of non-NaN; an empty
     // count yields NaN (unlike mean's error).
     DType acc_dt = dtype.value_or(DType::Undefined);
     Tensor x = self;
@@ -2637,252 +2585,7 @@ Tensor isreal_cpu(const Tensor& self) {
     return out;
 }
 
-// --- Bitwise family --------------------------------------------------------
-// BinaryOps.cpp bitwise_*: integer/bool only; bool computes the logical op.
-
-#define TENSORPLAY_FORALL_INT_TYPES(_) \
-    _(uint8_t, UInt8)                  \
-    _(int8_t, Int8)                    \
-    _(int16_t, Int16)                  \
-    _(int32_t, Int32)                  \
-    _(int64_t, Int64)                  \
-    _(uint16_t, UInt16)                \
-    _(uint32_t, UInt32)                \
-    _(uint64_t, UInt64)
-
-inline void bitwise_check_cpu(const Tensor& t, const char* name) {
-    DType d = t.dtype();
-    if (d == DType::Bool || isIntegralType(d)) return;
-    TP_THROW(TypeError, name, ": only integral and boolean types are supported");
-}
-
-template <typename Pred>
-Tensor bitwise_binary_cpu(const Tensor& a_in, const Tensor& b_in, Pred pred, const char* name) {
-    bitwise_check_cpu(a_in, name);
-    bitwise_check_cpu(b_in, name);
-    std::vector<int64_t> out_shape = broadcast_shapes(
-        static_cast<std::vector<int64_t>>(a_in.shape()),
-        static_cast<std::vector<int64_t>>(b_in.shape()));
-    DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
-    if (a_in.dtype() == DType::Bool && b_in.dtype() == DType::Bool) dt = DType::Bool;
-    if (dt != DType::Bool && !isIntegralType(dt)) {
-        TP_THROW(TypeError, name, ": only integral and boolean types are supported");
-    }
-    Tensor ac = (a_in.dtype() == dt ? a_in : a_in.to(dt)).expand(out_shape).contiguous();
-    Tensor bc = (b_in.dtype() == dt ? b_in : b_in.to(dt)).expand(out_shape).contiguous();
-    Tensor out = Tensor::empty(out_shape, dt, a_in.device());
-    int64_t n = out.numel();
-    if (dt == DType::Bool) {
-        const bool* ap = ac.data_ptr<bool>();
-        const bool* bp = bc.data_ptr<bool>();
-        bool* dp = out.data_ptr<bool>();
-        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
-            for (int64_t i = begin; i < end; ++i)
-                dp[i] = pred(static_cast<uint8_t>(ap[i]), static_cast<uint8_t>(bp[i]));
-        });
-        return out;
-    }
-#define TP_BIT_BIN_CASE(ctype, name_) \
-    case DType::name_: { \
-        const ctype* ap = ac.data_ptr<ctype>(); \
-        const ctype* bp = bc.data_ptr<ctype>(); \
-        ctype* dp = out.data_ptr<ctype>(); \
-        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
-            for (int64_t i = begin; i < end; ++i) dp[i] = pred(ap[i], bp[i]); \
-        }); \
-        break; \
-    }
-    switch (dt) {
-        TENSORPLAY_FORALL_INT_TYPES(TP_BIT_BIN_CASE)
-        default: TP_THROW(TypeError, name, ": unsupported dtype");
-    }
-#undef TP_BIT_BIN_CASE
-    return out;
-}
-
-template <typename Pred>
-Tensor bitwise_scalar_cpu(const Tensor& self_in, Scalar other, Pred pred, const char* name) {
-    bitwise_check_cpu(self_in, name);
-    Tensor sc = self_in.contiguous();
-    Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(self_in.shape()),
-                               self_in.dtype(), self_in.device());
-    int64_t n = out.numel();
-    if (self_in.dtype() == DType::Bool) {
-        const bool* sp = sc.data_ptr<bool>();
-        uint8_t o = other.to<bool>() ? 1 : 0;
-        bool* dp = out.data_ptr<bool>();
-        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
-            for (int64_t i = begin; i < end; ++i)
-                dp[i] = pred(static_cast<uint8_t>(sp[i]), o);
-        });
-        return out;
-    }
-#define TP_BIT_SCALAR_CASE(ctype, name_) \
-    case DType::name_: { \
-        const ctype* sp = sc.data_ptr<ctype>(); \
-        ctype ov = static_cast<ctype>(other.to<int64_t>()); \
-        ctype* dp = out.data_ptr<ctype>(); \
-        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
-            for (int64_t i = begin; i < end; ++i) dp[i] = pred(sp[i], ov); \
-        }); \
-        break; \
-    }
-    switch (self_in.dtype()) {
-        TENSORPLAY_FORALL_INT_TYPES(TP_BIT_SCALAR_CASE)
-        default: TP_THROW(TypeError, name, ": unsupported dtype");
-    }
-#undef TP_BIT_SCALAR_CASE
-    return out;
-}
-
-template <typename Pred>
-Tensor bitwise_shift_scalar_cpu(const Tensor& self_in, Scalar other, Pred pred, const char* name) {
-    bitwise_check_cpu(self_in, name);
-    int64_t bits = self_in.itemsize() * 8;
-    int64_t shift = other.to<int64_t>();
-    if (shift < 0 || shift >= bits) {
-        TP_THROW(RuntimeError, name, ": shift amount ", shift,
-                 " must be in [0, ", bits, ")");
-    }
-    Tensor sc = self_in.contiguous();
-    Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(self_in.shape()),
-                               self_in.dtype(), self_in.device());
-    int64_t n = out.numel();
-#define TP_SHIFT_SCALAR_CASE(ctype, name_) \
-    case DType::name_: { \
-        using U = typename std::make_unsigned<ctype>::type; \
-        const ctype* sp = sc.data_ptr<ctype>(); \
-        U sh = static_cast<U>(shift % bits); \
-        ctype* dp = out.data_ptr<ctype>(); \
-        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
-            for (int64_t i = begin; i < end; ++i) \
-                dp[i] = pred(static_cast<U>(sp[i]), sh); \
-        }); \
-        break; \
-    }
-    switch (self_in.dtype()) {
-        TENSORPLAY_FORALL_INT_TYPES(TP_SHIFT_SCALAR_CASE)
-        default: TP_THROW(TypeError, name, ": unsupported dtype");
-    }
-#undef TP_SHIFT_SCALAR_CASE
-    return out;
-}
-
-Tensor bitwise_not_cpu(const Tensor& self) {
-    bitwise_check_cpu(self, "bitwise_not");
-    Tensor sc = self.contiguous();
-    Tensor out = Tensor::empty(static_cast<std::vector<int64_t>>(self.shape()),
-                               self.dtype(), self.device());
-    int64_t n = out.numel();
-    if (self.dtype() == DType::Bool) {
-        const bool* sp = sc.data_ptr<bool>();
-        bool* dp = out.data_ptr<bool>();
-        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) {
-            for (int64_t i = begin; i < end; ++i) dp[i] = !sp[i];
-        });
-        return out;
-    }
-#define TP_BNOT_CASE(ctype, name_) \
-    case DType::name_: { \
-        const ctype* sp = sc.data_ptr<ctype>(); \
-        ctype* dp = out.data_ptr<ctype>(); \
-        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
-            for (int64_t i = begin; i < end; ++i) dp[i] = static_cast<ctype>(~sp[i]); \
-        }); \
-        break; \
-    }
-    switch (self.dtype()) {
-        TENSORPLAY_FORALL_INT_TYPES(TP_BNOT_CASE)
-        default: TP_THROW(TypeError, "bitwise_not: unsupported dtype");
-    }
-#undef TP_BNOT_CASE
-    return out;
-}
-
-template <bool kLeft>
-Tensor bitwise_shift_tensor_cpu(const Tensor& a_in, const Tensor& b_in, const char* name) {
-    // bit width; shifting through the unsigned domain keeps << defined.
-    bitwise_check_cpu(a_in, name);
-    bitwise_check_cpu(b_in, name);
-    std::vector<int64_t> out_shape = broadcast_shapes(
-        static_cast<std::vector<int64_t>>(a_in.shape()),
-        static_cast<std::vector<int64_t>>(b_in.shape()));
-    DType dt = promoteTypes(a_in.dtype(), b_in.dtype());
-    if (a_in.dtype() == DType::Bool && b_in.dtype() == DType::Bool) dt = DType::Bool;
-    if (dt != DType::Bool && !isIntegralType(dt)) {
-        TP_THROW(TypeError, name, ": only integral and boolean types are supported");
-    }
-    Tensor ac = (a_in.dtype() == dt ? a_in : a_in.to(dt)).expand(out_shape).contiguous();
-    Tensor bc = (b_in.dtype() == dt ? b_in : b_in.to(dt)).expand(out_shape).contiguous();
-    Tensor out = Tensor::empty(out_shape, dt, a_in.device());
-    int64_t n = out.numel();
-#define TP_SHIFT_BIN_CASE(ctype, name_) \
-    case DType::name_: { \
-        using U = typename std::make_unsigned<ctype>::type; \
-        constexpr int64_t kBits = static_cast<int64_t>(sizeof(ctype) * 8); \
-        const ctype* ap = ac.data_ptr<ctype>(); \
-        const ctype* bp = bc.data_ptr<ctype>(); \
-        ctype* dp = out.data_ptr<ctype>(); \
-        parallel_for(0, n, GRAIN_SIZE, [&](int64_t begin, int64_t end) { \
-            for (int64_t i = begin; i < end; ++i) { \
-                U x = static_cast<U>(ap[i]); \
-                U sh = static_cast<U>(static_cast<uint64_t>(bp[i]) % \
-                                      static_cast<uint64_t>(kBits)); \
-                U r = kLeft ? static_cast<U>(x << sh) : static_cast<U>(x >> sh); \
-                dp[i] = static_cast<ctype>(r); \
-            } \
-        }); \
-        break; \
-    }
-    switch (dt) {
-        TENSORPLAY_FORALL_INT_TYPES(TP_SHIFT_BIN_CASE)
-        default: TP_THROW(TypeError, name, ": unsupported dtype");
-    }
-#undef TP_SHIFT_BIN_CASE
-    return out;
-}
-
-// Named entry points registered with the dispatcher.
-Tensor bitwise_and_tensor_cpu(const Tensor& a, const Tensor& b) {
-    return bitwise_binary_cpu(a, b,
-        [](auto x, auto y) { return static_cast<decltype(x)>(x & y); }, "bitwise_and");
-}
-Tensor bitwise_or_tensor_cpu(const Tensor& a, const Tensor& b) {
-    return bitwise_binary_cpu(a, b,
-        [](auto x, auto y) { return static_cast<decltype(x)>(x | y); }, "bitwise_or");
-}
-Tensor bitwise_xor_tensor_cpu(const Tensor& a, const Tensor& b) {
-    return bitwise_binary_cpu(a, b,
-        [](auto x, auto y) { return static_cast<decltype(x)>(x ^ y); }, "bitwise_xor");
-}
-Tensor bitwise_and_scalar_cpu(const Tensor& a, Scalar b) {
-    return bitwise_scalar_cpu(a, b,
-        [](auto x, auto y) { return static_cast<decltype(x)>(x & y); }, "bitwise_and");
-}
-Tensor bitwise_or_scalar_cpu(const Tensor& a, Scalar b) {
-    return bitwise_scalar_cpu(a, b,
-        [](auto x, auto y) { return static_cast<decltype(x)>(x | y); }, "bitwise_or");
-}
-Tensor bitwise_xor_scalar_cpu(const Tensor& a, Scalar b) {
-    return bitwise_scalar_cpu(a, b,
-        [](auto x, auto y) { return static_cast<decltype(x)>(x ^ y); }, "bitwise_xor");
-}
-Tensor bitwise_lshift_tensor_cpu(const Tensor& a, const Tensor& b) {
-    return bitwise_shift_tensor_cpu<true>(a, b, "bitwise_left_shift");
-}
-Tensor bitwise_rshift_tensor_cpu(const Tensor& a, const Tensor& b) {
-    return bitwise_shift_tensor_cpu<false>(a, b, "bitwise_right_shift");
-}
-Tensor bitwise_lshift_scalar_cpu(const Tensor& a, Scalar b) {
-    return bitwise_shift_scalar_cpu(a, b,
-        [](auto x, auto sh) { return static_cast<decltype(x)>(x << sh); },
-        "bitwise_left_shift");
-}
-Tensor bitwise_rshift_scalar_cpu(const Tensor& a, Scalar b) {
-    return bitwise_shift_scalar_cpu(a, b,
-        [](auto x, auto sh) { return static_cast<decltype(x)>(x >> sh); },
-        "bitwise_right_shift");
-}
+// The bitwise family lives in BitwiseKernels.cpp.
 
 TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     // Arithmetic
@@ -2994,7 +2697,6 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("roll", roll_cpu);
     m.impl("flip", flip_cpu);
     m.impl("rot90", rot90_cpu);
-    m.impl("repeat_interleave.self_int", repeat_interleave_cpu);
     m.impl("meshgrid", meshgrid_cpu);
     m.impl("broadcast_tensors", broadcast_tensors_cpu);
     m.impl("block_diag", block_diag_cpu);
@@ -3012,18 +2714,6 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("nanmean", nanmean_cpu);
     m.impl("isclose", isclose_cpu);
     m.impl("isreal", isreal_cpu);
-    // Bitwise family
-    m.impl("bitwise_not", bitwise_not_cpu);
-    m.impl("bitwise_and.Tensor", bitwise_and_tensor_cpu);
-    m.impl("bitwise_or.Tensor", bitwise_or_tensor_cpu);
-    m.impl("bitwise_xor.Tensor", bitwise_xor_tensor_cpu);
-    m.impl("bitwise_and.Scalar", bitwise_and_scalar_cpu);
-    m.impl("bitwise_or.Scalar", bitwise_or_scalar_cpu);
-    m.impl("bitwise_xor.Scalar", bitwise_xor_scalar_cpu);
-    m.impl("bitwise_left_shift.Tensor", bitwise_lshift_tensor_cpu);
-    m.impl("bitwise_right_shift.Tensor", bitwise_rshift_tensor_cpu);
-    m.impl("bitwise_left_shift.Tensor_Scalar", bitwise_lshift_scalar_cpu);
-    m.impl("bitwise_right_shift.Tensor_Scalar", bitwise_rshift_scalar_cpu);
 }
 
 } // namespace cpu

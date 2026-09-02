@@ -394,21 +394,6 @@ __global__ void broadcast_map_kernel(int64_t n, int64_t nd, const T* src, T* dst
     }
 }
 
-template <typename T>
-__global__ void repeat_interleave_kernel(int64_t total_rows, int64_t inner, int64_t out_d,
-                                         int64_t d_size, int64_t repeats,
-                                         const T* src, T* dst) {
-    int64_t t = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
-    for (; t < total_rows; t += stride) {
-        int64_t o = t / out_d, j = t % out_d;
-        int64_t src_j = j / repeats;
-        const T* s = src + (o * d_size + src_j) * inner;
-        T* d = dst + (o * out_d + j) * inner;
-        for (int64_t c = 0; c < inner; ++c) d[c] = s[c];
-    }
-}
-
 } // anonymous namespace
 
 // ===========================================================================
@@ -1162,46 +1147,6 @@ Tensor rot90_cuda(const Tensor& self, int64_t k, const std::vector<int64_t>& dim
     }
 }
 
-Tensor repeat_interleave_cuda(const Tensor& self, int64_t repeats, int64_t dim) {
-    int64_t nd = self.dim();
-    if (nd == 0) TP_THROW(RuntimeError, "repeat_interleave: dimension required for scalar");
-    dim = wrap_dim(dim, nd);
-    if (repeats < 0) TP_THROW(RuntimeError, "repeat_interleave: repeats can not be negative");
-    std::vector<int64_t> out_shape = shape_of(self);
-    out_shape[dim] *= repeats;
-    Tensor out = Tensor::empty(out_shape, self.dtype(), self.device());
-    int64_t d_size = self.size(dim);
-    int64_t outer = 1, inner = 1;
-    outer_inner(shape_of(self), dim, outer, inner);
-    Tensor sc = self.contiguous();
-    int64_t out_d = out_shape[dim];
-    int64_t total_rows = outer * out_d;
-    if (total_rows == 0 || inner == 0) return out;
-    auto stream = getCurrentCUDAStream().stream();
-    dim3 grid = make_grid(total_rows * inner), block(kThreads);
-#define TP_RI4(ctype, name_) \
-    case DType::name_: \
-        ew_unary_index_copy<ctype><<<grid, block, 0, stream>>>( \
-            total_rows, inner, out_d, d_size, repeats, sc.data_ptr<ctype>(), \
-            out.data_ptr<ctype>()); \
-        break;
-    (void)0;
-#undef TP_RI4
-#define TP_RI5(ctype, name_) \
-    case DType::name_: \
-        repeat_interleave_kernel<ctype><<<grid, block, 0, stream>>>( \
-            total_rows, inner, out_d, d_size, repeats, sc.data_ptr<ctype>(), \
-            out.data_ptr<ctype>()); \
-        break;
-    switch (self.dtype()) {
-        TENSORPLAY_FORALL_SCALAR_TYPES(TP_RI5)
-        default: TP_THROW(TypeError, "repeat_interleave: unsupported dtype");
-    }
-#undef TP_RI5
-    CUDA_CHECK(cudaGetLastError());
-    return out;
-}
-
 std::vector<Tensor> meshgrid_cuda(const std::vector<Tensor>& tensors, const std::string& indexing) {
     // ij-indexing semantics.
     size_t k = tensors.size();
@@ -1481,7 +1426,6 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, TierReduceOpsKernels) {
     m.impl("flip", flip_cuda);
     m.impl("roll", roll_cuda);
     m.impl("rot90", rot90_cuda);
-    m.impl("repeat_interleave.self_int", repeat_interleave_cuda);
     m.impl("meshgrid", meshgrid_cuda);
     m.impl("broadcast_tensors", broadcast_tensors_cuda);
     m.impl("block_diag", block_diag_cuda);
