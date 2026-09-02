@@ -731,6 +731,8 @@ __all__ = [
     "dequantize",
     "dequantize_per_channel",
     "dequantize_per_tensor",
+    "dequantize_per_tensor_qint32",
+    "dequantize_per_tensor_quint8",
     "det",
     "detach",
     "detach_",
@@ -977,6 +979,7 @@ __all__ = [
     "is_inference",
     "is_neg",
     "is_nonzero",
+    "is_quantized",
     "is_same_size",
     "is_signed",
     "is_vulkan_available",
@@ -1056,6 +1059,7 @@ __all__ = [
     "linalg_tensorinv",
     "linalg_tensorsolve",
     "linalg_vander",
+    "linalg_vdot",
     "linalg_vecdot",
     "linalg_vector_norm",
     "linear",
@@ -1262,19 +1266,31 @@ __all__ = [
     "q_per_channel_zero_points",
     "q_scale",
     "q_zero_point",
+    "qscheme",
     "quantile",
     "quantize_per_channel",
     "quantize_per_tensor",
     "quantize_per_tensor_dynamic",
+    "quantize_per_tensor_qint32",
+    "quantize_per_tensor_quint8",
+    "quantized_add",
     "quantized_batch_norm",
+    "quantized_clamp",
+    "quantized_conv2d",
+    "quantized_conv2d_prepack",
+    "quantized_conv2d_run",
+    "quantized_conv2d_unpack",
+    "quantized_div",
     "quantized_gru_cell",
     "quantized_linear",
     "quantized_lstm_cell",
     "quantized_max_pool1d",
     "quantized_max_pool2d",
     "quantized_max_pool3d",
+    "quantized_mul",
     "quantized_rnn_relu_cell",
     "quantized_rnn_tanh_cell",
+    "quantized_sub",
     "rad2deg",
     "rad2deg_",
     "rand",
@@ -8147,6 +8163,9 @@ def arange(
 def arange(
     end: Number | _complex,
     *,
+    dtype: _dtype = DType.undefined,
+    device: Device | None = None,
+    requires_grad: _bool = False,
     out: TensorBase | None = None,
 ) -> TensorBase:
     r"""
@@ -13254,6 +13273,16 @@ def dequantize_per_channel(
     axis: _int = 0,
 ) -> TensorBase: ...
 def dequantize_per_tensor(
+    self: TensorBase,
+    scale: _float,
+    zero_point: _int,
+) -> TensorBase: ...
+def dequantize_per_tensor_qint32(
+    self: TensorBase,
+    scale: _float,
+    zero_point: _int,
+) -> TensorBase: ...
+def dequantize_per_tensor_quint8(
     self: TensorBase,
     scale: _float,
     zero_point: _int,
@@ -18978,15 +19007,6 @@ def i0_(self: TensorBase) -> TensorBase: ...
 def i0e(self: TensorBase) -> TensorBase: ...
 def i1(self: TensorBase) -> TensorBase: ...
 def i1e(self: TensorBase) -> TensorBase: ...
-@overload
-def igamma(a: TensorBase, x: TensorBase) -> TensorBase:
-    r"""
-    igamma(input, other, *, out=None) -> Tensor
-
-    Alias for :func:`tensorplay.special.gammainc`.
-    """
-
-@overload
 def igamma(
     self: TensorBase,
     other: TensorBase,
@@ -18999,15 +19019,6 @@ def igamma(
     Alias for :func:`tensorplay.special.gammainc`.
     """
 
-@overload
-def igammac(a: TensorBase, x: TensorBase) -> TensorBase:
-    r"""
-    igammac(input, other, *, out=None) -> Tensor
-
-    Alias for :func:`tensorplay.special.gammaincc`.
-    """
-
-@overload
 def igammac(
     self: TensorBase,
     other: TensorBase,
@@ -19490,6 +19501,7 @@ def is_nonzero(self: TensorBase) -> _bool:
         RuntimeError: Boolean value of Tensor with no values is ambiguous
     """
 
+def is_quantized(self: TensorBase) -> _bool: ...
 def is_same_size(self: TensorBase, other: TensorBase) -> _bool: ...
 def is_signed(self: TensorBase) -> _bool: ...
 def is_vulkan_available() -> _bool: ...
@@ -21336,6 +21348,7 @@ def linalg_tensorsolve(
     out: TensorBase | None = None,
 ) -> TensorBase: ...
 def linalg_vander(x: TensorBase, *, N: _int | None = None) -> TensorBase: ...
+def linalg_vdot(self: TensorBase, other: TensorBase) -> TensorBase: ...
 def linalg_vecdot(
     x: TensorBase,
     y: TensorBase,
@@ -30037,6 +30050,7 @@ def q_per_channel_scales(self: TensorBase) -> TensorBase: ...
 def q_per_channel_zero_points(self: TensorBase) -> TensorBase: ...
 def q_scale(self: TensorBase) -> _float: ...
 def q_zero_point(self: TensorBase) -> _int: ...
+def qscheme(self: TensorBase) -> _int: ...
 @overload
 def quantile(
     self: TensorBase,
@@ -30556,6 +30570,28 @@ def quantize_per_tensor_dynamic(
         tensor([  0,  85, 170, 255], dtype=tensorplay.uint8)
     """
 
+def quantize_per_tensor_qint32(
+    self: TensorBase,
+    scale: _float,
+    zero_point: _int,
+) -> TensorBase: ...
+def quantize_per_tensor_quint8(
+    self: TensorBase,
+    scale: _float,
+    zero_point: _int,
+    quant_min: _int = 0,
+    quant_max: _int = 255,
+) -> TensorBase: ...
+def quantized_add(
+    a: TensorBase,
+    b: TensorBase,
+    a_scale: _float,
+    a_zero_point: _int,
+    b_scale: _float,
+    b_zero_point: _int,
+    out_scale: _float,
+    out_zero_point: _int,
+) -> TensorBase: ...
 def quantized_batch_norm(
     input: TensorBase,
     weight: TensorBase | None,
@@ -30607,6 +30643,72 @@ def quantized_batch_norm(
            quantization_scheme=tensorplay.per_tensor_affine, scale=0.2, zero_point=2)
     """
 
+def quantized_clamp(
+    self: TensorBase,
+    self_scale: _float,
+    self_zero_point: _int,
+    out_scale: _float,
+    out_zero_point: _int,
+    min: Number | _complex | None = None,
+    max: Number | _complex | None = None,
+) -> TensorBase: ...
+def quantized_conv2d(
+    input: TensorBase,
+    weight: TensorBase,
+    bias: TensorBase | None,
+    input_scale: _float,
+    input_zero_point: _int,
+    weight_scale: _float,
+    weight_zero_point: _int,
+    out_scale: _float,
+    out_zero_point: _int,
+    stride: _int | _size = 1,
+    padding: _int | _size = 0,
+    dilation: _int | _size = 1,
+    groups: _int = 1,
+) -> TensorBase: ...
+def quantized_conv2d_prepack(
+    weight: TensorBase,
+    weight_scales: TensorBase,
+    weight_zero_points: TensorBase,
+    bias: TensorBase | None = None,
+    transposed: _bool = False,
+) -> tuple[TensorBase, TensorBase]: ...
+def quantized_conv2d_run(
+    input: TensorBase,
+    weight_packed: TensorBase,
+    bias_packed: TensorBase,
+    weight_sizes: _size,
+    input_scale: _float,
+    input_zero_point: _int,
+    out_scale: _float,
+    out_zero_point: _int,
+    stride: _int | _size = 1,
+    padding: _int | _size = 0,
+    dilation: _int | _size = 1,
+    output_padding: _int | _size = 0,
+    groups: _int = 1,
+    transposed: _bool = False,
+    output_min: Number | _complex | None = None,
+    output_max: Number | _complex | None = None,
+) -> TensorBase: ...
+def quantized_conv2d_unpack(
+    weight_packed: TensorBase,
+    bias_packed: TensorBase,
+    weight_sizes: _size,
+    transposed: _bool = False,
+    depthwise: _bool = False,
+) -> tuple[TensorBase, TensorBase]: ...
+def quantized_div(
+    a: TensorBase,
+    b: TensorBase,
+    a_scale: _float,
+    a_zero_point: _int,
+    b_scale: _float,
+    b_zero_point: _int,
+    out_scale: _float,
+    out_zero_point: _int,
+) -> TensorBase: ...
 def quantized_gru_cell(
     input: TensorBase,
     hx: TensorBase,
@@ -30732,6 +30834,16 @@ def quantized_max_pool3d(
     dilation: _int | _size = 1,
     ceil_mode: _bool = False,
 ) -> TensorBase: ...
+def quantized_mul(
+    a: TensorBase,
+    b: TensorBase,
+    a_scale: _float,
+    a_zero_point: _int,
+    b_scale: _float,
+    b_zero_point: _int,
+    out_scale: _float,
+    out_zero_point: _int,
+) -> TensorBase: ...
 def quantized_rnn_relu_cell(
     input: TensorBase,
     hx: TensorBase,
@@ -30763,6 +30875,16 @@ def quantized_rnn_tanh_cell(
     scale_hh: Number | _complex,
     zero_point_ih: Number | _complex,
     zero_point_hh: Number | _complex,
+) -> TensorBase: ...
+def quantized_sub(
+    a: TensorBase,
+    b: TensorBase,
+    a_scale: _float,
+    a_zero_point: _int,
+    b_scale: _float,
+    b_zero_point: _int,
+    out_scale: _float,
+    out_zero_point: _int,
 ) -> TensorBase: ...
 def rad2deg(
     self: TensorBase,

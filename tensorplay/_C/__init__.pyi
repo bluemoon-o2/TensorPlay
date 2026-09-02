@@ -65,6 +65,9 @@ class DType(enum.Enum):
     complex64 = auto()
     complex128 = auto()
     bcomplex32 = auto()
+    qint8 = auto()
+    quint8 = auto()
+    qint32 = auto()
     bool = auto()
     undefined = auto()
 
@@ -106,6 +109,12 @@ complex64: DType = DType.complex64
 complex128: DType = DType.complex128
 
 bcomplex32: DType = DType.bcomplex32
+
+qint8: DType = DType.qint8
+
+quint8: DType = DType.quint8
+
+qint32: DType = DType.qint32
 
 undefined: DType = DType.undefined
 
@@ -961,6 +970,74 @@ class TensorBase:
         *,
         value: Number | _complex = 1,
     ) -> TensorBase: ...
+    def addmm(
+        self,
+        mat1: TensorBase,
+        mat2: TensorBase,
+        *,
+        beta: Number | _complex = 1,
+        alpha: Number | _complex = 1,
+    ) -> TensorBase:
+        r"""
+        addmm(input, mat1, mat2, out_dtype=None, *, beta=1, alpha=1, out=None) -> Tensor
+
+        Performs a matrix multiplication of the matrices :attr:`mat1` and :attr:`mat2`.
+        The matrix :attr:`input` is added to the final result.
+
+        If :attr:`mat1` is a :math:`(n \times m)` tensor, :attr:`mat2` is a
+        :math:`(m \times p)` tensor, then :attr:`input` must be
+        :ref:`broadcastable <broadcasting-semantics>` with a :math:`(n \times p)` tensor
+        and :attr:`out` will be a :math:`(n \times p)` tensor.
+
+        :attr:`alpha` and :attr:`beta` are scaling factors on matrix-vector product between
+        :attr:`mat1` and :attr:`mat2` and the added matrix :attr:`input` respectively.
+
+        .. math::
+            \text{out} = \beta\ \text{input} + \alpha\ (\text{mat1}_i \mathbin{@} \text{mat2}_i)
+
+        If :attr:`beta` is 0, then the content of :attr:`input` will be ignored, and `nan` and `inf` in
+        it will not be propagated.
+
+        For inputs of type `FloatTensor` or `DoubleTensor`, arguments :attr:`beta` and
+        :attr:`alpha` must be real numbers, otherwise they should be integers.
+
+        This operation has support for arguments with :ref:`sparse layouts<sparse-docs>`. If
+        :attr:`input` is sparse the result will have the same layout and if :attr:`out`
+        is provided it must have the same layout as :attr:`input`.
+
+
+        .. warning::
+            Sparse support is a beta feature and some layout(s)/dtype/device combinations may not be supported,
+            or may not have autograd support. If you notice missing functionality please
+            open a feature request.
+
+        This operator supports :ref:`TensorFloat32<tf32_on_ampere>`.
+
+        On certain ROCm devices, when using float16 inputs this module will use :ref:`different precision<fp16_on_mi200>` for backward.
+
+        Args:
+            input (Tensor): matrix to be added
+            mat1 (Tensor): the first matrix to be matrix multiplied
+            mat2 (Tensor): the second matrix to be matrix multiplied
+            out_dtype (dtype, optional): the dtype of the output tensor,
+                Supported only on CUDA and for tensorplay.float32 given
+                tensorplay.float16/tensorplay.bfloat16 input dtypes
+
+        Keyword args:
+            beta (Number, optional): multiplier for :attr:`input` (:math:`\beta`)
+            alpha (Number, optional): multiplier for :math:`mat1 @ mat2` (:math:`\alpha`)
+            out (Tensor, optional): the output tensor.
+
+        Example::
+
+            >>> M = tensorplay.randn(2, 3)
+            >>> mat1 = tensorplay.randn(2, 3)
+            >>> mat2 = tensorplay.randn(3, 3)
+            >>> tensorplay.addmm(M, mat1, mat2)
+            tensor([[-4.8716,  1.4671, -1.3746],
+                    [ 0.7573, -3.9555, -2.8681]])
+        """
+
     def addmm_(
         self,
         mat1: TensorBase,
@@ -1370,6 +1447,72 @@ class TensorBase:
         p: _float = 0.5,
         train: _bool = True,
     ) -> TensorBase: ...
+    def aminmax(
+        self,
+        dim: _size = (),
+        keepdim: _bool = False,
+    ) -> tuple[TensorBase, TensorBase]:
+        r"""
+        aminmax(input, *, dim=None, keepdim=False, out=None) -> (Tensor min, Tensor max)
+
+        Computes the minimum and maximum values of the :attr:`input` tensor.
+
+        Args:
+            input (Tensor):
+                The input tensor
+
+        Keyword Args:
+            dim (Optional[int]):
+                The dimension along which to compute the values. If `None`,
+                computes the values over the entire :attr:`input` tensor.
+                Default is `None`.
+            keepdim (bool):
+                If `True`, the reduced dimensions will be kept in the output
+                tensor as dimensions with size 1 for broadcasting, otherwise
+                they will be removed, as if calling (:func:`tensorplay.squeeze`).
+                Default is `False`.
+            out (Optional[Tuple[Tensor, Tensor]]):
+                Optional tensors on which to write the result. Must have the same
+                shape and dtype as the expected output.
+                Default is `None`.
+
+        Returns:
+            A named tuple `(min, max)` containing the minimum and maximum values.
+
+        Raises:
+            RuntimeError
+                If any of the dimensions to compute the values over has size 0.
+
+        .. note::
+            NaN values are propagated to the output if at least one value is NaN.
+
+        .. seealso::
+            :func:`tensorplay.amin` computes just the minimum value
+            :func:`tensorplay.amax` computes just the maximum value
+
+        Example::
+
+            >>> tensorplay.aminmax(tensorplay.tensor([1, -3, 5]))
+            tensorplay.return_types.aminmax(
+            min=tensor(-3),
+            max=tensor(5))
+
+            >>> # aminmax propagates NaNs
+            >>> tensorplay.aminmax(tensorplay.tensor([1, -3, 5, tensorplay.nan]))
+            tensorplay.return_types.aminmax(
+            min=tensor(nan),
+            max=tensor(nan))
+
+            >>> t = tensorplay.arange(10).view(2, 5)
+            >>> t
+            tensor([[0, 1, 2, 3, 4],
+                    [5, 6, 7, 8, 9]])
+            >>> t.aminmax(dim=0, keepdim=True)
+            tensorplay.return_types.aminmax(
+            min=tensor([[0, 1, 2, 3, 4]]),
+            max=tensor([[5, 6, 7, 8, 9]]))
+        """
+
     def angle(self) -> TensorBase:
         r"""
         angle(input: Tensor, *, out: Optional[Tensor]) -> Tensor
@@ -2120,6 +2263,66 @@ class TensorBase:
         """
 
     def atanh_(self) -> TensorBase: ...
+    def baddbmm(
+        self,
+        batch1: TensorBase,
+        batch2: TensorBase,
+        *,
+        beta: Number | _complex = 1,
+        alpha: Number | _complex = 1,
+    ) -> TensorBase:
+        r"""
+        baddbmm(input, batch1, batch2, out_dtype=None, *, beta=1, alpha=1, out=None) -> Tensor
+
+        Performs a batch matrix-matrix product of matrices in :attr:`batch1`
+        and :attr:`batch2`.
+        :attr:`input` is added to the final result.
+
+        :attr:`batch1` and :attr:`batch2` must be 3-D tensors each containing the same
+        number of matrices.
+
+        If :attr:`batch1` is a :math:`(b \times n \times m)` tensor, :attr:`batch2` is a
+        :math:`(b \times m \times p)` tensor, then :attr:`input` must be
+        :ref:`broadcastable <broadcasting-semantics>` with a
+        :math:`(b \times n \times p)` tensor and :attr:`out` will be a
+        :math:`(b \times n \times p)` tensor. Both :attr:`alpha` and :attr:`beta` mean the
+        same as the scaling factors used in :meth:`tensorplay.addbmm`.
+
+        .. math::
+            \text{out}_i = \beta\ \text{input}_i + \alpha\ (\text{batch1}_i \mathbin{@} \text{batch2}_i)
+
+        If :attr:`beta` is 0, then the content of :attr:`input` will be ignored, and `nan` and `inf` in
+        it will not be propagated.
+
+        For inputs of type `FloatTensor` or `DoubleTensor`, arguments :attr:`beta` and
+        :attr:`alpha` must be real numbers, otherwise they should be integers.
+
+        This operator supports :ref:`TensorFloat32<tf32_on_ampere>`.
+
+        On certain ROCm devices, when using float16 inputs this module will use :ref:`different precision<fp16_on_mi200>` for backward.
+
+        Args:
+            input (Tensor): the tensor to be added
+            batch1 (Tensor): the first batch of matrices to be multiplied
+            batch2 (Tensor): the second batch of matrices to be multiplied
+            out_dtype (dtype, optional): the dtype of the output tensor,
+                Supported only on CUDA and for tensorplay.float32 given
+                tensorplay.float16/tensorplay.bfloat16 input dtypes
+
+        Keyword args:
+            beta (Number, optional): multiplier for :attr:`input` (:math:`\beta`)
+            alpha (Number, optional): multiplier for :math:`\text{batch1} \mathbin{@} \text{batch2}` (:math:`\alpha`)
+            out (Tensor, optional): the output tensor.
+
+        Example::
+
+            >>> M = tensorplay.randn(10, 3, 5)
+            >>> batch1 = tensorplay.randn(10, 3, 4)
+            >>> batch2 = tensorplay.randn(10, 4, 5)
+            >>> tensorplay.baddbmm(M, batch1, batch2).size()
+            tensorplay.Size([10, 3, 5])
+        """
+
     def baddbmm_(
         self,
         batch1: TensorBase,
@@ -3567,6 +3770,63 @@ class TensorBase:
                     [-0.4169,  0.4169]])
         """
 
+    def cross(self, other: TensorBase, dim: _int | None = None) -> TensorBase:
+        r"""
+        cross(input, other, dim=None, *, out=None) -> Tensor
+
+
+        Returns the cross product of vectors in dimension :attr:`dim` of :attr:`input`
+        and :attr:`other`.
+
+        Supports input of float, double, cfloat and cdouble dtypes. Also supports batches
+        of vectors, for which it computes the product along the dimension :attr:`dim`.
+        In this case, the output has the same batch dimensions as the inputs.
+
+        .. warning::
+            If :attr:`dim` is not given, it defaults to the first dimension found
+            with the size 3. Note that this might be unexpected.
+
+            This behavior is deprecated and will be changed to match that of :func:`tensorplay.linalg.cross`
+            in a future release.
+
+        .. seealso::
+                :func:`tensorplay.linalg.cross` which has dim=-1 as default.
+
+
+        Args:
+            input (Tensor): the input tensor.
+            other (Tensor): the second input tensor
+            dim  (int, optional): the dimension to take the cross-product in.
+
+        Keyword args:
+            out (Tensor, optional): the output tensor.
+
+        Example::
+
+            >>> a = tensorplay.randn(4, 3)
+            >>> a
+            tensor([[-0.3956,  1.1455,  1.6895],
+                    [-0.5849,  1.3672,  0.3599],
+                    [-1.1626,  0.7180, -0.0521],
+                    [-0.1339,  0.9902, -2.0225]])
+            >>> b = tensorplay.randn(4, 3)
+            >>> b
+            tensor([[-0.0257, -1.4725, -1.2251],
+                    [-1.1479, -0.7005, -1.9757],
+                    [-1.3904,  0.3726, -1.1836],
+                    [-0.9688, -0.7153,  0.2159]])
+            >>> tensorplay.cross(a, b, dim=1)
+            tensor([[ 1.0844, -0.5281,  0.6120],
+                    [-2.4490, -1.5687,  1.9792],
+                    [-0.8304, -1.3037,  0.5650],
+                    [-1.2329,  1.9883,  1.0551]])
+            >>> tensorplay.cross(a, b)
+            tensor([[ 1.0844, -0.5281,  0.6120],
+                    [-2.4490, -1.5687,  1.9792],
+                    [-0.8304, -1.3037,  0.5650],
+                    [-1.2329,  1.9883,  1.0551]])
+        """
+
     def crow_indices(self) -> TensorBase: ...
     def cummax(self, dim: _int) -> tuple[TensorBase, TensorBase]:
         r"""
@@ -4065,6 +4325,50 @@ class TensorBase:
             tensor([[0., 1., 0.],
                     [0., 0., 1.],
                     [0., 0., 0.]])
+        """
+
+    def diff(
+        self,
+        n: _int = 1,
+        dim: _int = -1,
+        prepend: TensorBase | None = None,
+        append: TensorBase | None = None,
+    ) -> TensorBase:
+        r"""
+        diff(input, n=1, dim=-1, prepend=None, append=None) -> Tensor
+
+        Computes the n-th forward difference along the given dimension.
+
+        The first-order differences are given by `out[i] = input[i + 1] - input[i]`. Higher-order
+        differences are calculated by using :func:`tensorplay.diff` recursively.
+
+        Args:
+            input (Tensor): the tensor to compute the differences on
+            n (int, optional): the number of times to recursively compute the difference
+            dim (int, optional): the dimension to compute the difference along.
+                Default is the last dimension.
+            prepend, append (Tensor, optional): values to prepend or append to
+                :attr:`input` along :attr:`dim` before computing the difference.
+                Their dimensions must be equivalent to that of input, and their shapes
+                must match input's shape except on :attr:`dim`.
+
+        Keyword args:
+            out (Tensor, optional): the output tensor.
+
+        Example::
+
+            >>> a = tensorplay.tensor([1, 3, 2])
+            >>> tensorplay.diff(a)
+            tensor([ 2, -1])
+            >>> b = tensorplay.tensor([4, 5])
+            >>> tensorplay.diff(a, append=b)
+            tensor([ 2, -1,  2,  1])
+            >>> c = tensorplay.tensor([[1, 2, 3], [3, 4, 5]])
+            >>> tensorplay.diff(c, dim=0)
+            tensor([[2, 2, 2]])
+            >>> tensorplay.diff(c, dim=1)
+            tensor([[1, 1],
+                    [1, 1]])
         """
 
     def digamma(self) -> TensorBase:
@@ -4806,6 +5110,38 @@ class TensorBase:
             >>> tensorplay.flatten(t, start_dim=1)
             tensor([[1, 2, 3, 4],
                     [5, 6, 7, 8]])
+        """
+
+    def flip(self, dims: _size = ()) -> TensorBase:
+        r"""
+        flip(input, dims) -> Tensor
+
+        Reverse the order of an n-D tensor along given axis in dims.
+
+        .. note::
+            `tensorplay.flip` makes a copy of :attr:`input`'s data. This is different from NumPy's `np.flip`,
+            which returns a view in constant time. Since copying a tensor's data is more work than viewing that data,
+            `tensorplay.flip` is expected to be slower than `np.flip`.
+
+        Args:
+            input (Tensor): the input tensor.
+            dims (a list or tuple): axis to flip on
+
+        Example::
+
+            >>> x = tensorplay.arange(8).view(2, 2, 2)
+            >>> x
+            tensor([[[ 0,  1],
+                     [ 2,  3]],
+
+                    [[ 4,  5],
+                     [ 6,  7]]])
+            >>> tensorplay.flip(x, [0, 1])
+            tensor([[[ 6,  7],
+                     [ 4,  5]],
+
+                    [[ 2,  3],
+                     [ 0,  1]]])
         """
 
     def fliplr(self) -> TensorBase:
@@ -5756,6 +6092,107 @@ class TensorBase:
         """
 
     @overload
+    def histogram(
+        self,
+        bins: TensorBase,
+        *,
+        weight: TensorBase | None = None,
+        density: _bool = False,
+    ) -> tuple[TensorBase, TensorBase]:
+        r"""
+        histogram(input, bins, *, range=None, weight=None, density=False, out=None) -> (Tensor, Tensor)
+
+        Computes a histogram of the values in a tensor.
+
+        :attr:`bins` can be an integer or a 1D tensor.
+
+        If :attr:`bins` is an int, it specifies the number of equal-width bins.
+        By default, the lower and upper range of the bins is determined by the
+        minimum and maximum elements of the input tensor. The :attr:`range`
+        argument can be provided to specify a range for the bins.
+
+        If :attr:`bins` is a 1D tensor, it specifies the sequence of bin edges
+        including the rightmost edge. It should contain at least 2 elements
+        and its elements should be increasing.
+
+        Args:
+            input (Tensor): the input tensor.
+            bins: int or 1D Tensor. If int, defines the number of equal-width bins. If tensor,
+                  defines the sequence of bin edges including the rightmost edge.
+
+        Keyword args:
+            range (tuple of float): Defines the range of the bins.
+            weight (Tensor): If provided, weight should have the same shape as input. Each value in
+                             input contributes its associated weight towards its bin's result.
+            density (bool): If False, the result will contain the count (or total weight) in each bin.
+                            If True, the result is the value of the probability density function over the bins,
+                            normalized such that the integral over the range of the bins is 1.
+            out (Tensor, optional): the output tensor. (tuple, optional): The result tuple of two output tensors (hist, bin_edges).
+
+        Returns:
+            hist (Tensor): 1D Tensor containing the values of the histogram.
+            bin_edges(Tensor): 1D Tensor containing the edges of the histogram bins.
+
+        Example::
+
+            >>> tensorplay.histogram(tensorplay.tensor([1., 2, 1]), bins=4, range=(0., 3.), weight=tensorplay.tensor([1., 2., 4.]))
+            (tensor([ 0.,  5.,  2.,  0.]), tensor([0., 0.75, 1.5, 2.25, 3.]))
+            >>> tensorplay.histogram(tensorplay.tensor([1., 2, 1]), bins=4, range=(0., 3.), weight=tensorplay.tensor([1., 2., 4.]), density=True)
+            (tensor([ 0.,  0.9524,  0.3810,  0.]), tensor([0., 0.75, 1.5, 2.25, 3.]))
+        """
+
+    @overload
+    def histogram(
+        self,
+        bins: _int = 100,
+        *,
+        range: Sequence[_float] | None = None,
+        weight: TensorBase | None = None,
+        density: _bool = False,
+    ) -> tuple[TensorBase, TensorBase]:
+        r"""
+        histogram(input, bins, *, range=None, weight=None, density=False, out=None) -> (Tensor, Tensor)
+
+        Computes a histogram of the values in a tensor.
+
+        :attr:`bins` can be an integer or a 1D tensor.
+
+        If :attr:`bins` is an int, it specifies the number of equal-width bins.
+        By default, the lower and upper range of the bins is determined by the
+        minimum and maximum elements of the input tensor. The :attr:`range`
+        argument can be provided to specify a range for the bins.
+
+        If :attr:`bins` is a 1D tensor, it specifies the sequence of bin edges
+        including the rightmost edge. It should contain at least 2 elements
+        and its elements should be increasing.
+
+        Args:
+            input (Tensor): the input tensor.
+            bins: int or 1D Tensor. If int, defines the number of equal-width bins. If tensor,
+                  defines the sequence of bin edges including the rightmost edge.
+
+        Keyword args:
+            range (tuple of float): Defines the range of the bins.
+            weight (Tensor): If provided, weight should have the same shape as input. Each value in
+                             input contributes its associated weight towards its bin's result.
+            density (bool): If False, the result will contain the count (or total weight) in each bin.
+                            If True, the result is the value of the probability density function over the bins,
+                            normalized such that the integral over the range of the bins is 1.
+            out (Tensor, optional): the output tensor. (tuple, optional): The result tuple of two output tensors (hist, bin_edges).
+
+        Returns:
+            hist (Tensor): 1D Tensor containing the values of the histogram.
+            bin_edges(Tensor): 1D Tensor containing the edges of the histogram bins.
+
+        Example::
+
+            >>> tensorplay.histogram(tensorplay.tensor([1., 2, 1]), bins=4, range=(0., 3.), weight=tensorplay.tensor([1., 2., 4.]))
+            (tensor([ 0.,  5.,  2.,  0.]), tensor([0., 0.75, 1.5, 2.25, 3.]))
+            >>> tensorplay.histogram(tensorplay.tensor([1., 2, 1]), bins=4, range=(0., 3.), weight=tensorplay.tensor([1., 2., 4.]), density=True)
+            (tensor([ 0.,  0.9524,  0.3810,  0.]), tensor([0., 0.75, 1.5, 2.25, 3.]))
+        """
+
+    @overload
     def hsplit(self, sections: _int) -> tuple[TensorBase, ...]:
         r"""
         hsplit(input, indices_or_sections) -> List of Tensors
@@ -5883,11 +6320,32 @@ class TensorBase:
         """
 
     def hypot_(self, other: TensorBase) -> TensorBase: ...
+    def i0(self) -> TensorBase:
+        r"""
+        i0(input, *, out=None) -> Tensor
+
+        Alias for :func:`tensorplay.special.i0`.
+        """
+
     def i0_(self) -> TensorBase: ...
     def i0e(self) -> TensorBase: ...
     def i1(self) -> TensorBase: ...
     def i1e(self) -> TensorBase: ...
+    def igamma(self, other: TensorBase) -> TensorBase:
+        r"""
+        igamma(input, other, *, out=None) -> Tensor
+
+        Alias for :func:`tensorplay.special.gammainc`.
+        """
+
     def igamma_(self, other: TensorBase) -> TensorBase: ...
+    def igammac(self, other: TensorBase) -> TensorBase:
+        r"""
+        igammac(input, other, *, out=None) -> Tensor
+
+        Alias for :func:`tensorplay.special.gammaincc`.
+        """
+
     def igammac_(self, other: TensorBase) -> TensorBase: ...
     def imag(self) -> TensorBase:
         r"""
@@ -6244,6 +6702,7 @@ class TensorBase:
         """
 
     def is_pinned(self, device: Device | None = None) -> _bool: ...
+    def is_quantized(self) -> _bool: ...
     def is_same_size(self, other: TensorBase) -> _bool: ...
     def is_set_to(self, tensor: TensorBase) -> _bool: ...
     def is_signed(self) -> _bool: ...
@@ -7119,6 +7578,36 @@ class TensorBase:
             tensor([ 0.1815, -0.8917, -0.3031])
         """
 
+    def logical_and(self, other: TensorBase) -> TensorBase:
+        r"""
+        logical_and(input, other, *, out=None) -> Tensor
+
+        Computes the element-wise logical AND of the given input tensors. Zeros are treated as ``False`` and nonzeros are
+        treated as ``True``.
+
+        Args:
+            input (Tensor): the input tensor.
+            other (Tensor): the tensor to compute AND with
+
+        Keyword args:
+            out (Tensor, optional): the output tensor.
+
+        Example::
+
+            >>> tensorplay.logical_and(tensorplay.tensor([True, False, True]), tensorplay.tensor([True, False, False]))
+            tensor([ True, False, False])
+            >>> a = tensorplay.tensor([0, 1, 10, 0], dtype=tensorplay.int8)
+            >>> b = tensorplay.tensor([4, 0, 1, 0], dtype=tensorplay.int8)
+            >>> tensorplay.logical_and(a, b)
+            tensor([False, False,  True, False])
+            >>> tensorplay.logical_and(a.double(), b.double())
+            tensor([False, False,  True, False])
+            >>> tensorplay.logical_and(a.double(), b)
+            tensor([False, False,  True, False])
+            >>> tensorplay.logical_and(a, b, out=tensorplay.empty(4, dtype=tensorplay.bool))
+            tensor([False, False,  True, False])
+        """
+
     def logical_and_(self, other: TensorBase) -> TensorBase: ...
     def logical_not(self) -> TensorBase:
         r"""
@@ -7805,6 +8294,31 @@ class TensorBase:
         See :func:`tensorplay.maximum`.
         """
 
+    def maximum(self, other: TensorBase) -> TensorBase:
+        r"""
+        maximum(input, other, *, out=None) -> Tensor
+
+        Computes the element-wise maximum of :attr:`input` and :attr:`other`.
+
+        .. note::
+            If one of the elements being compared is a NaN, then that element is returned.
+            :func:`maximum` is not supported for tensors with complex dtypes.
+
+        Args:
+            input (Tensor): the input tensor.
+            other (Tensor): the second input tensor
+
+        Keyword args:
+            out (Tensor, optional): the output tensor.
+
+        Example::
+
+            >>> a = tensorplay.tensor((1, 2, -1))
+            >>> b = tensorplay.tensor((3, 0, 4))
+            >>> tensorplay.maximum(a, b)
+            tensor([3, 2, 4])
+        """
+
     @overload
     def mean(self, *, dtype: _dtype = DType.undefined) -> TensorBase:
         r"""
@@ -8373,6 +8887,31 @@ class TensorBase:
         See :func:`tensorplay.minimum`.
         """
 
+    def minimum(self, other: TensorBase) -> TensorBase:
+        r"""
+        minimum(input, other, *, out=None) -> Tensor
+
+        Computes the element-wise minimum of :attr:`input` and :attr:`other`.
+
+        .. note::
+            If one of the elements being compared is a NaN, then that element is returned.
+            :func:`minimum` is not supported for tensors with complex dtypes.
+
+        Args:
+            input (Tensor): the input tensor.
+            other (Tensor): the second input tensor
+
+        Keyword args:
+            out (Tensor, optional): the output tensor.
+
+        Example::
+
+            >>> a = tensorplay.tensor((1, 2, -1))
+            >>> b = tensorplay.tensor((3, 0, 4))
+            >>> tensorplay.minimum(a, b)
+            tensor([1, 0, -1])
+        """
+
     def mish(self) -> TensorBase: ...
     def mish_(self) -> TensorBase: ...
     def mm(self, mat2: TensorBase) -> TensorBase:
@@ -8815,6 +9354,64 @@ class TensorBase:
     def mul_(self, other: TensorBase) -> TensorBase: ...
     @overload
     def mul_(self, other: Number | _complex) -> TensorBase: ...
+    def multinomial(
+        self,
+        num_samples: _int,
+        replacement: _bool = False,
+        impl: _int = 0,
+    ) -> TensorBase:
+        r"""
+        multinomial(input, num_samples, replacement=False, *, generator=None, out=None) -> LongTensor
+
+        Returns a tensor where each row contains :attr:`num_samples` indices sampled
+        from the multinomial (a stricter definition would be multivariate,
+        refer to :class:`tensorplay.distributions.multinomial.Multinomial` for more details)
+        probability distribution located in the corresponding row
+        of tensor :attr:`input`.
+
+        .. note::
+            The rows of :attr:`input` do not need to sum to one (in which case we use
+            the values as weights), but must be non-negative, finite and have
+            a non-zero sum.
+
+        Indices are ordered from left to right according to when each was sampled
+        (first samples are placed in first column).
+
+        If :attr:`input` is a vector, :attr:`out` is a vector of size :attr:`num_samples`.
+
+        If :attr:`input` is a matrix with `m` rows, :attr:`out` is an matrix of shape
+        :math:`(m \times \text{num\_samples})`.
+
+        If replacement is ``True``, samples are drawn with replacement.
+
+        If not, they are drawn without replacement, which means that when a
+        sample index is drawn for a row, it cannot be drawn again for that row.
+
+        .. note::
+            When drawn without replacement, :attr:`num_samples` must be lower than
+            number of non-zero elements in :attr:`input` (or the min number of non-zero
+            elements in each row of :attr:`input` if it is a matrix).
+
+        Args:
+            input (Tensor): the input tensor containing probabilities
+            num_samples (int): number of samples to draw
+            replacement (bool, optional): whether to draw with replacement or not
+
+        Keyword args:
+            generator (:class:`tensorplay.Generator`, optional): a pseudorandom number generator for sampling
+            out (Tensor, optional): the output tensor.
+
+        Example::
+
+            >>> weights = tensorplay.tensor([0, 10, 3, 0], dtype=tensorplay.float) # create a tensor of weights
+            >>> tensorplay.multinomial(weights, 2)
+            tensor([1, 2])
+            >>> tensorplay.multinomial(weights, 5) # ERROR!
+            RuntimeError: cannot sample n_sample > prob_dist.size(-1) samples without replacement
+            >>> tensorplay.multinomial(weights, 4, replacement=True)
+            tensor([ 2,  1,  1,  1])
+        """
+
     @overload
     def multiply(self, other: TensorBase) -> TensorBase:
         r"""
@@ -9281,6 +9878,50 @@ class TensorBase:
                     [9]])
         """
 
+    def narrow_copy(self, dim: _int, start: _int, length: _int) -> TensorBase:
+        r"""
+        narrow_copy(input, dim, start, length, *, out=None) -> Tensor
+
+        Same as :meth:`Tensor.narrow` except this returns a copy rather
+        than shared storage. This is primarily for sparse tensors, which
+        do not have a shared-storage narrow method.
+
+        Args:
+            input (Tensor): the tensor to narrow
+            dim (int): the dimension along which to narrow
+            start (int): index of the element to start the narrowed dimension from. Can
+                be negative, which means indexing from the end of `dim`
+            length (int): length of the narrowed dimension, must be weakly positive
+
+        Keyword args:
+            out (Tensor, optional): the output tensor.
+
+        Example::
+
+            >>> x = tensorplay.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+            >>> tensorplay.narrow_copy(x, 0, 0, 2)
+            tensor([[ 1,  2,  3],
+                    [ 4,  5,  6]])
+            >>> tensorplay.narrow_copy(x, 1, 1, 2)
+            tensor([[ 2,  3],
+                    [ 5,  6],
+                    [ 8,  9]])
+            >>> s = tensorplay.arange(16).reshape(2, 2, 2, 2).to_sparse(2)
+            >>> tensorplay.narrow_copy(s, 0, 0, 1)
+            tensor(indices=tensor([[0, 0],
+                                   [0, 1]]),
+                   values=tensor([[[0, 1],
+                                   [2, 3]],
+
+                                  [[4, 5],
+                                   [6, 7]]]),
+                   size=(1, 2, 2, 2), nnz=2, layout=tensorplay.sparse_coo)
+
+        .. seealso::
+
+                :func:`tensorplay.narrow` for a non copy variant
+        """
+
     def native_channel_shuffle(self, groups: _int) -> TensorBase: ...
     def ndtr(self) -> TensorBase: ...
     def ndtri(self) -> TensorBase: ...
@@ -9447,6 +10088,12 @@ class TensorBase:
 
     def nextafter_(self, other: TensorBase) -> TensorBase: ...
     def nonzero_numpy(self) -> tuple[TensorBase, ...]: ...
+    def nonzero_static(
+        self,
+        *,
+        size: _int | None = None,
+        fill_value: _int = -1,
+    ) -> TensorBase: ...
     @overload
     def norm(self, p: _float = 2.0) -> TensorBase: ...
     @overload
@@ -10063,6 +10710,7 @@ class TensorBase:
     def q_per_channel_zero_points(self) -> TensorBase: ...
     def q_scale(self) -> _float: ...
     def q_zero_point(self) -> _int: ...
+    def qscheme(self) -> _int: ...
     def quantile(
         self,
         q: _float,
@@ -10709,6 +11357,53 @@ class TensorBase:
 
     def retain_grad(self) -> None: ...
     def retains_grad(self) -> _bool: ...
+    def roll(self, shifts: _size, dims: _size = ()) -> TensorBase:
+        r"""
+        roll(input, shifts, dims=None) -> Tensor
+
+        Roll the tensor :attr:`input` along the given dimension(s). Elements that are
+        shifted beyond the last position are re-introduced at the first position. If
+        :attr:`dims` is `None`, the tensor will be flattened before rolling and then
+        restored to the original shape.
+
+        Args:
+            input (Tensor): the input tensor.
+            shifts (int or tuple of ints): The number of places by which the elements
+                of the tensor are shifted. If shifts is a tuple, dims must be a tuple of
+                the same size, and each dimension will be rolled by the corresponding
+                value
+            dims (int or tuple of ints): Axis along which to roll
+
+        Example::
+
+            >>> x = tensorplay.tensor([1, 2, 3, 4, 5, 6, 7, 8]).view(4, 2)
+            >>> x
+            tensor([[1, 2],
+                    [3, 4],
+                    [5, 6],
+                    [7, 8]])
+            >>> tensorplay.roll(x, 1)
+            tensor([[8, 1],
+                    [2, 3],
+                    [4, 5],
+                    [6, 7]])
+            >>> tensorplay.roll(x, 1, 0)
+            tensor([[7, 8],
+                    [1, 2],
+                    [3, 4],
+                    [5, 6]])
+            >>> tensorplay.roll(x, -1, 0)
+            tensor([[3, 4],
+                    [5, 6],
+                    [7, 8],
+                    [1, 2]])
+            >>> tensorplay.roll(x, shifts=(2, 1), dims=(0, 1))
+            tensor([[6, 5],
+                    [8, 7],
+                    [2, 1],
+                    [4, 3]])
+        """
+
     def rot90(self, k: _int = 1, dims: _size = (0, 1)) -> TensorBase:
         r"""
         rot90(input, k=1, dims=(0, 1)) -> Tensor
@@ -13374,7 +14069,56 @@ class TensorBase:
             tensorplay.Size([5, 2, 2, 3, 1, 1, 3])
         """
 
-    def uniform_(self, from_: _float = 0.0, to: _float = 1.0) -> TensorBase: ...
+    def uniform_(
+        self,
+        from_: _float = 0.0,
+        to: _float = 1.0,
+        *,
+        generator: Generator | None = None,
+    ) -> TensorBase: ...
+    def unsafe_chunk(
+        self,
+        chunks: _int,
+        dim: _int = 0,
+    ) -> tuple[TensorBase, ...]:
+        r"""
+        unsafe_chunk(input, chunks, dim=0) -> List of Tensors
+
+        Works like :func:`tensorplay.chunk` but without enforcing the autograd restrictions
+        on inplace modification of the outputs.
+
+        .. warning::
+            This function is safe to use as long as only the input, or only the outputs
+            are modified inplace after calling this function. It is user's
+            responsibility to ensure that is the case. If both the input and one or more
+            of the outputs are modified inplace, gradients computed by autograd will be
+            silently incorrect.
+        """
+
+    def unsafe_split(
+        self,
+        split_size: _int,
+        dim: _int = 0,
+    ) -> tuple[TensorBase, ...]:
+        r"""
+        unsafe_split(tensor, split_size_or_sections, dim=0) -> List of Tensors
+
+        Works like :func:`tensorplay.split` but without enforcing the autograd restrictions
+        on inplace modification of the outputs.
+
+        .. warning::
+            This function is safe to use as long as only the input, or only the outputs
+            are modified inplace after calling this function. It is user's
+            responsibility to ensure that is the case. If both the input and one or more
+            of the outputs are modified inplace, gradients computed by autograd will be
+            silently incorrect.
+        """
+
+    def unsafe_split_with_sizes(
+        self,
+        split_sizes: _size,
+        dim: _int = 0,
+    ) -> tuple[TensorBase, ...]: ...
     def unsqueeze(self, dim: _int) -> TensorBase:
         r"""
         unsqueeze(input, dim) -> Tensor
@@ -13792,6 +14536,136 @@ class TensorBase:
              tensor([], size=(0, 4)))
         """
 
+    @overload
+    def where(self, input: TensorBase, other: TensorBase) -> TensorBase:
+        r"""
+        where(condition, input, other, *, out=None) -> Tensor
+
+        Return a tensor of elements selected from either :attr:`input` or :attr:`other`, depending on :attr:`condition`.
+
+        The operation is defined as:
+
+        .. math::
+            \text{out}_i = \begin{cases}
+                \text{input}_i & \text{if } \text{condition}_i \\
+                \text{other}_i & \text{otherwise} \\
+            \end{cases}
+
+        .. note::
+            The tensors :attr:`condition`, :attr:`input`, :attr:`other` must be :ref:`broadcastable <broadcasting-semantics>`.
+
+        Arguments:
+            condition (BoolTensor): When True (nonzero), yield input, otherwise yield other
+            input (Tensor or Scalar): value (if :attr:`input` is a scalar) or values selected at indices
+                                  where :attr:`condition` is ``True``
+            other (Tensor or Scalar): value (if :attr:`other` is a scalar) or values selected at indices
+                                  where :attr:`condition` is ``False``
+
+        Keyword args:
+            out (Tensor, optional): the output tensor.
+
+        Returns:
+            Tensor: A tensor of shape equal to the broadcasted shape of :attr:`condition`, :attr:`input`, :attr:`other`
+
+        Example::
+
+            >>> x = tensorplay.randn(3, 2)
+            >>> y = tensorplay.ones(3, 2)
+            >>> x
+            tensor([[-0.4620,  0.3139],
+                    [ 0.3898, -0.7197],
+                    [ 0.0478, -0.1657]])
+            >>> tensorplay.where(x > 0, 1.0, 0.0)
+            tensor([[0., 1.],
+                    [1., 0.],
+                    [1., 0.]])
+            >>> tensorplay.where(x > 0, x, y)
+            tensor([[ 1.0000,  0.3139],
+                    [ 0.3898,  1.0000],
+                    [ 0.0478,  1.0000]])
+            >>> x = tensorplay.randn(2, 2, dtype=tensorplay.double)
+            >>> x
+            tensor([[ 1.0779,  0.0383],
+                    [-0.8785, -1.1089]], dtype=tensorplay.float64)
+            >>> tensorplay.where(x > 0, x, 0.)
+            tensor([[1.0779, 0.0383],
+                    [0.0000, 0.0000]], dtype=tensorplay.float64)
+
+        .. function:: where(condition) -> tuple of LongTensor
+           :noindex:
+
+        ``tensorplay.where(condition)`` is identical to
+        ``tensorplay.nonzero(condition, as_tuple=True)``.
+
+        .. note::
+            See also :func:`tensorplay.nonzero`.
+        """
+
+    @overload
+    def where(self, input: TensorBase, other: Number | _complex) -> TensorBase:
+        r"""
+        where(condition, input, other, *, out=None) -> Tensor
+
+        Return a tensor of elements selected from either :attr:`input` or :attr:`other`, depending on :attr:`condition`.
+
+        The operation is defined as:
+
+        .. math::
+            \text{out}_i = \begin{cases}
+                \text{input}_i & \text{if } \text{condition}_i \\
+                \text{other}_i & \text{otherwise} \\
+            \end{cases}
+
+        .. note::
+            The tensors :attr:`condition`, :attr:`input`, :attr:`other` must be :ref:`broadcastable <broadcasting-semantics>`.
+
+        Arguments:
+            condition (BoolTensor): When True (nonzero), yield input, otherwise yield other
+            input (Tensor or Scalar): value (if :attr:`input` is a scalar) or values selected at indices
+                                  where :attr:`condition` is ``True``
+            other (Tensor or Scalar): value (if :attr:`other` is a scalar) or values selected at indices
+                                  where :attr:`condition` is ``False``
+
+        Keyword args:
+            out (Tensor, optional): the output tensor.
+
+        Returns:
+            Tensor: A tensor of shape equal to the broadcasted shape of :attr:`condition`, :attr:`input`, :attr:`other`
+
+        Example::
+
+            >>> x = tensorplay.randn(3, 2)
+            >>> y = tensorplay.ones(3, 2)
+            >>> x
+            tensor([[-0.4620,  0.3139],
+                    [ 0.3898, -0.7197],
+                    [ 0.0478, -0.1657]])
+            >>> tensorplay.where(x > 0, 1.0, 0.0)
+            tensor([[0., 1.],
+                    [1., 0.],
+                    [1., 0.]])
+            >>> tensorplay.where(x > 0, x, y)
+            tensor([[ 1.0000,  0.3139],
+                    [ 0.3898,  1.0000],
+                    [ 0.0478,  1.0000]])
+            >>> x = tensorplay.randn(2, 2, dtype=tensorplay.double)
+            >>> x
+            tensor([[ 1.0779,  0.0383],
+                    [-0.8785, -1.1089]], dtype=tensorplay.float64)
+            >>> tensorplay.where(x > 0, x, 0.)
+            tensor([[1.0779, 0.0383],
+                    [0.0000, 0.0000]], dtype=tensorplay.float64)
+
+        .. function:: where(condition) -> tuple of LongTensor
+           :noindex:
+
+        ``tensorplay.where(condition)`` is identical to
+        ``tensorplay.nonzero(condition, as_tuple=True)``.
+
+        .. note::
+            See also :func:`tensorplay.nonzero`.
+        """
+
     def xlog1py(self, other: TensorBase) -> TensorBase: ...
     def xlog1py_(self, other: TensorBase) -> TensorBase: ...
     @overload
@@ -13981,7 +14855,6 @@ def from_dlpack(ext_tensor: Any) -> TensorBase: ...
 def to_dlpack(tensor: TensorBase) -> Any: ...
 def as_tensor(data: Any, dtype: _dtype | None = None,
               device: Device | None = None) -> TensorBase: ...
-def item_python(t: TensorBase) -> Any: ...
 def audio_to_tensor(audio: Any) -> TensorBase: ...
 def vision_to_tensor(image: Any) -> TensorBase: ...
 
