@@ -71,7 +71,7 @@ jobs:
       cuda: ${{ steps.read-matrix.outputs.cuda }}
       variants: ${{ steps.read-matrix.outputs.variants }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
           show-progress: false
@@ -143,7 +143,7 @@ jobs:
       version: ${{ steps.version-build.outputs.version || steps.version-upload.outputs.version }}
       build_number: ${{ steps.version-build.outputs.build_number || steps.version-upload.outputs.build_number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
           show-progress: false
