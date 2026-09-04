@@ -1516,11 +1516,92 @@ Tensor nanmedian_cpu(const Tensor& self) {
     }
     DType out_dt = isFloatingType(self.dtype()) ? self.dtype() : DType::Int64;
     if (vals.empty()) {
-        return Tensor::zeros({}, out_dt, self.device());
+        // No usable value: floating output carries NaN, integer output
+        // falls back to the int64 minimum.
+        Tensor out = Tensor::zeros({}, out_dt, self.device());
+        if (isFloatingType(out_dt)) {
+            out.fill_(Scalar(std::numeric_limits<double>::quiet_NaN()));
+        } else {
+            out.fill_(Scalar(std::numeric_limits<int64_t>::min()));
+        }
+        return out;
     }
     std::sort(vals.begin(), vals.end());
     double med = vals[(vals.size() - 1) / 2];
     return Tensor::zeros({}, out_dt, self.device()).fill_(Scalar(med));
+}
+
+std::tuple<Tensor, Tensor> nanmedian_dim_cpu(const Tensor& self, int64_t dim,
+                                             bool keepdim) {
+    // Per-slice median ignoring NaN entries; the lower-middle order
+    // statistic among the non-NaN values, with its first-occurrence index.
+    // An all-NaN (or empty) slice yields NaN at index 0.
+    int64_t nd = self.dim();
+    TP_CHECK(nd > 0, "nanmedian(): expects a tensor with at least one dimension");
+    dim = wrap_dim(dim, nd);
+    TP_CHECK(isFloatingType(self.dtype()),
+             "nanmedian(): only floating point dtypes are supported");
+    Tensor sc = self.contiguous();
+    int64_t d_size = sc.size(dim);
+    TP_CHECK(d_size > 0, "nanmedian(): Expected reduction dim ", dim,
+             " to have non-zero size");
+    int64_t outer = 1, inner = 1;
+    outer_inner(static_cast<std::vector<int64_t>>(sc.shape()), dim, outer, inner);
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < nd; ++i) out_shape.push_back(i == dim ? 1 : sc.size(i));
+    if (!keepdim) out_shape.erase(out_shape.begin() + dim);
+    Tensor vals = Tensor::empty(out_shape, sc.dtype(), sc.device());
+    Tensor idxs = Tensor::empty(out_shape, DType::Int64, sc.device());
+
+#define TP_NM_CASE(ctype, name_) \
+    case DType::name_: { \
+        const ctype* sp = sc.data_ptr<ctype>(); \
+        ctype* vp = vals.data_ptr<ctype>(); \
+        int64_t* ip = idxs.data_ptr<int64_t>(); \
+        parallel_for(0, outer * inner, GRAIN_SIZE, [&](int64_t b, int64_t e) { \
+            std::vector<std::pair<ctype, int64_t>> buf( \
+                static_cast<size_t>(std::max<int64_t>(d_size, 1))); \
+            for (int64_t si = b; si < e; ++si) { \
+                int64_t o = si / inner, in2 = si % inner; \
+                const ctype* s = sp + o * d_size * inner + in2; \
+                int64_t n_valid = 0; \
+                for (int64_t j = 0; j < d_size; ++j) { \
+                    const ctype v = s[j * inner]; \
+                    if (v != v) continue; /* NaN drops out of the order stats */ \
+                    buf[static_cast<size_t>(n_valid++)] = {v, j}; \
+                } \
+                const int64_t oi = keepdim ? si : (o * inner + in2); \
+                if (n_valid == 0) { \
+                    vp[oi] = std::numeric_limits<ctype>::quiet_NaN(); \
+                    ip[oi] = 0; \
+                    continue; \
+                } \
+                std::sort(buf.begin(), buf.begin() + n_valid, \
+                          [](auto& a2, auto& b2) { return a2.first < b2.first; }); \
+                vp[oi] = buf[(n_valid - 1) / 2].first; \
+                ip[oi] = buf[(n_valid - 1) / 2].second; \
+            } \
+        }); \
+        break; \
+    }
+    switch (sc.dtype()) {
+        TP_NM_CASE(float, Float32)
+        TP_NM_CASE(double, Float64)
+        default: TP_THROW(TypeError, "nanmedian: unsupported dtype ",
+                          toString(sc.dtype()));
+    }
+#undef TP_NM_CASE
+    return {vals, idxs};
+}
+
+std::tuple<Tensor, Tensor> nanmedian_dim_values_cpu(const Tensor& self,
+                                                    int64_t dim, bool keepdim,
+                                                    Tensor& values,
+                                                    Tensor& indices) {
+    auto r = nanmedian_dim_cpu(self, dim, keepdim);
+    values = std::get<0>(r);
+    indices = std::get<1>(r);
+    return {values, indices};
 }
 
 std::tuple<Tensor, Tensor> mode_cpu(const Tensor& self, int64_t dim, bool keepdim) {
@@ -2648,6 +2729,7 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("copysign.Scalar", copysign_scalar_cpu);
     m.impl("hypot", hypot_cpu);
     m.impl("atan2", atan2_cpu);
+    m.impl("arctan2", atan2_cpu);
     m.impl("nextafter", nextafter_cpu);
     m.impl("gcd", gcd_cpu);
     m.impl("lcm", lcm_cpu);
@@ -2678,6 +2760,8 @@ TENSORPLAY_LIBRARY_IMPL(CPU, TierOpsKernels) {
     m.impl("logsumexp", logsumexp_cpu);
     m.impl("nansum", nansum_cpu);
     m.impl("nanmedian", nanmedian_cpu);
+    m.impl("nanmedian.dim", nanmedian_dim_cpu);
+    m.impl("nanmedian.dim_values", nanmedian_dim_values_cpu);
     m.impl("cummax", cummax_cpu);
     m.impl("cummin", cummin_cpu);
     m.impl("std_mean", std_mean_cpu);
