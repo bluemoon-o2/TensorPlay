@@ -1402,6 +1402,13 @@ Tensor unfold_backward_cuda(const Tensor& grad, const std::vector<int64_t>& inpu
     return grad_input;
 }
 
+std::tuple<Tensor, Tensor> interop_kthvalue_values_cuda(const Tensor& self, int64_t k, int64_t dim, bool keepdim,
+              Tensor& values, Tensor& indices) {
+        std::tie(values, indices) = kthvalue_cuda(self, k, dim, keepdim);
+        return {values, indices};
+
+}
+
 TENSORPLAY_LIBRARY_IMPL(CUDA, TierReduceOpsKernels) {
     m.impl("amax", amax_cuda2);
     m.impl("amin", amin_cuda2);
@@ -1410,12 +1417,14 @@ TENSORPLAY_LIBRARY_IMPL(CUDA, TierReduceOpsKernels) {
     m.impl("nansum", nansum_cuda2);
     m.impl("nanmedian", nanmedian_cuda);
     m.impl("count_nonzero", count_nonzero_cuda2);
+    m.impl("count_nonzero.dim_IntList", count_nonzero_cuda2);
     m.impl("cummax", cummax_cuda);
     m.impl("cummin", cummin_cuda);
     m.impl("var_mean", var_mean_cuda);
     m.impl("std_mean", std_mean_cuda);
     m.impl("mode", mode_cuda);
     m.impl("kthvalue", kthvalue_cuda);
+    m.impl("kthvalue.values", interop_kthvalue_values_cuda);
     m.impl("renorm", renorm_cuda);
     m.impl("trace", trace_cuda);
     m.impl("diag", diag_cuda);
