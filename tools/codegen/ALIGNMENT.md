@@ -30,7 +30,7 @@
   (apply_op_recursive)改为 TI for_each(字节 stride 双路径:连续快速内层+通用跨步),
   获得维度重排+合并+并行化;g++ -fsyntax-only 通过。
 - 迁移完成(cpu 全量):Arithmetic(binary impl/add_out/add_-mul_-div_ inplace,
-  inplace 经 TI 的 overlap 检查显式放行 out==self)、TierOps、Comparison(含
+  inplace 经 TI 的 overlap 检查显式放行 out==self)、基础数学算子、Comparison(含
   maximum/minimum)、Pointwise(pow);共享 helper 头 p10/include/TensorIteratorOps.h
   (ti_apply_binary / ti_apply_compare);apply_op_recursive 调用点清零。
 - CUDA 审计结论(不迁移,记录理由):cuda/ArithmeticKernels 已是定制 GPU 迭代器
@@ -53,7 +53,7 @@
 ## 【最后一步】验证
 等构建静默 → 单次 `ninja -C build _C -j4` → 校验 `tensorplay/lib/libp10.so` 与
 `tensorplay/_C/*.so` mtime 新于改动源码 → 测试子集:test_ops / test_grad /
-test_op_parity / test_dtype_alignment。
+算子行为 / 梯度 / dtype 回归。
 
 ## 注意
 - 多方并发编辑同一棵树:每次 make/ninja 前必须查进程;出现两个以上同目录构建按 AGENTS.md 清树。
