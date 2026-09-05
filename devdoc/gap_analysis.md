@@ -2059,7 +2059,7 @@ scheduler 并行线新面)随各战役自行收口;create_graph 双反向收窄�
 - **eager 分歧(已修,2026-08-26)**:tp `amax`/`amin` 曾对含 NaN 输入丢弃
   NaN(`v > acc` 对 NaN 恒假),torch 传播 NaN(max 族语义 NaN 视为最大)。
   复现:`tp.amax(tensor([1., nan])) → 1.` vs torch → `nan`。CPU 侧
-  TierOpsKernels amax_cpu/amin_cpu 组合子改为 `(v != v || v > acc)`(与 CUDA
+  ReduceKernels amax_cpu/amin_cpu 组合子改为 `(v != v || v > acc)`(与 CUDA
   slice_max/min_kernel 既有写法逐字对齐);aminmax 复用二者随之修复。
   回归:test_statistical.py::test_amax_amin_nan_propagates(全量/维度/
   NaN 位置无关三态,对拍 torch)。
