@@ -1,7 +1,6 @@
 #pragma once
 // Arch-dispatched intrinsic headers: one include for every platform the CPU
-// vector layer compiles on.  Spellings mirror the dispatch ladder used by the
-// vec layer of the reference framework:
+// vector layer compiles on. The include ladder by platform:
 //   x86/x86-64 (GCC/Clang)  -> <x86intrin.h>
 //   ARM NEON/SVE (Clang)    -> <arm_neon.h> (+ <arm_sve.h>)
 //   ARM NEON (GCC)          -> <arm_neon.h> (+ <arm_sve.h>)
