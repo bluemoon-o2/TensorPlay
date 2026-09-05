@@ -9,6 +9,10 @@
 #include <cstring>
 #include <type_traits>
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
+
 #include "Half.h"
 
 #if defined(__CUDACC__)
@@ -40,6 +44,10 @@ inline TP_F8_HOST_DEVICE float fp8e4m3fn_to_fp32_value(uint8_t input) {
     const uint32_t nonsign = w & UINT32_C(0x7FFFFFFF);
 #if defined(__CUDA_ARCH__)
     uint32_t renorm_shift = __clz(nonsign);
+#elif defined(_MSC_VER) && !defined(__clang__)
+    unsigned long nonsign_bsr;
+    _BitScanReverse(&nonsign_bsr, (unsigned long)nonsign);
+    uint32_t renorm_shift = (uint32_t)nonsign_bsr ^ 31u;
 #else
     uint32_t renorm_shift =
         nonsign != 0 ? (uint32_t)__builtin_clz(nonsign) : sizeof(uint32_t) * 8;
