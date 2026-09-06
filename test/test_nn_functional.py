@@ -709,9 +709,26 @@ def test_linear_cross_entropy_reference_equivalence():
 
 
 def test_grouped_mm_stubs_raise():
-    for fn in (F.grouped_mm, F.scaled_mm, F.scaled_grouped_mm):
+    # grouped_mm is a real op backed by the native grouped GEMM; only the
+    # FP8 variants are stubs in this build.
+    a = np.random.RandomState(0).randn(4, 8).astype(np.float64)
+    b = np.random.RandomState(1).randn(2, 8, 6).astype(np.float64)
+    offs = np.array([2, 4], dtype=np.int64)
+    got = F.grouped_mm(tp.tensor(a), tp.tensor(b), tp.tensor(offs))
+    _assert_close(got, _mm_grouped(a, b, offs))
+
+    for fn in (F.scaled_mm, F.scaled_grouped_mm):
         with pytest.raises(NotImplementedError):
             fn(None)
+
+
+def _mm_grouped(a, b, offs):
+    out = np.zeros((a.shape[0], b.shape[2]))
+    start = 0
+    for g, end in enumerate(offs):
+        out[start:end] = a[start:end] @ b[g]
+        start = end
+    return out
 
 
 def test_in_projection_packed_self_attention():
