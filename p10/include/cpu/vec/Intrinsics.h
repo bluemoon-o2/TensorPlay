@@ -43,7 +43,9 @@
 #include <mmintrin.h>
 #elif defined(__s390x__)
 // targets Z/architecture
-// we will include vecintrin later
+#if defined(__VX__)
+#include <vecintrin.h>
+#endif
 #elif (defined(__GNUC__) || defined(__xlC__)) && \
     (defined(__VEC__) || defined(__ALTIVEC__))
 /* XLC or GCC-compatible compiler, targeting PowerPC with VMX/VSX */
