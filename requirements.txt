@@ -1,4 +1,4 @@
-setuptools>=45.0.0
+setuptools>=84.0.0
 wheel>=0.34.0
 pybind11>=3.1.0
 numpy>=2.0.0
