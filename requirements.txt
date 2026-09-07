@@ -4,5 +4,5 @@ pybind11>=3.1.0
 numpy>=2.0.0
 sympy>=1.13.3
 megatensors>=0.0.5
-tensorboard>=2.11
+tensorboard>=2.21.0
 pillow>=9.0

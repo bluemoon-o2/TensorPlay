@@ -54,11 +54,11 @@ all = [
     "onnx",
     "scipy",
     "soundfile",
-    "tensorboard>=2.11",
+    "tensorboard>=2.21.0",
     "pillow>=9.0"
 ]
 tensorboard = [
-    "tensorboard>=2.11",
+    "tensorboard>=2.21.0",
     "pillow>=9.0"
 ]
 
